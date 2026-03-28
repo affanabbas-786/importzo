@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /c/Users/affan/Desktop/Importzo/importzo -not -path */node_modules/* -not -path */.git/* -type d)",
+      "Bash(npx prisma:*)",
+      "Bash(npx react-router:*)",
+      "Bash(npx shopify:*)",
+      "Bash(ls -la /c/Users/affan/Desktop/Importzo/importzo/*.md)",
+      "Bash(npm run:*)",
+      "Bash(npm install:*)"
+    ]
+  }
+}
