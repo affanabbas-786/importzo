@@ -42,5 +42,6 @@ model ImportJob {
   errorCount   Int      @default(0)
   status       String   @default("pending")
   results      String   @default("[]")
+  importType   String   @default("products")
   createdAt    DateTime @default(now())
 }

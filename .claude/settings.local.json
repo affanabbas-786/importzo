@@ -7,7 +7,9 @@
       "Bash(npx shopify:*)",
       "Bash(ls -la /c/Users/affan/Desktop/Importzo/importzo/*.md)",
       "Bash(npm run:*)",
-      "Bash(npm install:*)"
+      "Bash(npm install:*)",
+      "Bash(PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION=\"yes\" npx prisma db push --force-reset --accept-data-loss 2>&1)",
+      "Bash(npx remix:*)"
     ]
   }
 }

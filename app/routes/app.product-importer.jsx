@@ -881,12 +881,12 @@ export default function ImportPage() {
   );
 
   // ── Theme helpers ──
-  const grad = "linear-gradient(135deg, #0D9488 0%, #0891B2 100%)";
-  const teal = "#0D9488";
+  const primary = "#17320A";
+  const secondary = "#2E6316";
 
   return (
     <s-page
-      heading="Import Products"
+      heading="Product Importer"
       subtitle={steps[step]}
       backAction={JSON.stringify({ content: "Dashboard", url: "/app" })}
     >
@@ -900,16 +900,13 @@ export default function ImportPage() {
           />
           <span
             style={{
-              fontSize: 24,
-              fontWeight: 700,
-              letterSpacing: "-0.02em",
-              background: grad,
-              WebkitBackgroundClip: "text",
-              WebkitTextFillColor: "transparent",
-              textShadow: "0 1px 3px rgba(0,0,0,0.15)",
+              fontSize: 18,
+              fontWeight: 600,
+              color: "#17320A",
+              fontFamily: "'ImportzoFont', sans-serif",
             }}
           >
-            Importzo
+            Product Importer
           </span>
         </div>
 
@@ -936,17 +933,17 @@ export default function ImportPage() {
                       fontWeight: 600,
                       ...(i < step
                         ? {
-                            background: teal,
+                            background: primary,
                             color: "white",
                             boxShadow:
-                              "0 4px 12px rgba(13, 148, 136, 0.4)",
+                              "0 4px 12px rgba(23, 50, 10, 0.3)",
                           }
                         : i === step
                           ? {
-                              background: grad,
+                              background: primary,
                               color: "white",
                               boxShadow:
-                                "0 4px 12px rgba(8, 145, 178, 0.4)",
+                                "0 4px 12px rgba(23, 50, 10, 0.3)",
                             }
                           : {
                               background: "#E5E7EB",
@@ -989,7 +986,7 @@ export default function ImportPage() {
                       marginLeft: 12,
                       marginRight: 12,
                       borderRadius: 1,
-                      background: i < step ? teal : "#e5e7eb",
+                      background: i < step ? primary : "#e5e7eb",
                       transition: "background 0.5s",
                     }}
                   />
@@ -1009,7 +1006,7 @@ export default function ImportPage() {
               <div
                 className={`border-2 border-dashed rounded-xl p-8 sm:p-12 text-center cursor-pointer transition-all duration-200 ${
                   dragOver
-                    ? "border-teal-400 bg-teal-50/50"
+                    ? "border-green-800 bg-green-50/50"
                     : "border-gray-300 hover:border-gray-400 hover:bg-gray-50/50"
                 }`}
                 onDragOver={(e) => {
@@ -1024,13 +1021,13 @@ export default function ImportPage() {
                   <div
                     style={{ width: 64, height: 64, borderRadius: "50%" }}
                     className={`flex items-center justify-center transition-colors ${
-                      dragOver ? "bg-teal-100" : "bg-gray-100"
+                      dragOver ? "bg-green-100" : "bg-gray-100"
                     }`}
                   >
                     <svg
                       width="32"
                       height="32"
-                      className={dragOver ? "text-teal-500" : "text-gray-400"}
+                      className={dragOver ? "text-green-800" : "text-gray-400"}
                       fill="none"
                       viewBox="0 0 24 24"
                       stroke="currentColor"
@@ -1084,13 +1081,13 @@ export default function ImportPage() {
               <div
                 className="rounded-lg px-4 py-3 flex items-center gap-3"
                 style={{
-                  background: "rgba(13, 148, 136, 0.08)",
-                  border: "1px solid rgba(13, 148, 136, 0.25)",
+                  background: "rgba(23, 50, 10, 0.08)",
+                  border: "1px solid rgba(23, 50, 10, 0.25)",
                 }}
               >
                 <svg
                   className="w-5 h-5 flex-shrink-0"
-                  style={{ color: teal }}
+                  style={{ color: primary }}
                   fill="none"
                   viewBox="0 0 24 24"
                   stroke="currentColor"
@@ -1211,7 +1208,7 @@ export default function ImportPage() {
                 style={
                   hasTitleMapped
                     ? {
-                        background: grad,
+                        background: primary,
                         color: "#fff",
                         borderRadius: 8,
                         fontWeight: 600,
@@ -1435,7 +1432,7 @@ export default function ImportPage() {
               <button
                 onClick={handleImport}
                 style={{
-                  background: grad,
+                  background: primary,
                   color: "#fff",
                   borderRadius: 8,
                   fontWeight: 600,
@@ -1462,7 +1459,7 @@ export default function ImportPage() {
                     width="32"
                     height="32"
                     className="animate-spin"
-                    style={{ color: teal }}
+                    style={{ color: primary }}
                     fill="none"
                     viewBox="0 0 24 24"
                   >
@@ -1493,7 +1490,7 @@ export default function ImportPage() {
                 <div className="w-full bg-gray-200 rounded-full h-2.5 overflow-hidden">
                   <div
                     className="h-full rounded-full animate-progress"
-                    style={{ width: "100%", background: grad }}
+                    style={{ width: "100%", background: primary }}
                   />
                 </div>
                 <div className="w-full space-y-3 mt-2">
@@ -1760,7 +1757,7 @@ export default function ImportPage() {
               <button
                 onClick={resetImport}
                 style={{
-                  background: grad,
+                  background: primary,
                   color: "#fff",
                   borderRadius: 8,
                   fontWeight: 600,
