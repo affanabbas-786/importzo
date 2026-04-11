@@ -9,7 +9,15 @@
       "Bash(npm run:*)",
       "Bash(npm install:*)",
       "Bash(PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION=\"yes\" npx prisma db push --force-reset --accept-data-loss 2>&1)",
-      "Bash(npx remix:*)"
+      "Bash(npx remix:*)",
+      "Bash(npx vite:*)",
+      "Bash(wc:*)",
+      "Bash(npx vitest:*)",
+      "Bash(ls C:/Users/affan/Desktop/Importzo/importzo/app/*.server.*)",
+      "Bash(grep:*)",
+      "Bash(sqlite3:*)",
+      "Bash(npx --yes eslint app/routes/app.jsx app/routes/app._index.jsx app/routes/app.settings.jsx app/routes/app.collection-transfer.jsx app/components/FriendlyErrorBoundary.jsx app/components/SupportWidget.jsx app/components/NavProgress.jsx app/lib/safe-db.js app/lib/support.js)",
+      "Bash(npx eslint:*)"
     ]
   }
 }

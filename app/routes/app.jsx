@@ -2,6 +2,9 @@ import { Outlet, useLoaderData, useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
 import { authenticate } from "../shopify.server";
+import { SupportWidget } from "../components/SupportWidget";
+import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
+import { NavProgress } from "../components/NavProgress";
 
 export const loader = async ({ request }) => {
   await authenticate.admin(request);
@@ -15,14 +18,14 @@ export default function App() {
 
   return (
     <AppProvider embedded apiKey={apiKey}>
+      <NavProgress />
       <s-app-nav>
         <s-link href="/app">Dashboard</s-link>
-        <s-link href="/app/product-importer">Product Importer</s-link>
-        <s-link href="/app/customers">Customers</s-link>
-        <s-link href="/app/collections">Collection Importer</s-link>
-        <s-link href="/app/inventory">Inventory Update</s-link>
-        <s-link href="/app/collection-transfer">Collection Transfer</s-link>
-        <s-link href="/app/export">Export Data</s-link>
+        <s-link href="/app/import">Import</s-link>
+        <s-link href="/app/export">Export</s-link>
+        <s-link href="/app/collection-transfer">Transfer Store</s-link>
+        <s-link href="/app/activity">Activity</s-link>
+        <s-link href="/app/settings">Settings</s-link>
       </s-app-nav>
       <Outlet />
       <footer className="py-6 text-center border-t border-gray-100 mt-10">
@@ -44,13 +47,28 @@ export default function App() {
           </p>
         </div>
       </footer>
+      {/* Live chat — loaded once, persists across every page */}
+      <SupportWidget />
     </AppProvider>
   );
 }
 
-// Shopify needs React Router to catch some thrown responses, so that their headers are included in the response.
+// App-level error boundary. Renders the friendly error page without
+// depending on AppProvider — wrapping in AppProvider with an empty
+// apiKey used to crash App Bridge init and cascade into the infamous
+// "Cannot read properties of null (reading 'useContext')" React error.
+// Now we render the friendly UI with plain HTML/Tailwind so it can
+// never fail, and the root ErrorBoundary is the final safety net.
 export function ErrorBoundary() {
-  return boundary.error(useRouteError());
+  const error = useRouteError();
+  return (
+    <FriendlyErrorBoundary
+      heading="Importzo"
+      title="We couldn't load this page"
+      message="Something went wrong on our side. Please try again, or contact support if the issue continues."
+      error={error}
+    />
+  );
 }
 
 export const headers = (headersArgs) => {

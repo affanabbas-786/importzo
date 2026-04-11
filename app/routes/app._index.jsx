@@ -1,140 +1,326 @@
-import { useLoaderData } from "react-router";
+import { useState, useCallback, Fragment } from "react";
+import { useLoaderData, useNavigation, useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
+import { BRAND, JOB_TYPE_CONFIG, JOB_STATUS_MAP } from "../lib/constants";
+import { SUPPORT_EMAIL, mailtoLink, openLiveChat } from "../lib/support";
+import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
 
 export const loader = async ({ request }) => {
   const { session } = await authenticate.admin(request);
-
-  const imports = await prisma.importJob.findMany({
-    where: { shop: session.shop },
-    orderBy: { createdAt: "desc" },
-    take: 20,
-  });
-
+  let imports = [];
+  try {
+    imports = await prisma.importJob.findMany({
+      where: { shop: session.shop },
+      orderBy: { createdAt: "desc" },
+      take: 20,
+    });
+  } catch (err) {
+    console.warn("[importzo] dashboard loader failed:", err?.message || err);
+  }
   return { imports };
 };
 
-const typeConfig = {
-  products: { label: "Products", bg: "bg-green-50", text: "text-green-700", border: "border-green-200" },
-  customers: { label: "Customers", bg: "bg-blue-50", text: "text-blue-700", border: "border-blue-200" },
-  collections: { label: "Collections", bg: "bg-purple-50", text: "text-purple-700", border: "border-purple-200" },
-  inventory: { label: "Inventory", bg: "bg-amber-50", text: "text-amber-700", border: "border-amber-200" },
-};
+const { primary, secondary, font } = BRAND;
+
+// ── Helpers ──
+// Job `results` JSON can take two shapes:
+//   • Import jobs  → plain array of row records   [{ row, title, status, error }, ...]
+//   • Transfer jobs → keyed object per module     { collections: { items: [...] }, products: { results: [...] }, themes: { results: [...] } }
+// This normalizer flattens both into a uniform array so the Dashboard can
+// render a single error list and CSV export without special-casing callers.
+function normalizeResults(raw) {
+  if (!raw) return [];
+  let parsed;
+  try { parsed = typeof raw === "string" ? JSON.parse(raw) : raw; } catch { return []; }
+  if (Array.isArray(parsed)) return parsed;
+  if (parsed && typeof parsed === "object") {
+    const collected = [];
+    for (const [sectionKey, section] of Object.entries(parsed)) {
+      if (!section || typeof section !== "object") continue;
+      const arrays = [];
+      if (Array.isArray(section)) arrays.push(section);
+      if (Array.isArray(section.items)) arrays.push(section.items);
+      if (Array.isArray(section.results)) arrays.push(section.results);
+      if (Array.isArray(section.errors)) arrays.push(section.errors);
+      if (Array.isArray(section.failures)) arrays.push(section.failures);
+      for (const arr of arrays) {
+        for (const item of arr) {
+          if (item && typeof item === "object") {
+            collected.push({ ...item, _section: sectionKey });
+          }
+        }
+      }
+    }
+    return collected;
+  }
+  return [];
+}
+
+function downloadErrorCSV(job) {
+  try {
+    const results = normalizeResults(job.results);
+    const errors = results.filter((r) => r && (r.status === "error" || r.status === "not_found"));
+    if (errors.length === 0) return;
+    const rows = [["Row", "Title/SKU", "Status", "Error"]];
+    errors.forEach((e) => {
+      rows.push([
+        String(e.row || ""),
+        (e.title || e.sku || "").replace(/"/g, '""'),
+        e.status || "",
+        (e.error || "").replace(/"/g, '""'),
+      ]);
+    });
+    const csv = rows.map((r) => r.map((c) => `"${c}"`).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `errors-${job.fileName.replace(/\.csv$/i, "")}-${job.id.slice(0, 8)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch { /* silently fail */ }
+}
+
+// ── Status Badge ──
+function JobStatusBadge({ status }) {
+  const s = JOB_STATUS_MAP[status] || JOB_STATUS_MAP.pending;
+  return (
+    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${s.bg} ${s.text} whitespace-nowrap`}>
+      <span className={`w-1.5 h-1.5 rounded-full ${s.dot}`} />{s.label}
+    </span>
+  );
+}
+
+// ── Expanded detail row ──
+function DetailPanel({ job }) {
+  const results = normalizeResults(job.results);
+  const errors = results.filter((r) => r && (r.status === "error" || r.status === "not_found"));
+  const successes = results.filter((r) => r && (r.status === "success" || r.status === "updated" || r.status === "created"));
+
+  return (
+    <div className="px-6 py-4 bg-gray-50/70 border-t border-gray-100 space-y-3">
+      <div className="flex items-center gap-4 text-xs text-gray-500 flex-wrap">
+        <span>Job ID: <span className="font-mono text-gray-600">{job.id.slice(0, 8)}</span></span>
+        <span>File: <span className="font-medium text-gray-700">{job.fileName}</span></span>
+        <span>Total rows: <span className="font-medium text-gray-700">{job.totalRows}</span></span>
+      </div>
+
+      {errors.length > 0 && (
+        <div className="bg-white rounded-lg border border-red-100 overflow-hidden">
+          <div className="px-4 py-2 bg-red-50/60 border-b border-red-100 flex items-center justify-between">
+            <span className="text-xs font-semibold text-red-700">{errors.length} Error{errors.length !== 1 ? "s" : ""}</span>
+            <button
+              onClick={() => downloadErrorCSV(job)}
+              className="text-xs font-medium text-red-600 hover:text-red-800 underline underline-offset-2"
+            >
+              Download CSV
+            </button>
+          </div>
+          <div className="max-h-[160px] overflow-auto">
+            <table className="w-full">
+              <tbody className="divide-y divide-red-50">
+                {errors.slice(0, 10).map((e, i) => (
+                  <tr key={i}>
+                    <td className="px-4 py-1.5 text-xs text-gray-400 w-10">#{e.row}</td>
+                    <td className="px-4 py-1.5 text-xs font-medium text-gray-700 max-w-[140px] truncate">{e.title || e.sku || "\u2014"}</td>
+                    <td className="px-4 py-1.5 text-xs text-red-600 break-words">{e.error || "Not found"}</td>
+                  </tr>
+                ))}
+                {errors.length > 10 && (
+                  <tr><td colSpan={3} className="px-4 py-1.5 text-xs text-gray-400">+{errors.length - 10} more errors</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {successes.length > 0 && (
+        <p className="text-xs text-green-700">
+          {successes.length} record{successes.length !== 1 ? "s" : ""} processed successfully.
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Dashboard
+// ═══════════════════════════════════════════════════════════════════
+// Pulse skeleton block
+function Skeleton({ className = "" }) {
+  return <div className={`animate-pulse rounded-lg bg-gray-200 ${className}`} />;
+}
+
+function DashboardSkeleton() {
+  return (
+    <s-page heading="Dashboard">
+      <div className="space-y-6">
+        {/* Header */}
+        <div className="flex items-center gap-3.5">
+          <Skeleton className="w-10 h-10 rounded-lg" />
+          <Skeleton className="h-5 w-32" />
+        </div>
+        {/* Action cards */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          {[1, 2, 3].map((i) => (
+            <div key={i} className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm flex items-start gap-4">
+              <Skeleton className="w-11 h-11 rounded-xl" />
+              <div className="flex-1 space-y-2">
+                <Skeleton className="h-4 w-24" />
+                <Skeleton className="h-3 w-40" />
+              </div>
+            </div>
+          ))}
+        </div>
+        {/* Stats */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          {[1, 2, 3, 4].map((i) => (
+            <div key={i} className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
+              <div className="flex items-center gap-3">
+                <Skeleton className="w-9 h-9 rounded-lg" />
+                <div className="space-y-1.5">
+                  <Skeleton className="h-5 w-12" />
+                  <Skeleton className="h-2.5 w-20" />
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+        {/* Table */}
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+          <Skeleton className="h-4 w-32 mb-4" />
+          <div className="space-y-3">
+            {[1, 2, 3].map((i) => <Skeleton key={i} className="h-10 w-full" />)}
+          </div>
+        </div>
+      </div>
+    </s-page>
+  );
+}
 
 export default function Dashboard() {
   const { imports } = useLoaderData();
+  const navigation = useNavigation();
+  const [expanded, setExpanded] = useState({});
 
-  const totalImports = imports.length;
-  const totalRecords = imports.reduce((sum, i) => sum + i.successCount, 0);
-  const totalErrors = imports.reduce((sum, i) => sum + i.errorCount, 0);
+  const toggle = useCallback((id) => {
+    setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
+  }, []);
+
+  // Show skeleton when navigating to this page (reload / first load)
+  if (navigation.state === "loading" && navigation.location?.pathname === "/app") {
+    return <DashboardSkeleton />;
+  }
+
+  // Stats
+  const totalJobs = imports.length;
+  const totalRecords = imports.reduce((s, i) => s + i.successCount + i.errorCount, 0);
+  const totalFailed = imports.filter((i) => i.status === "failed").length;
   const successRate =
-    totalRecords + totalErrors > 0
-      ? Math.round((totalRecords / (totalRecords + totalErrors)) * 100)
+    totalRecords > 0
+      ? Math.round(imports.reduce((s, i) => s + i.successCount, 0) / totalRecords * 100)
       : 100;
-
-  const primary = "#17320A";
-  const secondary = "#2E6316";
-  const font = "'ImportzoFont', sans-serif";
 
   return (
     <s-page heading="Dashboard">
       <div className="space-y-6 animate-fade-in">
-        {/* Page Header */}
-        <div className="flex items-center justify-between flex-wrap gap-4 animate-slide-up">
-          <div className="flex items-center gap-3.5">
-            <img
-              src="/logo.png"
-              alt="Importzo"
-              style={{ height: 40, width: "auto", objectFit: "contain" }}
-            />
-            <span style={{ fontSize: 18, fontWeight: 600, color: "#17320A", fontFamily: font }}>Dashboard</span>
-          </div>
+        {/* ── Header ── */}
+        <div className="flex items-center gap-3.5">
+          <img src="/logo.png" alt="Importzo" style={{ height: 40, width: "auto", objectFit: "contain" }} />
+          <span style={{ fontSize: 18, fontWeight: 600, color: primary, fontFamily: font }}>Dashboard</span>
+        </div>
+
+        {/* ── 3 Primary Action Cards ── */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <a
-            href="/app/product-importer"
-            className="inline-flex items-center gap-2 px-5 py-2.5 text-white text-sm shadow-md transition-all duration-200 active:scale-[0.97] hover:brightness-110"
-            style={{ background: primary, fontWeight: 600, borderRadius: 8, fontFamily: font }}
+            href="/app/import"
+            className="group bg-white rounded-xl border border-gray-200 p-5 shadow-sm hover:shadow-lg transition-all duration-200 hover:-translate-y-1 flex items-start gap-4"
           >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+            <div className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0 transition-colors" style={{ background: "rgba(23,50,10,0.08)", color: secondary }}>
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+              </svg>
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-semibold text-gray-900" style={{ fontFamily: font }}>Import Data</p>
+              <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">Products, collections, inventory &amp; more</p>
+            </div>
+            <svg className="w-4 h-4 text-gray-300 group-hover:text-gray-500 mt-0.5 flex-shrink-0 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
             </svg>
-            New Import
+          </a>
+
+          <a
+            href="/app/export"
+            className="group bg-white rounded-xl border border-gray-200 p-5 shadow-sm hover:shadow-lg transition-all duration-200 hover:-translate-y-1 flex items-start gap-4"
+          >
+            <div className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: "rgba(23,50,10,0.08)", color: secondary }}>
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12M12 16.5V3" />
+              </svg>
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-semibold text-gray-900" style={{ fontFamily: font }}>Export Data</p>
+              <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">Download your store data as CSV</p>
+            </div>
+            <svg className="w-4 h-4 text-gray-300 group-hover:text-gray-500 mt-0.5 flex-shrink-0 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+            </svg>
+          </a>
+
+          <a
+            href="/app/collection-transfer"
+            className="group bg-white rounded-xl border border-gray-200 p-5 shadow-sm hover:shadow-lg transition-all duration-200 hover:-translate-y-1 flex items-start gap-4"
+          >
+            <div className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: "rgba(23,50,10,0.08)", color: secondary }}>
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 21L3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5" />
+              </svg>
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-semibold text-gray-900" style={{ fontFamily: font }}>Transfer Store</p>
+              <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">Move data between Shopify stores</p>
+            </div>
+            <svg className="w-4 h-4 text-gray-300 group-hover:text-gray-500 mt-0.5 flex-shrink-0 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+            </svg>
           </a>
         </div>
 
-        {/* Quick Actions */}
-        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+        {/* ── Summary Stats ── */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           {[
-            { href: "/app/product-importer", label: "Product Importer", icon: "M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" },
-            { href: "/app/customers", label: "Customers", icon: "M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z" },
-            { href: "/app/collections", label: "Collection Importer", icon: "M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" },
-            { href: "/app/collection-transfer", label: "Collection Transfer", icon: "M7.5 21L3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5" },
-            { href: "/app/inventory", label: "Inventory Update", icon: "M3.75 12h16.5m-16.5 3.75h16.5M3.75 19.5h16.5M5.625 4.5h12.75a1.875 1.875 0 010 3.75H5.625a1.875 1.875 0 010-3.75z" },
-          ].map((item) => (
-            <a
-              key={item.label}
-              href={item.href}
-              className="flex items-center gap-2.5 px-4 py-3 bg-white rounded-xl border border-gray-200 shadow-sm hover:shadow-md transition-all duration-200 hover:-translate-y-0.5"
-            >
-              <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: "rgba(23,50,10,0.08)", color: secondary }}>
-                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d={item.icon} />
-                </svg>
+            { label: "Total Jobs", value: totalJobs, icon: "M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z", iconBg: "rgba(23,50,10,0.08)", iconColor: primary },
+            { label: "Records Processed", value: totalRecords, icon: "M3.75 12h16.5m-16.5 3.75h16.5M3.75 19.5h16.5M5.625 4.5h12.75a1.875 1.875 0 010 3.75H5.625a1.875 1.875 0 010-3.75z", iconBg: "rgba(37,99,235,0.08)", iconColor: "#2563EB" },
+            { label: "Failed Jobs", value: totalFailed, icon: "M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z", iconBg: totalFailed > 0 ? "rgba(239,68,68,0.08)" : "rgba(156,163,175,0.08)", iconColor: totalFailed > 0 ? "#EF4444" : "#9CA3AF" },
+            { label: "Success Rate", value: `${successRate}%`, icon: "M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z", iconBg: "rgba(16,185,129,0.08)", iconColor: "#10B981" },
+          ].map((stat) => (
+            <div key={stat.label} className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background: stat.iconBg }}>
+                  <svg style={{ color: stat.iconColor, width: 18, height: 18 }} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d={stat.icon} />
+                  </svg>
+                </div>
+                <div className="min-w-0">
+                  <p className="text-xl font-bold text-gray-900 leading-tight">{stat.value}</p>
+                  <p className="text-[10px] font-medium text-gray-400 uppercase tracking-wider mt-0.5">{stat.label}</p>
+                </div>
               </div>
-              <span className="text-sm font-medium text-gray-700" style={{ fontFamily: font }}>{item.label}</span>
-            </a>
+            </div>
           ))}
         </div>
 
-        {/* Stats Cards */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm hover:shadow-md transition-all duration-200 hover:-translate-y-0.5 animate-slide-up stagger-1">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-lg flex items-center justify-center" style={{ background: "rgba(23,50,10,0.08)" }}>
-                <svg className="w-5 h-5" style={{ color: primary }} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                </svg>
-              </div>
-              <div>
-                <p className="text-2xl font-bold text-gray-900">{totalImports}</p>
-                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Total Imports</p>
-              </div>
-            </div>
-          </div>
-
-          <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm hover:shadow-md transition-all duration-200 hover:-translate-y-0.5 animate-slide-up stagger-2">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-lg bg-green-50 flex items-center justify-center">
-                <svg className="w-5 h-5 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-              </div>
-              <div>
-                <p className="text-2xl font-bold text-gray-900">{totalRecords}</p>
-                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Records Created</p>
-              </div>
-            </div>
-          </div>
-
-          <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm hover:shadow-md transition-all duration-200 hover:-translate-y-0.5 animate-slide-up stagger-3">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-lg bg-emerald-50 flex items-center justify-center">
-                <svg className="w-5 h-5 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-              </div>
-              <div>
-                <p className="text-2xl font-bold text-gray-900">{successRate}%</p>
-                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Success Rate</p>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Import History */}
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden animate-slide-up stagger-4">
-          <div className="px-6 py-4 border-b border-gray-100">
-            <h2 className="text-base font-semibold text-gray-900" style={{ fontFamily: font }}>Import History</h2>
+        {/* ── Recent Activity ── */}
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+            <h2 className="text-base font-semibold text-gray-900" style={{ fontFamily: font }}>Recent Activity</h2>
+            {imports.length > 0 && (
+              <a href="/app/activity" className="text-xs font-medium hover:underline" style={{ color: secondary }}>View all</a>
+            )}
           </div>
 
           {imports.length === 0 ? (
@@ -144,102 +330,127 @@ export default function Dashboard() {
                   <path strokeLinecap="round" strokeLinejoin="round" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4" />
                 </svg>
               </div>
-              <p className="text-sm text-gray-500 mb-4">No imports yet. Start by importing your first CSV file.</p>
+              <p className="text-sm font-medium text-gray-700 mb-1">No activity yet</p>
+              <p className="text-xs text-gray-400 mb-5">Import your first CSV file to get started.</p>
               <a
-                href="/app/product-importer"
-                className="inline-flex items-center gap-2 px-4 py-2 text-white text-sm rounded-lg transition-all hover:brightness-110"
-                style={{ background: primary, fontWeight: 600, borderRadius: 8, fontFamily: font }}
+                href="/app/import"
+                className="inline-flex items-center gap-2 px-5 py-2.5 text-white text-sm rounded-lg transition-all hover:brightness-110"
+                style={{ background: primary, fontWeight: 600, fontFamily: font }}
               >
-                Import Products
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+                </svg>
+                Start Importing
               </a>
             </div>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full">
+              <table className="w-full table-fixed">
+                <colgroup>
+                  <col style={{ width: 140 }} />
+                  <col style={{ width: 120 }} />
+                  <col />
+                  <col style={{ width: 100 }} />
+                  <col style={{ width: 150 }} />
+                  <col style={{ width: 120 }} />
+                  <col style={{ width: 130 }} />
+                </colgroup>
                 <thead>
                   <tr className="bg-gray-50/80">
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Date</th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Type</th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">File</th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Records</th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Result</th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
+                    <th className="px-5 py-3 text-left text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Date</th>
+                    <th className="px-5 py-3 text-left text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Type</th>
+                    <th className="px-5 py-3 text-left text-[10px] font-semibold text-gray-400 uppercase tracking-wider">File / Source</th>
+                    <th className="px-5 py-3 text-left text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Records</th>
+                    <th className="px-5 py-3 text-left text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Result</th>
+                    <th className="px-5 py-3 text-left text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Status</th>
+                    <th className="px-5 py-3 text-right text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {imports.map((job) => {
-                    const tc = typeConfig[job.importType] || typeConfig.products;
+                    const tc = JOB_TYPE_CONFIG[job.importType] || JOB_TYPE_CONFIG.products;
+                    const hasErrors = job.errorCount > 0;
+                    const isOpen = expanded[job.id];
                     return (
-                      <tr key={job.id} className="hover:bg-gray-50/50 transition-colors">
-                        <td className="px-6 py-3.5 text-sm text-gray-600 whitespace-nowrap">
-                          {new Date(job.createdAt).toLocaleDateString("en-US", {
-                            month: "short",
-                            day: "numeric",
-                            hour: "2-digit",
-                            minute: "2-digit",
-                          })}
-                        </td>
-                        <td className="px-6 py-3.5">
-                          <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${tc.bg} ${tc.text}`}>
-                            {tc.label}
-                          </span>
-                        </td>
-                        <td className="px-6 py-3.5">
-                          <span className="text-sm font-medium text-gray-900">{job.fileName}</span>
-                        </td>
-                        <td className="px-6 py-3.5">
-                          <span className="text-sm text-gray-600">
-                            {job.successCount}
-                            <span className="text-gray-400"> / {job.totalRows}</span>
-                          </span>
-                        </td>
-                        <td className="px-6 py-3.5">
-                          <div className="flex items-center gap-2">
-                            {job.successCount > 0 && (
-                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-50 text-green-700">
-                                {job.successCount} ok
-                              </span>
-                            )}
-                            {job.errorCount > 0 && (
-                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-red-50 text-red-700">
-                                {job.errorCount} err
-                              </span>
-                            )}
-                          </div>
-                        </td>
-                        <td className="px-6 py-3.5">
-                          {job.status === "completed" && (
-                            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-green-50 text-green-700">
-                              <span className="w-1.5 h-1.5 rounded-full bg-green-500"></span>
-                              Completed
+                      <Fragment key={job.id}>
+                        <tr className={`group hover:bg-gray-50/50 transition-colors ${isOpen ? "bg-gray-50/30" : ""}`}>
+                          <td className="px-5 py-3.5 text-sm text-gray-500 align-middle whitespace-nowrap">
+                            {new Date(job.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                          </td>
+                          <td className="px-5 py-3.5 align-middle">
+                            <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${tc.bg} ${tc.text} whitespace-nowrap`}>
+                              {tc.label}
                             </span>
-                          )}
-                          {job.status === "completed_with_errors" && (
-                            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-50 text-amber-700">
-                              <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
-                              Partial
+                          </td>
+                          <td className="px-5 py-3.5 align-middle">
+                            <span className="text-sm font-medium text-gray-900 truncate block" title={job.fileName}>{job.fileName}</span>
+                          </td>
+                          <td className="px-5 py-3.5 align-middle">
+                            <span className="text-sm text-gray-600 whitespace-nowrap">
+                              {job.successCount}<span className="text-gray-400">/{job.totalRows}</span>
                             </span>
-                          )}
-                          {job.status === "failed" && (
-                            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-red-50 text-red-700">
-                              <span className="w-1.5 h-1.5 rounded-full bg-red-500"></span>
-                              Failed
-                            </span>
-                          )}
-                          {job.status === "pending" && (
-                            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-gray-50 text-gray-600">
-                              <span className="w-1.5 h-1.5 rounded-full bg-gray-400"></span>
-                              Pending
-                            </span>
-                          )}
-                          {job.status === "importing" && (
-                            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-green-50 text-green-700">
-                              <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span>
-                              Importing
-                            </span>
-                          )}
-                        </td>
-                      </tr>
+                          </td>
+                          <td className="px-5 py-3.5 align-middle">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              {job.successCount > 0 && (
+                                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-green-50 text-green-700 whitespace-nowrap">
+                                  {job.successCount} ok
+                                </span>
+                              )}
+                              {hasErrors && (
+                                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-50 text-red-700 whitespace-nowrap">
+                                  {job.errorCount} err
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                          <td className="px-5 py-3.5 align-middle">
+                            <JobStatusBadge status={job.status} />
+                          </td>
+                          <td className="px-5 py-3.5 align-middle">
+                            <div className="flex items-center justify-end gap-1">
+                              <button
+                                onClick={() => toggle(job.id)}
+                                title={isOpen ? "Hide details" : "View details"}
+                                className={`p-1.5 rounded-md transition-colors ${isOpen ? "bg-gray-200 text-gray-700" : "text-gray-400 hover:text-gray-600 hover:bg-gray-100"}`}
+                              >
+                                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                  <path strokeLinecap="round" strokeLinejoin="round" d={isOpen ? "M5 15l7-7 7 7" : "M19 9l-7 7-7-7"} />
+                                </svg>
+                              </button>
+                              {(job.status === "failed" || job.status === "completed_with_errors") && (
+                                <a
+                                  href={tc.route}
+                                  title="Retry import"
+                                  className="p-1.5 rounded-md text-gray-400 hover:text-amber-600 hover:bg-amber-50 transition-colors"
+                                >
+                                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182" />
+                                  </svg>
+                                </a>
+                              )}
+                              {hasErrors && (
+                                <button
+                                  onClick={() => downloadErrorCSV(job)}
+                                  title="Download error report"
+                                  className="p-1.5 rounded-md text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors"
+                                >
+                                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12M12 16.5V3" />
+                                  </svg>
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                        {isOpen && (
+                          <tr>
+                            <td colSpan={7} className="p-0">
+                              <DetailPanel job={job} />
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
                     );
                   })}
                 </tbody>
@@ -247,11 +458,65 @@ export default function Dashboard() {
             </div>
           )}
         </div>
+
+        {/* ── Need Help? Support card ── */}
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5 sm:p-6">
+          <div className="flex items-start gap-4 flex-wrap">
+            <div
+              className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0"
+              style={{ background: "rgba(23,50,10,0.08)", color: secondary }}
+            >
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827v.75M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9 5.25h.008v.008H12v-.008z" />
+              </svg>
+            </div>
+            <div className="flex-1 min-w-[200px]">
+              <p className="text-sm font-semibold text-gray-900" style={{ fontFamily: font }}>Need help?</p>
+              <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">
+                Our team is here — email us, open a live chat, or report an issue. We reply fast.
+              </p>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <a
+                href={mailtoLink("Importzo — I need help")}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 transition-colors"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75" />
+                </svg>
+                Email Support
+              </a>
+              <button
+                type="button"
+                onClick={openLiveChat}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg text-white hover:brightness-110 transition-all shadow-sm"
+                style={{ background: primary }}
+              >
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12.76c0 1.6 1.123 2.994 2.707 3.227 1.068.157 2.148.279 3.238.364.466.037.893.281 1.153.671l1.72 2.58a.75.75 0 001.248 0l1.72-2.58a2.25 2.25 0 011.152-.67c1.09-.086 2.17-.208 3.238-.365 1.585-.233 2.708-1.626 2.708-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0012 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018z" />
+                </svg>
+                Live Chat
+              </button>
+            </div>
+          </div>
+          <p className="text-[11px] text-gray-400 mt-4">
+            Direct email: <a href={mailtoLink()} className="font-medium hover:underline" style={{ color: secondary }}>{SUPPORT_EMAIL}</a>
+          </p>
+        </div>
       </div>
     </s-page>
   );
 }
 
-export const headers = (headersArgs) => {
-  return boundary.headers(headersArgs);
-};
+export function ErrorBoundary() {
+  const error = useRouteError();
+  return (
+    <FriendlyErrorBoundary
+      heading="Dashboard"
+      title="We couldn't load your Dashboard"
+      message="Please try again. Your existing data is safe — this is just a display issue."
+      error={error}
+    />
+  );
+}
+export const headers = (headersArgs) => boundary.headers(headersArgs);

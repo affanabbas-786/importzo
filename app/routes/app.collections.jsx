@@ -1,37 +1,13 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-import { useFetcher } from "react-router";
+import { useFetcher, useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate, apiVersion } from "../shopify.server";
 import prisma from "../db.server";
-
-function parseCSV(text) {
-  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-  text = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-  const firstLine = text.split("\n")[0] || "";
-  let delimiter = ",";
-  const counts = { ",": 0, ";": 0, "\t": 0 };
-  let q = false;
-  for (let c = 0; c < firstLine.length; c++) {
-    if (firstLine[c] === '"') q = !q;
-    if (!q && counts[firstLine[c]] !== undefined) counts[firstLine[c]]++;
-  }
-  if (counts["\t"] > counts[","] && counts["\t"] >= counts[";"]) delimiter = "\t";
-  else if (counts[";"] > counts[","] && counts[";"] > counts["\t"]) delimiter = ";";
-  const rows = [];
-  let fields = [];
-  let current = "";
-  let inQuotes = false;
-  for (let i = 0; i < text.length; i++) {
-    const char = text[i];
-    if (char === '"') { if (inQuotes && text[i + 1] === '"') { current += '"'; i++; } else inQuotes = !inQuotes; }
-    else if (char === delimiter && !inQuotes) { fields.push(current.trim()); current = ""; }
-    else if (char === "\n" && !inQuotes) { fields.push(current.trim()); current = ""; if (fields.some((f) => f !== "")) rows.push(fields); fields = []; }
-    else current += char;
-  }
-  if (current || fields.length > 0) { fields.push(current.trim()); if (fields.some((f) => f !== "")) rows.push(fields); }
-  return rows;
-}
+import { parseCSV } from "../lib/csv-parser";
+import { smartMapColumns, COLLECTION_ALIASES, confidenceLevel, confidenceColor } from "../lib/smart-mapper";
+import { FileSourcePicker, AISummary, generateMappingSummary, generateImportResultSummary } from "../components/ui";
+import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
 
 const COLLECTION_FIELDS = [
   { value: "", label: "-- Skip --" },
@@ -44,55 +20,8 @@ const COLLECTION_FIELDS = [
   { value: "rules_column", label: "Smart Rules (column:relation:condition)" },
 ];
 
-function similarity(a, b) {
-  a = a.toLowerCase().replace(/[^a-z0-9]/g, "");
-  b = b.toLowerCase().replace(/[^a-z0-9]/g, "");
-  if (!a || !b) return 0;
-  if (a === b) return 1.0;
-  if (a.includes(b) || b.includes(a)) return 0.9;
-  const triA = new Set(), triB = new Set();
-  for (let i = 0; i <= a.length - 2; i++) triA.add(a.slice(i, i + 2));
-  for (let i = 0; i <= b.length - 2; i++) triB.add(b.slice(i, i + 2));
-  if (triA.size === 0 || triB.size === 0) return 0;
-  let inter = 0;
-  for (const t of triA) if (triB.has(t)) inter++;
-  return inter / Math.max(triA.size, triB.size);
-}
-
-function autoDetectMapping(headers) {
-  const mapping = {};
-  const confidence = {};
-  const patterns = {
-    title: ["title", "name", "collectionname", "collectiontitle"],
-    body_html: ["bodyhtml", "body", "description", "desc", "html"],
-    image_url: ["image", "imageurl", "imagesrc", "img", "photo", "thumbnail"],
-    sort_order: ["sortorder", "sort", "order", "ordering"],
-    published: ["published", "status", "active", "visible"],
-    collection_type: ["type", "collectiontype", "kind"],
-    rules_column: ["rules", "smartrules", "conditions", "rule"],
-  };
-  const usedFields = new Set();
-  headers.forEach((header, index) => {
-    let bestField = "";
-    let bestScore = 0;
-    const norm = header.toLowerCase().replace(/[^a-z0-9]/g, "");
-    for (const [field, aliases] of Object.entries(patterns)) {
-      if (usedFields.has(field)) continue;
-      for (const alias of aliases) {
-        const score = similarity(norm, alias);
-        if (score > bestScore) { bestScore = score; bestField = field; }
-      }
-    }
-    if (bestScore >= 0.6) {
-      mapping[index] = bestField;
-      confidence[index] = Math.round(bestScore * 100);
-      usedFields.add(bestField);
-    } else {
-      mapping[index] = "";
-      confidence[index] = 0;
-    }
-  });
-  return { mapping, confidence };
+function autoDetectMapping(headers, dataRows) {
+  return smartMapColumns(headers, dataRows || [], COLLECTION_ALIASES);
 }
 
 export const loader = async ({ request }) => {
@@ -103,7 +32,12 @@ export const loader = async ({ request }) => {
 export const action = async ({ request }) => {
   const { session } = await authenticate.admin(request);
   const formData = await request.formData();
-  const collections = JSON.parse(formData.get("collections") || "[]");
+  let collections;
+  try {
+    collections = JSON.parse(formData.get("collections") || "[]");
+  } catch {
+    return { results: [], successCount: 0, errorCount: 1, status: "failed" };
+  }
   const fileName = formData.get("fileName") || "collections.csv";
   const shopDomain = session.shop;
   const accessToken = session.accessToken;
@@ -241,6 +175,8 @@ export default function CollectionsImportPage() {
   const [csvRows, setCsvRows] = useState([]);
   const [mapping, setMapping] = useState({});
   const [confidence, setConfidence] = useState({});
+  const [confirmed, setConfirmed] = useState(new Set());
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [importData, setImportData] = useState(null);
 
@@ -269,11 +205,13 @@ export default function CollectionsImportPage() {
     reader.onload = (e) => {
       const rows = parseCSV(e.target.result);
       if (rows.length < 2) { shopify.toast.show("CSV must have a header and data rows", { isError: true }); return; }
-      setCsvHeaders(rows[0]);
-      setCsvRows(rows.slice(1).filter((r) => r.some((c) => c.trim())));
-      const detected = autoDetectMapping(rows[0]);
-      setMapping(detected.mapping);
-      setConfidence(detected.confidence);
+      const headers = rows[0];
+      const dataRows = rows.slice(1).filter((r) => r.some((c) => c.trim()));
+      setCsvHeaders(headers);
+      setCsvRows(dataRows);
+      const { mapping: detectedMapping, confidence: detectedConfidence } = autoDetectMapping(headers, dataRows);
+      setMapping(detectedMapping);
+      setConfidence(detectedConfidence);
       shopify.toast.show("Columns auto-mapped.");
       setStep(STEP_MAP);
     };
@@ -300,19 +238,13 @@ export default function CollectionsImportPage() {
   }, [getCollections, fileName, fetcher]);
 
   const resetImport = useCallback(() => {
-    setStep(STEP_UPLOAD); setFileName(""); setCsvHeaders([]); setCsvRows([]); setMapping({}); setConfidence({}); setImportData(null);
+    setStep(STEP_UPLOAD); setFileName(""); setCsvHeaders([]); setCsvRows([]); setMapping({}); setConfidence({}); setConfirmed(new Set()); setShowAdvanced(false); setImportData(null);
   }, []);
 
   const hasTitleMapped = Object.values(mapping).includes("title");
   const collections = step >= STEP_PREVIEW ? getCollections() : [];
   const primary = "#17320A";
   const secondary = "#2E6316";
-
-  const confidenceColor = (score) => {
-    if (score >= 80) return { bg: "bg-green-50", border: "border-green-300", text: "text-green-700" };
-    if (score >= 50) return { bg: "bg-yellow-50", border: "border-yellow-300", text: "text-yellow-700" };
-    return { bg: "bg-red-50", border: "border-red-300", text: "text-red-700" };
-  };
 
   return (
     <s-page heading="Collection Importer" subtitle={["Upload", "Map", "Preview", "Importing", "Results"][step]} backAction={JSON.stringify({ content: "Dashboard", url: "/app" })}>
@@ -370,6 +302,7 @@ export default function CollectionsImportPage() {
                 Default type is &quot;custom&quot; (manual collection).
               </p>
             </div>
+            <FileSourcePicker onFileSelected={handleFile} accept=".csv" />
           </div>
         )}
 
@@ -382,6 +315,10 @@ export default function CollectionsImportPage() {
                 <span className="text-sm font-medium text-amber-800">Please map at least the Title column.</span>
               </div>
             )}
+            {(() => {
+              const s = generateMappingSummary(csvHeaders, mapping, confidence, confirmed, ["title"]);
+              return <AISummary icon="🧠" title="Smart Mapping Summary" items={s.items} variant={s.variant} />;
+            })()}
             <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
               <div className="px-6 py-4 border-b border-gray-100">
                 <h2 className="text-lg font-semibold text-gray-900">Map CSV Columns</h2>
@@ -391,32 +328,69 @@ export default function CollectionsImportPage() {
                 <table className="w-full">
                   <thead><tr className="bg-gray-50/80">
                     <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">CSV Column</th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Sample</th>
                     <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Shopify Field</th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Confidence</th>
+                    <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
                   </tr></thead>
                   <tbody className="divide-y divide-gray-100">
                     {csvHeaders.map((header, i) => {
                       const conf = confidence[i] || 0;
-                      const colors = confidenceColor(conf);
+                      const level = confidenceLevel(conf);
+                      const isMapped = !!mapping[i];
+                      const isConfirmed = confirmed.has(i);
+                      const isRequired = !isMapped && header.toLowerCase().includes("title");
+                      let statusLabel, statusClasses;
+                      if (isConfirmed) { statusLabel = "Confirmed"; statusClasses = "bg-blue-50 text-blue-700 border-blue-200"; }
+                      else if (isMapped && level === "high") { statusLabel = "Auto-mapped"; statusClasses = "bg-green-50 text-green-700 border-green-200"; }
+                      else if (isMapped && (level === "medium" || level === "low")) { statusLabel = "Needs review"; statusClasses = "bg-amber-50 text-amber-700 border-amber-200"; }
+                      else if (isRequired) { statusLabel = "Missing required field"; statusClasses = "bg-red-50 text-red-700 border-red-200"; }
+                      else { statusLabel = null; }
                       return (
                         <tr key={i} className="hover:bg-gray-50/50">
-                          <td className="px-6 py-3"><span className="text-sm font-medium text-gray-900">{header}</span></td>
-                          <td className="px-6 py-3 max-w-[200px]"><span className="text-sm text-gray-500 truncate block">{csvRows[0]?.[i] || "\u2014"}</span></td>
                           <td className="px-6 py-3">
-                            <select value={mapping[i] || ""} onChange={(e) => { setMapping((p) => ({ ...p, [i]: e.target.value })); setConfidence((p) => ({ ...p, [i]: e.target.value ? 100 : 0 })); }}
+                            <span className="text-sm font-medium text-gray-900">{header}</span>
+                            <span className="block text-xs text-gray-400 truncate max-w-[180px]">{csvRows[0]?.[i] || ""}</span>
+                          </td>
+                          <td className="px-6 py-3">
+                            <select value={mapping[i] || ""} onChange={(e) => { setMapping((p) => ({ ...p, [i]: e.target.value })); setConfidence((p) => ({ ...p, [i]: e.target.value ? 100 : 0 })); setConfirmed((p) => { const n = new Set(p); if (e.target.value) n.add(i); else n.delete(i); return n; }); }}
                               className={`w-full max-w-[220px] px-3 py-1.5 text-sm border rounded-lg outline-none transition-all focus:ring-2 focus:ring-green-800/20 ${mapping[i] ? "border-green-800 bg-green-50 text-green-900 font-medium" : "border-gray-300 bg-white text-gray-600"}`}>
                               {COLLECTION_FIELDS.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
                             </select>
                           </td>
                           <td className="px-6 py-3">
-                            {mapping[i] ? <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${colors.bg} ${colors.text} border ${colors.border}`}>{conf}%</span> : <span className="text-xs text-gray-400">&mdash;</span>}
+                            {statusLabel ? <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border ${statusClasses}`}>{statusLabel}</span> : <span className="text-xs text-gray-400">&mdash;</span>}
                           </td>
                         </tr>
                       );
                     })}
                   </tbody>
                 </table>
+              </div>
+              <div className="border-t border-gray-100">
+                <button onClick={() => setShowAdvanced((p) => !p)} className="w-full px-6 py-3 flex items-center justify-between text-left hover:bg-gray-50/50 transition-colors">
+                  <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Advanced details</span>
+                  <svg className={`w-4 h-4 text-gray-400 transition-transform ${showAdvanced ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" /></svg>
+                </button>
+                {showAdvanced && (
+                  <div className="px-6 pb-4">
+                    <table className="w-full text-xs">
+                      <thead><tr className="text-gray-400"><th className="text-left py-1 font-medium">Column</th><th className="text-left py-1 font-medium">Mapped To</th><th className="text-left py-1 font-medium">Confidence</th><th className="text-left py-1 font-medium">Source</th></tr></thead>
+                      <tbody className="divide-y divide-gray-50">
+                        {csvHeaders.map((header, i) => {
+                          const conf = confidence[i] || 0;
+                          const colors = confidenceColor(confidenceLevel(conf));
+                          return (
+                            <tr key={i}>
+                              <td className="py-1.5 text-gray-600">{header}</td>
+                              <td className="py-1.5 text-gray-800 font-medium">{mapping[i] ? COLLECTION_FIELDS.find((f) => f.value === mapping[i])?.label || mapping[i] : "—"}</td>
+                              <td className="py-1.5">{mapping[i] ? <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${colors.bg} ${colors.text}`}>{conf}%</span> : "—"}</td>
+                              <td className="py-1.5 text-gray-500">{confirmed.has(i) ? "Manual" : mapping[i] ? "Auto" : "—"}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
             </div>
             <div className="flex items-center gap-3">
@@ -514,6 +488,10 @@ export default function CollectionsImportPage() {
                 </div>
               )}
             </div>
+            {(() => {
+              const s = generateImportResultSummary(importData.successCount, importData.errorCount, csvRows.length, "collection");
+              return <AISummary icon="📊" title="Import Summary" items={s.items} variant={s.variant} />;
+            })()}
             {importData.errorCount > 0 && (
               <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
                 <div className="px-6 py-4 border-b border-gray-100"><h3 className="text-sm font-semibold text-gray-900">Errors ({importData.errorCount})</h3></div>
@@ -560,4 +538,15 @@ export default function CollectionsImportPage() {
   );
 }
 
+export function ErrorBoundary() {
+  const error = useRouteError();
+  return (
+    <FriendlyErrorBoundary
+      heading="Import Collections"
+      title="We couldn't load the Collection Importer"
+      message="Please try again. Your CSV and existing collections are untouched."
+      error={error}
+    />
+  );
+}
 export const headers = (headersArgs) => boundary.headers(headersArgs);

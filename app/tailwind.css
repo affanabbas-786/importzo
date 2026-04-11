@@ -84,3 +84,26 @@
 * {
   font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
 }
+
+/* Prevent initial white flash / layout jank before styles settle.
+   Polaris web components hydrate async — this keeps the background
+   consistent so the page never "looks broken" on first paint. */
+html, body {
+  background-color: #f6f6f7;
+  min-height: 100vh;
+}
+
+/* Smooth fade for route content to avoid harsh cutovers. */
+s-page {
+  animation: fadeIn 0.25s ease-out both;
+}
+
+/* Skeleton rows inside tables should not overflow their container. */
+.animate-shimmer {
+  will-change: background-position;
+}
+
+/* Tawk.to widget safety — never let it block fixed/sticky UI. */
+#tawk-widget-container, iframe[title*="chat"] {
+  z-index: 9990 !important;
+}

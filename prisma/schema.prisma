@@ -45,3 +45,15 @@ model ImportJob {
   importType   String   @default("products")
   createdAt    DateTime @default(now())
 }
+
+model SourceStore {
+  id          String   @id @default(uuid())
+  shop        String   @unique
+  sourceUrl   String
+  sourceName  String   @default("")
+  sourceEmail String   @default("")
+  sourcePlan  String   @default("")
+  token       String
+  lastUsed    DateTime @default(now())
+  createdAt   DateTime @default(now())
+}

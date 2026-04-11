@@ -1,74 +1,13 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-import { useFetcher } from "react-router";
+import { useFetcher, useRouteError } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate, apiVersion } from "../shopify.server";
 import prisma from "../db.server";
-
-// ═══════════════════════════════════════════════════════════════════
-// CSV Parser — robust: BOM, auto-delimiter, whitespace trim, skip empty
-// ═══════════════════════════════════════════════════════════════════
-function parseCSV(text) {
-  // Strip BOM character
-  if (text.charCodeAt(0) === 0xfeff) {
-    text = text.slice(1);
-  }
-
-  // Normalize all line endings to \n
-  text = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-
-  // Auto-detect delimiter from first line (outside quotes)
-  const firstLine = text.split("\n")[0] || "";
-  let delimiter = ",";
-  const counts = { ",": 0, ";": 0, "\t": 0 };
-  let q = false;
-  for (let c = 0; c < firstLine.length; c++) {
-    if (firstLine[c] === '"') q = !q;
-    if (!q && counts[firstLine[c]] !== undefined) counts[firstLine[c]]++;
-  }
-  if (counts["\t"] > counts[","] && counts["\t"] >= counts[";"]) {
-    delimiter = "\t";
-  } else if (counts[";"] > counts[","] && counts[";"] > counts["\t"]) {
-    delimiter = ";";
-  }
-
-  const rows = [];
-  let fields = [];
-  let current = "";
-  let inQuotes = false;
-
-  for (let i = 0; i < text.length; i++) {
-    const char = text[i];
-    if (char === '"') {
-      if (inQuotes && text[i + 1] === '"') {
-        current += '"';
-        i++;
-      } else {
-        inQuotes = !inQuotes;
-      }
-    } else if (char === delimiter && !inQuotes) {
-      fields.push(current.trim());
-      current = "";
-    } else if (char === "\n" && !inQuotes) {
-      fields.push(current.trim());
-      current = "";
-      // Skip completely empty rows
-      if (fields.some((f) => f !== "")) {
-        rows.push(fields);
-      }
-      fields = [];
-    } else {
-      current += char;
-    }
-  }
-  if (current || fields.length > 0) {
-    fields.push(current.trim());
-    if (fields.some((f) => f !== "")) {
-      rows.push(fields);
-    }
-  }
-  return rows;
-}
+import { parseCSV } from "../lib/csv-parser";
+import { smartMapColumns, PRODUCT_ALIASES, confidenceLevel, confidenceColor } from "../lib/smart-mapper";
+import { FileSourcePicker, AISummary, generateMappingSummary, generateImportResultSummary } from "../components/ui";
+import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
 
 // ═══════════════════════════════════════════════════════════════════
 // Shopify field definitions — dynamic images (no hardcoded limit)
@@ -101,141 +40,12 @@ const SHOPIFY_FIELDS = [
 ];
 
 // ═══════════════════════════════════════════════════════════════════
-// Auto-detect column mapping — dynamic images, smart variant detection
+// Auto-detect column mapping — powered by smart-mapper AI engine
 // ═══════════════════════════════════════════════════════════════════
-function autoDetectMapping(headers) {
-  const mapping = {};
-  const normalize = (s) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
-  const usedFields = new Set();
-
-  // Single-map patterns (each field mapped at most once)
-  const patterns = {
-    title: ["title", "name", "productname", "producttitle"],
-    handle: ["handle", "producthandle", "urlhandle", "slug"],
-    body_html: [
-      "description", "bodyhtml", "body", "desc",
-      "productdescription", "htmlbody",
-    ],
-    vendor: ["vendor", "brand", "manufacturer", "supplier"],
-    product_type: ["producttype", "type", "category"],
-    tags: ["tags", "tag", "labels"],
-    published: ["published", "status", "active", "visible", "isonline"],
-    option1_name: ["option1name", "variantoptionname1"],
-    option1_value: ["option1value", "variantoptionvalue1"],
-    option2_name: ["option2name", "variantoptionname2"],
-    option2_value: ["option2value", "variantoptionvalue2"],
-    option3_name: ["option3name", "variantoptionname3"],
-    option3_value: ["option3value", "variantoptionvalue3"],
-    price: ["price", "variantprice", "cost", "amount", "unitprice"],
-    sku: [
-      "sku", "stockkeepingunit", "itemno", "itemnumber",
-      "partnumber", "variantsku",
-    ],
-    barcode: ["barcode", "upc", "ean", "gtin", "isbn", "variantbarcode"],
-    inventory_quantity: [
-      "inventory", "inventoryquantity", "qty", "quantity",
-      "stock", "stockqty", "variantinventoryqty",
-    ],
-    weight: ["weight", "productweight", "variantweight"],
-    weight_unit: ["weightunit", "variantweightunit"],
-    variant_inventory_policy: ["variantinventorypolicy", "inventorypolicy"],
-    variant_fulfillment_service: [
-      "variantfulfillmentservice", "fulfillmentservice",
-    ],
-  };
-
-  // Pass 1: exact pattern matching (single-map fields only)
-  headers.forEach((header, index) => {
-    const normalized = normalize(header);
-    for (const [field, matches] of Object.entries(patterns)) {
-      if (matches.some((m) => normalized === m || normalized.includes(m))) {
-        if (!usedFields.has(field)) {
-          mapping[index] = field;
-          usedFields.add(field);
-          return;
-        }
-      }
-    }
+function autoDetectMapping(headers, dataRows) {
+  return smartMapColumns(headers, dataRows || [], PRODUCT_ALIASES, {
+    multiMap: ["image_src", "video_src"],
   });
-
-  // Pass 2: standalone "option1"/"option2"/"option3" shorthand
-  headers.forEach((header, index) => {
-    if (mapping[index]) return;
-    const normalized = normalize(header);
-    if (normalized === "option1" && !usedFields.has("option1_value")) {
-      mapping[index] = "option1_value";
-      usedFields.add("option1_value");
-      return;
-    }
-    if (normalized === "option2" && !usedFields.has("option2_value")) {
-      mapping[index] = "option2_value";
-      usedFields.add("option2_value");
-      return;
-    }
-    if (normalized === "option3" && !usedFields.has("option3_value")) {
-      mapping[index] = "option3_value";
-      usedFields.add("option3_value");
-      return;
-    }
-  });
-
-  // Pass 3: smart detection — Size/Color/Material → option values
-  headers.forEach((header, index) => {
-    if (mapping[index]) return;
-    const normalized = normalize(header);
-    const opt1 = ["size", "dimension", "taille"];
-    const opt2 = ["color", "colour", "shade"];
-    const opt3 = ["material", "style", "flavor", "flavour", "pattern", "finish"];
-
-    if (opt1.some((kw) => normalized.includes(kw)) && !usedFields.has("option1_value")) {
-      mapping[index] = "option1_value";
-      usedFields.add("option1_value");
-      return;
-    }
-    if (opt2.some((kw) => normalized.includes(kw)) && !usedFields.has("option2_value")) {
-      mapping[index] = "option2_value";
-      usedFields.add("option2_value");
-      return;
-    }
-    if (opt3.some((kw) => normalized.includes(kw)) && !usedFields.has("option3_value")) {
-      mapping[index] = "option3_value";
-      usedFields.add("option3_value");
-      return;
-    }
-  });
-
-  // Pass 4: auto-map ALL image/video columns (multi-map — no limit)
-  headers.forEach((header, index) => {
-    if (mapping[index]) return;
-    const normalized = normalize(header);
-    if (
-      normalized.includes("image") ||
-      normalized.includes("img") ||
-      normalized.includes("photo") ||
-      normalized.includes("picture") ||
-      normalized.includes("thumbnail")
-    ) {
-      mapping[index] = "image_src";
-      return;
-    }
-    if (
-      normalized.includes("video") ||
-      normalized.includes("youtube") ||
-      normalized.includes("vimeo")
-    ) {
-      mapping[index] = "video_src";
-      return;
-    }
-  });
-
-  // Fill remaining unmapped columns with skip
-  headers.forEach((_, index) => {
-    if (mapping[index] === undefined) {
-      mapping[index] = "";
-    }
-  });
-
-  return mapping;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -252,7 +62,13 @@ export const loader = async ({ request }) => {
 export const action = async ({ request }) => {
   const { session } = await authenticate.admin(request);
   const formData = await request.formData();
-  const products = JSON.parse(formData.get("products"));
+
+  let products;
+  try {
+    products = JSON.parse(formData.get("products"));
+  } catch {
+    return { results: [], successCount: 0, errorCount: 1, status: "failed", error: "Invalid product data received" };
+  }
   const fileName = formData.get("fileName");
 
   const results = [];
@@ -555,6 +371,9 @@ export default function ImportPage() {
   const [csvHeaders, setCsvHeaders] = useState([]);
   const [csvRows, setCsvRows] = useState([]);
   const [mapping, setMapping] = useState({});
+  const [confidence, setConfidence] = useState({});
+  const [confirmed, setConfirmed] = useState(new Set());
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [variantsDetected, setVariantsDetected] = useState(false);
   const [errorsExpanded, setErrorsExpanded] = useState(false);
@@ -609,8 +428,9 @@ export default function ImportPage() {
         setCsvHeaders(headers);
         setCsvRows(dataRows);
 
-        const detectedMapping = autoDetectMapping(headers);
+        const { mapping: detectedMapping, confidence: detectedConfidence } = autoDetectMapping(headers, dataRows);
         setMapping(detectedMapping);
+        setConfidence(detectedConfidence);
 
         const hasVariants = Object.values(detectedMapping).some(
           (f) => f.startsWith("option") || f === "handle",
@@ -646,6 +466,8 @@ export default function ImportPage() {
 
   const handleMappingChange = useCallback((colIndex, value) => {
     setMapping((prev) => ({ ...prev, [colIndex]: value }));
+    setConfidence((prev) => ({ ...prev, [colIndex]: value ? 100 : 0 }));
+    setConfirmed((prev) => { const next = new Set(prev); if (value) next.add(colIndex); else next.delete(colIndex); return next; });
   }, []);
 
   // ── Group rows into products with variants ──────────────────────
@@ -866,6 +688,9 @@ export default function ImportPage() {
     setCsvHeaders([]);
     setCsvRows([]);
     setMapping({});
+    setConfidence({});
+    setConfirmed(new Set());
+    setShowAdvanced(false);
     setVariantsDetected(false);
     setErrorsExpanded(false);
   }, []);
@@ -1070,6 +895,12 @@ export default function ImportPage() {
                 Video URLs (YouTube/Vimeo), and more. Supports comma,
                 semicolon, and tab delimiters.
               </p>
+
+              {/* Alternative file sources */}
+              <div className="mt-6 pt-5 border-t border-gray-100">
+                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Or import from</p>
+                <FileSourcePicker onFileSelected={handleFile} accept=".csv" />
+              </div>
             </div>
           </div>
         )}
@@ -1127,6 +958,12 @@ export default function ImportPage() {
               </div>
             )}
 
+            {/* AI Smart Summary */}
+            {(() => {
+              const { items, variant } = generateMappingSummary(csvHeaders, mapping, confidence, confirmed, ["title"]);
+              return <AISummary title="Smart Summary" items={items} variant={variant} />;
+            })()}
+
             <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
               <div className="px-6 py-4 border-b border-gray-100">
                 <h2 className="text-lg font-semibold text-gray-900">
@@ -1142,56 +979,84 @@ export default function ImportPage() {
                 <table className="w-full">
                   <thead>
                     <tr className="bg-gray-50/80">
-                      <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                        CSV Column
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                        Sample Data
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                        Shopify Field
-                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">CSV Column</th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Shopify Field</th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
-                    {csvHeaders.map((header, i) => (
-                      <tr
-                        key={i}
-                        className="hover:bg-gray-50/50 transition-colors"
-                      >
-                        <td className="px-6 py-3">
-                          <span className="text-sm font-medium text-gray-900">
-                            {header}
-                          </span>
-                        </td>
-                        <td className="px-6 py-3 max-w-[200px]">
-                          <span className="text-sm text-gray-500 truncate block">
-                            {csvRows[0]?.[i] || "\u2014"}
-                          </span>
-                        </td>
-                        <td className="px-6 py-3">
-                          <select
-                            value={mapping[i] || ""}
-                            onChange={(e) =>
-                              handleMappingChange(i, e.target.value)
-                            }
-                            className={`w-full max-w-[220px] px-3 py-1.5 text-sm border rounded-lg outline-none transition-all focus:ring-2 focus:ring-teal-600/20 focus:border-teal-600 ${
-                              mapping[i]
-                                ? "border-teal-400 bg-teal-50 text-teal-900 font-medium"
-                                : "border-gray-300 bg-white text-gray-600"
-                            }`}
-                          >
-                            {SHOPIFY_FIELDS.map((f) => (
-                              <option key={f.value} value={f.value}>
-                                {f.label}
-                              </option>
-                            ))}
-                          </select>
-                        </td>
-                      </tr>
-                    ))}
+                    {csvHeaders.map((header, i) => {
+                      const conf = confidence[i] || 0;
+                      const level = confidenceLevel(conf);
+                      const isMapped = !!mapping[i];
+                      const isConfirmed = confirmed.has(i);
+                      const isRequired = !isMapped && (header.toLowerCase().includes("title"));
+                      let statusLabel, statusClasses;
+                      if (isConfirmed) { statusLabel = "Confirmed"; statusClasses = "bg-blue-50 text-blue-700 border-blue-200"; }
+                      else if (isMapped && level === "high") { statusLabel = "Auto-mapped"; statusClasses = "bg-green-50 text-green-700 border-green-200"; }
+                      else if (isMapped && (level === "medium" || level === "low")) { statusLabel = "Needs review"; statusClasses = "bg-amber-50 text-amber-700 border-amber-200"; }
+                      else if (isRequired) { statusLabel = "Missing required field"; statusClasses = "bg-red-50 text-red-700 border-red-200"; }
+                      else { statusLabel = null; }
+                      return (
+                        <tr key={i} className="hover:bg-gray-50/50 transition-colors">
+                          <td className="px-6 py-3">
+                            <span className="text-sm font-medium text-gray-900">{header}</span>
+                            <span className="block text-xs text-gray-400 truncate max-w-[180px]">{csvRows[0]?.[i] || ""}</span>
+                          </td>
+                          <td className="px-6 py-3">
+                            <select value={mapping[i] || ""} onChange={(e) => handleMappingChange(i, e.target.value)}
+                              className={`w-full max-w-[220px] px-3 py-1.5 text-sm border rounded-lg outline-none transition-all focus:ring-2 focus:ring-green-800/20 ${mapping[i] ? "border-green-800 bg-green-50 text-green-900 font-medium" : "border-gray-300 bg-white text-gray-600"}`}>
+                              {SHOPIFY_FIELDS.map((f) => (<option key={f.value} value={f.value}>{f.label}</option>))}
+                            </select>
+                          </td>
+                          <td className="px-6 py-3">
+                            {statusLabel ? (
+                              <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border ${statusClasses}`}>{statusLabel}</span>
+                            ) : (
+                              <span className="text-xs text-gray-400">&mdash;</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
+              </div>
+
+              {/* Advanced details (expandable) */}
+              <div className="border-t border-gray-100">
+                <button onClick={() => setShowAdvanced((p) => !p)}
+                  className="w-full px-6 py-3 flex items-center justify-between text-left hover:bg-gray-50/50 transition-colors">
+                  <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Advanced details</span>
+                  <svg className={`w-4 h-4 text-gray-400 transition-transform ${showAdvanced ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" /></svg>
+                </button>
+                {showAdvanced && (
+                  <div className="px-6 pb-4">
+                    <table className="w-full text-xs">
+                      <thead><tr className="text-gray-400">
+                        <th className="text-left py-1 font-medium">Column</th>
+                        <th className="text-left py-1 font-medium">Mapped To</th>
+                        <th className="text-left py-1 font-medium">Confidence</th>
+                        <th className="text-left py-1 font-medium">Source</th>
+                      </tr></thead>
+                      <tbody className="divide-y divide-gray-50">
+                        {csvHeaders.map((header, i) => {
+                          const conf = confidence[i] || 0;
+                          const level = confidenceLevel(conf);
+                          const colors = confidenceColor(level);
+                          return (
+                            <tr key={i}>
+                              <td className="py-1.5 text-gray-600">{header}</td>
+                              <td className="py-1.5 text-gray-800 font-medium">{mapping[i] ? SHOPIFY_FIELDS.find((f) => f.value === mapping[i])?.label || mapping[i] : "—"}</td>
+                              <td className="py-1.5">{mapping[i] ? <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${colors.bg} ${colors.text}`}>{conf}%</span> : "—"}</td>
+                              <td className="py-1.5 text-gray-500">{confirmed.has(i) ? "Manual" : mapping[i] ? "Auto" : "—"}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -1572,20 +1437,11 @@ export default function ImportPage() {
               )}
             </div>
 
-            {/* Summary Banner */}
-            <div
-              className={`rounded-lg px-4 py-3 text-sm font-medium ${
-                fetcher.data.errorCount === 0
-                  ? "bg-green-50 text-green-800 border border-green-200"
-                  : "bg-amber-50 text-amber-800 border border-amber-200"
-              }`}
-            >
-              {fetcher.data.successCount} product
-              {fetcher.data.successCount !== 1 ? "s" : ""} imported
-              successfully
-              {fetcher.data.errorCount > 0 &&
-                `, ${fetcher.data.errorCount} failed`}
-            </div>
+            {/* AI Result Summary */}
+            {(() => {
+              const s = generateImportResultSummary(fetcher.data.successCount, fetcher.data.errorCount, csvRows.length, "product");
+              return <AISummary icon="📊" title="Import Summary" items={s.items} variant={s.variant} />;
+            })()}
 
             {/* Error Details */}
             {fetcher.data.errorCount > 0 && (
@@ -1780,6 +1636,17 @@ export default function ImportPage() {
   );
 }
 
+export function ErrorBoundary() {
+  const error = useRouteError();
+  return (
+    <FriendlyErrorBoundary
+      heading="Import Products"
+      title="We couldn't load the Product Importer"
+      message="Please try again. Your CSV file and store data are untouched."
+      error={error}
+    />
+  );
+}
 export const headers = (headersArgs) => {
   return boundary.headers(headersArgs);
 };

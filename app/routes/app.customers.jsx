@@ -1,5 +1,7 @@
+import { useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
+import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
 
 export const loader = async ({ request }) => {
   await authenticate.admin(request);
@@ -73,4 +75,15 @@ export default function CustomersPage() {
   );
 }
 
+export function ErrorBoundary() {
+  const error = useRouteError();
+  return (
+    <FriendlyErrorBoundary
+      heading="Customers"
+      title="We couldn't load this page"
+      message="Please try again in a moment."
+      error={error}
+    />
+  );
+}
 export const headers = (headersArgs) => boundary.headers(headersArgs);

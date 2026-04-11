@@ -1,9 +1,13 @@
 import { useState, useCallback, useEffect, useRef } from "react";
-import { useFetcher } from "react-router";
+import { useFetcher, useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate, apiVersion } from "../shopify.server";
+import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
 
+// ═══════════════════════════════════════════════════════════════════
+// Server action
+// ═══════════════════════════════════════════════════════════════════
 export const loader = async ({ request }) => {
   await authenticate.admin(request);
   return null;
@@ -12,26 +16,30 @@ export const loader = async ({ request }) => {
 export const action = async ({ request }) => {
   const { session } = await authenticate.admin(request);
   const formData = await request.formData();
-  const exportType = formData.get("exportType");
+  const intent = formData.get("intent");
   const shopDomain = session.shop;
   const accessToken = session.accessToken;
   const version = apiVersion || "2025-10";
+  const authHeaders = { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" };
 
   async function fetchAll(resource, fields) {
     const items = [];
     let url = `https://${shopDomain}/admin/api/${version}/${resource}.json?limit=250${fields ? `&fields=${fields}` : ""}`;
     while (url) {
-      const res = await fetch(url, { headers: { "X-Shopify-Access-Token": accessToken } });
+      let res;
+      for (let attempt = 0; attempt < 4; attempt++) {
+        res = await fetch(url, { headers: { "X-Shopify-Access-Token": accessToken } });
+        if (res.status !== 429) break;
+        const retryAfter = parseFloat(res.headers.get("Retry-After") || "2");
+        await new Promise((r) => setTimeout(r, Math.max(retryAfter * 1000, 500 * Math.pow(2, attempt))));
+      }
       if (!res.ok) throw new Error(`Failed to fetch ${resource}: HTTP ${res.status}`);
       const data = await res.json();
       const key = Object.keys(data).find((k) => Array.isArray(data[k]));
       if (key) items.push(...data[key]);
-      const link = res.headers.get("Link");
-      url = null;
-      if (link) {
-        const match = link.match(/<([^>]+)>;\s*rel="next"/);
-        if (match) url = match[1];
-      }
+      const link = res.headers.get("Link") || "";
+      const next = link.match(/<([^>]+)>;\s*rel="next"/);
+      url = next ? next[1] : null;
     }
     return items;
   }
@@ -39,23 +47,33 @@ export const action = async ({ request }) => {
   function escapeCsv(val) {
     if (val === null || val === undefined) return "";
     const str = String(val);
-    if (str.includes(",") || str.includes('"') || str.includes("\n")) {
-      return `"${str.replace(/"/g, '""')}"`;
-    }
-    return str;
+    return (str.includes(",") || str.includes('"') || str.includes("\n")) ? `"${str.replace(/"/g, '""')}"` : str;
   }
 
   function toCsv(headers, rows) {
     const lines = [headers.map(escapeCsv).join(",")];
-    for (const row of rows) {
-      lines.push(headers.map((h) => escapeCsv(row[h] ?? "")).join(","));
-    }
+    for (const row of rows) lines.push(headers.map((h) => escapeCsv(row[h] ?? "")).join(","));
     return lines.join("\n");
   }
 
   try {
-    if (exportType === "products") {
-      const products = await fetchAll("products", "id,title,handle,body_html,vendor,product_type,tags,published_at,variants,images");
+    // ── Counts ──
+    if (intent === "counts") {
+      const [pr, cc, sc, cu] = await Promise.all([
+        fetch(`https://${shopDomain}/admin/api/${version}/products/count.json`, { headers: authHeaders }),
+        fetch(`https://${shopDomain}/admin/api/${version}/custom_collections/count.json`, { headers: authHeaders }),
+        fetch(`https://${shopDomain}/admin/api/${version}/smart_collections/count.json`, { headers: authHeaders }),
+        fetch(`https://${shopDomain}/admin/api/${version}/customers/count.json`, { headers: authHeaders }),
+      ]);
+      const products = pr.ok ? (await pr.json()).count : 0;
+      const collections = (cc.ok ? (await cc.json()).count : 0) + (sc.ok ? (await sc.json()).count : 0);
+      const customers = cu.ok ? (await cu.json()).count : 0;
+      return Response.json({ intent: "counts", ok: true, products, collections, customers });
+    }
+
+    // ── Export Products ──
+    if (intent === "export-products") {
+      const products = await fetchAll("products", "id,title,handle,body_html,vendor,product_type,tags,published_at,variants,images,options");
       const rows = [];
       for (const p of products) {
         const variants = p.variants || [{}];
@@ -63,8 +81,7 @@ export const action = async ({ request }) => {
         for (let vi = 0; vi < variants.length; vi++) {
           const v = variants[vi];
           rows.push({
-            Handle: p.handle || "",
-            Title: vi === 0 ? (p.title || "") : "",
+            Handle: p.handle || "", Title: vi === 0 ? (p.title || "") : "",
             "Body (HTML)": vi === 0 ? (p.body_html || "") : "",
             Vendor: vi === 0 ? (p.vendor || "") : "",
             "Product Type": vi === 0 ? (p.product_type || "") : "",
@@ -76,284 +93,668 @@ export const action = async ({ request }) => {
             "Option2 Value": v.option2 || "",
             "Option3 Name": v.option3 ? (p.options?.[2]?.name || "") : "",
             "Option3 Value": v.option3 || "",
-            "Variant SKU": v.sku || "",
-            "Variant Price": v.price || "",
+            "Variant SKU": v.sku || "", "Variant Price": v.price || "",
+            "Variant Compare At Price": v.compare_at_price || "",
             "Variant Barcode": v.barcode || "",
             "Variant Inventory Qty": v.inventory_quantity ?? "",
-            "Variant Weight": v.weight || "",
-            "Variant Weight Unit": v.weight_unit || "",
+            "Variant Weight": v.weight || "", "Variant Weight Unit": v.weight_unit || "",
             "Image Src": vi === 0 && images[0] ? images[0] : (images[vi] || ""),
           });
         }
       }
-      const csvHeaders = ["Handle", "Title", "Body (HTML)", "Vendor", "Product Type", "Tags", "Published", "Option1 Name", "Option1 Value", "Option2 Name", "Option2 Value", "Option3 Name", "Option3 Value", "Variant SKU", "Variant Price", "Variant Barcode", "Variant Inventory Qty", "Variant Weight", "Variant Weight Unit", "Image Src"];
-      const csv = toCsv(csvHeaders, rows);
-      return new Response(JSON.stringify({ csv, filename: `products_export_${new Date().toISOString().slice(0, 10)}.csv`, count: products.length }), {
-        headers: { "Content-Type": "application/json" },
-      });
+      const csvH = ["Handle", "Title", "Body (HTML)", "Vendor", "Product Type", "Tags", "Published", "Option1 Name", "Option1 Value", "Option2 Name", "Option2 Value", "Option3 Name", "Option3 Value", "Variant SKU", "Variant Price", "Variant Compare At Price", "Variant Barcode", "Variant Inventory Qty", "Variant Weight", "Variant Weight Unit", "Image Src"];
+      return Response.json({ intent: "export-products", ok: true, csv: toCsv(csvH, rows), filename: `products_${new Date().toISOString().slice(0, 10)}.csv`, count: products.length });
     }
 
-    if (exportType === "customers") {
-      const headers = { "Content-Type": "application/json", "X-Shopify-Access-Token": accessToken };
+    // ── Export Collections ──
+    if (intent === "export-collections") {
+      const custom = await fetchAll("custom_collections", "id,title,handle,body_html,published_at,sort_order,image");
+      const smart = await fetchAll("smart_collections", "id,title,handle,body_html,published_at,sort_order,image");
+      const all = [...custom.map((c) => ({ ...c, _type: "Custom" })), ...smart.map((c) => ({ ...c, _type: "Smart" }))];
+      const rows = all.map((c) => ({
+        Title: c.title || "", Handle: c.handle || "", "Body HTML": c.body_html || "",
+        Type: c._type, Published: c.published_at ? "TRUE" : "FALSE",
+        "Sort Order": c.sort_order || "", "Image Src": c.image?.src || "",
+      }));
+      const csvH = ["Title", "Handle", "Body HTML", "Type", "Published", "Sort Order", "Image Src"];
+      return Response.json({ intent: "export-collections", ok: true, csv: toCsv(csvH, rows), filename: `collections_${new Date().toISOString().slice(0, 10)}.csv`, count: all.length });
+    }
+
+    // ── Export Customers ──
+    if (intent === "export-customers") {
       const allCustomers = [];
       let hasNextPage = true;
       let cursor = null;
-
+      const CUSTOMER_TIMEOUT_MS = 30000;
+      const CUSTOMER_MAX_RETRIES = 2;
       while (hasNextPage) {
-        const query = `{
-          customers(first: 250${cursor ? `, after: "${cursor}"` : ""}) {
-            edges {
-              cursor
-              node {
-                id
-                firstName
-                lastName
-                email
-                phone
-                createdAt
-                tags
-                note
-                taxExempt
-                addresses {
-                  address1
-                  city
-                  province
-                  zip
-                  country
-                }
-              }
-            }
-            pageInfo {
-              hasNextPage
-            }
+        const query = `{ customers(first:250${cursor ? `,after:"${cursor}"` : ""}) { edges { cursor node { id firstName lastName email phone createdAt tags note taxExempt addresses { address1 city province zip country } } } pageInfo { hasNextPage } } }`;
+        let gqlData = null;
+        let lastErr = null;
+        for (let attempt = 0; attempt <= CUSTOMER_MAX_RETRIES; attempt++) {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), CUSTOMER_TIMEOUT_MS);
+          try {
+            const gqlRes = await fetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
+              method: "POST", headers: authHeaders, body: JSON.stringify({ query }), signal: controller.signal,
+            });
+            clearTimeout(timer);
+            if (!gqlRes.ok) { lastErr = new Error(`Failed to fetch customers: HTTP ${gqlRes.status}`); continue; }
+            const data = await gqlRes.json();
+            if (data.errors) { lastErr = new Error(data.errors.map((e) => e.message).join(", ")); continue; }
+            gqlData = data;
+            break;
+          } catch (err) {
+            clearTimeout(timer);
+            lastErr = err.name === "AbortError" ? new Error("Customer export timed out (30s). Try again.") : err;
           }
-        }`;
-
-        const gqlRes = await fetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
-          method: "POST",
-          headers,
-          body: JSON.stringify({ query }),
-        });
-        if (!gqlRes.ok) throw new Error(`Failed to fetch customers: HTTP ${gqlRes.status}`);
-        const gqlData = await gqlRes.json();
-
-        if (gqlData.errors) {
-          throw new Error(gqlData.errors.map(e => e.message).join(", "));
         }
-
+        if (!gqlData) throw lastErr || new Error("Failed to fetch customers after retries");
         const edges = gqlData.data?.customers?.edges || [];
-        for (const edge of edges) {
-          allCustomers.push(edge.node);
-          cursor = edge.cursor;
-        }
+        for (const edge of edges) { allCustomers.push(edge.node); cursor = edge.cursor; }
         hasNextPage = gqlData.data?.customers?.pageInfo?.hasNextPage || false;
       }
-
       const rows = allCustomers.map((c) => {
         const addr = (c.addresses || [])[0] || {};
         return {
-          "First Name": c.firstName || "",
-          "Last Name": c.lastName || "",
-          Email: c.email || "",
-          Phone: c.phone || "",
-          Address: addr.address1 || "",
-          City: addr.city || "",
-          Province: addr.province || "",
-          Zip: addr.zip || "",
-          Country: addr.country || "",
+          "First Name": c.firstName || "", "Last Name": c.lastName || "",
+          Email: c.email || "", Phone: c.phone || "",
+          Address: addr.address1 || "", City: addr.city || "",
+          Province: addr.province || "", Zip: addr.zip || "", Country: addr.country || "",
           Tags: Array.isArray(c.tags) ? c.tags.join(", ") : (c.tags || ""),
-          Note: c.note || "",
-          "Tax Exempt": c.taxExempt ? "TRUE" : "FALSE",
+          Note: c.note || "", "Tax Exempt": c.taxExempt ? "TRUE" : "FALSE",
         };
       });
-      const csvHeaders = ["First Name", "Last Name", "Email", "Phone", "Address", "City", "Province", "Zip", "Country", "Tags", "Note", "Tax Exempt"];
-      const csv = toCsv(csvHeaders, rows);
-      return new Response(JSON.stringify({ csv, filename: `customers_export_${new Date().toISOString().slice(0, 10)}.csv`, count: allCustomers.length }), {
-        headers: { "Content-Type": "application/json" },
-      });
+      const csvH = ["First Name", "Last Name", "Email", "Phone", "Address", "City", "Province", "Zip", "Country", "Tags", "Note", "Tax Exempt"];
+      return Response.json({ intent: "export-customers", ok: true, csv: toCsv(csvH, rows), filename: `customers_${new Date().toISOString().slice(0, 10)}.csv`, count: allCustomers.length });
     }
 
-    if (exportType === "collections") {
-      const custom = await fetchAll("custom_collections", "id,title,handle,body_html,published_at,sort_order,image");
-      const smart = await fetchAll("smart_collections", "id,title,handle,body_html,published_at,sort_order,image");
-      const all = [
-        ...custom.map((c) => ({ ...c, _type: "Custom" })),
-        ...smart.map((c) => ({ ...c, _type: "Smart" })),
-      ];
-      const rows = all.map((c) => ({
-        Title: c.title || "",
-        Handle: c.handle || "",
-        "Body HTML": c.body_html || "",
-        Type: c._type,
-        Published: c.published_at ? "TRUE" : "FALSE",
-        "Sort Order": c.sort_order || "",
-        "Image Src": c.image?.src || "",
-      }));
-      const csvHeaders = ["Title", "Handle", "Body HTML", "Type", "Published", "Sort Order", "Image Src"];
-      const csv = toCsv(csvHeaders, rows);
-      return new Response(JSON.stringify({ csv, filename: `collections_export_${new Date().toISOString().slice(0, 10)}.csv`, count: all.length }), {
-        headers: { "Content-Type": "application/json" },
-      });
+    // ── Export Inventory ──
+    if (intent === "export-inventory") {
+      const products = await fetchAll("products", "id,title,variants");
+      const rows = [];
+      for (const p of products) {
+        for (const v of (p.variants || [])) {
+          if (v.sku) {
+            rows.push({
+              SKU: v.sku, "Product Title": p.title || "",
+              "Variant Title": v.title || "Default Title",
+              "Inventory Quantity": v.inventory_quantity ?? 0,
+              Price: v.price || "", Barcode: v.barcode || "",
+            });
+          }
+        }
+      }
+      const csvH = ["SKU", "Product Title", "Variant Title", "Inventory Quantity", "Price", "Barcode"];
+      return Response.json({ intent: "export-inventory", ok: true, csv: toCsv(csvH, rows), filename: `inventory_${new Date().toISOString().slice(0, 10)}.csv`, count: rows.length });
     }
 
-    return new Response(JSON.stringify({ error: "Unknown export type" }), { status: 400, headers: { "Content-Type": "application/json" } });
+    return Response.json({ intent, ok: false, error: "Unknown intent" }, { status: 400 });
   } catch (error) {
-    return new Response(JSON.stringify({ error: error.message }), { status: 500, headers: { "Content-Type": "application/json" } });
+    return Response.json({ intent: intent ?? "", ok: false, error: error.message }, { status: 500 });
   }
 };
+
+// ═══════════════════════════════════════════════════════════════════
+// Client
+// ═══════════════════════════════════════════════════════════════════
+const P = "#17320A";
+const S = "#2E6316";
+const F = "'ImportzoFont', sans-serif";
+
+const EXPORT_MODULES = {
+  products:    { label: "Products",    desc: "All products with variants, images, pricing, and SKUs", intent: "export-products" },
+  collections: { label: "Collections", desc: "Custom and smart collections with metadata",            intent: "export-collections" },
+  customers:   { label: "Customers",   desc: "Customer profiles, addresses, tags, and contact info",  intent: "export-customers" },
+  inventory:   { label: "Inventory",   desc: "Stock quantities by SKU with pricing info",             intent: "export-inventory" },
+};
+
+const MODULE_ICONS = {
+  products:    "M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4",
+  collections: "M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z",
+  customers:   "M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z",
+  inventory:   "M3.75 12h16.5m-16.5 3.75h16.5M3.75 19.5h16.5M5.625 4.5h12.75a1.875 1.875 0 010 3.75H5.625a1.875 1.875 0 010-3.75z",
+};
+
+const STEP_PREVIEW = 0;
+const STEP_EXPORTING = 1;
+const STEP_RESULTS = 2;
 
 export default function ExportPage() {
   const shopify = useAppBridge();
   const fetcher = useFetcher();
-  const [exporting, setExporting] = useState(null);
+
+  // Hub vs flow state
+  const [view, setView] = useState("hub");       // "hub" | "flow"
+  const [exportMode, setExportMode] = useState(null); // "full" | module key
+  const [step, setStep] = useState(STEP_PREVIEW);
+
+  // Module selection (for full store export)
+  const [selectedModules, setSelectedModules] = useState(new Set(Object.keys(EXPORT_MODULES)));
+
+  // Counts from server
+  const [counts, setCounts] = useState(null);
+
+  // Export queue + results
+  const exportQueueRef = useRef([]);
+  const exportResultsRef = useRef({});
+  const [exportResults, setExportResults] = useState({});
+  const [currentExport, setCurrentExport] = useState(null);
   const [error, setError] = useState("");
+  const [exportElapsed, setExportElapsed] = useState(0);
+  const lastHandledData = useRef(null);
 
-  const downloadedRef = useRef(false);
+  const isBusy = fetcher.state !== "idle";
 
+  // ── Start export flow ──
+  const startFlow = useCallback((mode) => {
+    setExportMode(mode);
+    setView("flow");
+    setStep(STEP_PREVIEW);
+    setCounts(null);
+    setError("");
+    setExportResults({});
+    exportResultsRef.current = {};
+    lastHandledData.current = null;
+
+    if (mode === "full") {
+      setSelectedModules(new Set(Object.keys(EXPORT_MODULES)));
+    } else {
+      setSelectedModules(new Set([mode]));
+    }
+
+    // Fetch counts
+    fetcher.submit({ intent: "counts" }, { method: "POST" });
+  }, [fetcher]);
+
+  const backToHub = useCallback(() => {
+    setView("hub");
+    setExportMode(null);
+    setStep(STEP_PREVIEW);
+    setCounts(null);
+    setError("");
+    setExportResults({});
+    exportResultsRef.current = {};
+    setCurrentExport(null);
+    setExportElapsed(0);
+  }, []);
+
+  // Elapsed timer while exporting — shows "still working" for long jobs
   useEffect(() => {
-    if (fetcher.state === "idle" && fetcher.data && !downloadedRef.current) {
-      downloadedRef.current = true;
-      const data = fetcher.data;
-      if (data.error) {
-        setError(data.error);
-        shopify.toast.show(`Export failed: ${data.error}`, { isError: true });
-      } else if (data.csv) {
-        const blob = new Blob([data.csv], { type: "text/csv;charset=utf-8;" });
+    if (step !== STEP_EXPORTING) { setExportElapsed(0); return; }
+    setExportElapsed(0);
+    const id = setInterval(() => setExportElapsed((s) => s + 1), 1000);
+    return () => clearInterval(id);
+  }, [step]);
+
+  // ── Toggle module in full store export ──
+  const toggleModule = useCallback((key) => {
+    setSelectedModules((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }, []);
+
+  // ── Begin exporting ──
+  const startExport = useCallback(() => {
+    const modules = [...selectedModules];
+    if (modules.length === 0) return;
+
+    setStep(STEP_EXPORTING);
+    setError("");
+    setExportResults({});
+    exportResultsRef.current = {};
+    lastHandledData.current = null;
+
+    // Queue all but the first
+    exportQueueRef.current = modules.slice(1);
+    const first = modules[0];
+    setCurrentExport(first);
+    fetcher.submit({ intent: EXPORT_MODULES[first].intent }, { method: "POST" });
+  }, [selectedModules, fetcher]);
+
+  // ── Response handler ──
+  useEffect(() => {
+    // Surface unhandled server errors so the UI doesn't freeze
+    if (fetcher.state !== "idle") return;
+    if (fetcher.error && step === STEP_EXPORTING) {
+      setError("Export failed: server error. Please try again.");
+      setCurrentExport(null);
+      setStep(STEP_RESULTS);
+      return;
+    }
+    if (!fetcher.data) return;
+    if (fetcher.data === lastHandledData.current) return;
+    lastHandledData.current = fetcher.data;
+    const d = fetcher.data;
+
+    if (d.intent === "counts") {
+      if (d.ok) setCounts({ products: d.products, collections: d.collections, customers: d.customers });
+      else setError(d.error || "Failed to fetch counts");
+      return;
+    }
+
+    // Export response
+    if (d.intent && d.intent.startsWith("export-")) {
+      const moduleKey = d.intent.replace("export-", "");
+      const updated = { ...exportResultsRef.current, [moduleKey]: d };
+      exportResultsRef.current = updated;
+      setExportResults(updated);
+
+      if (!d.ok) {
+        setError(d.error || `Failed to export ${moduleKey}`);
+      }
+
+      if (d.ok && d.csv) {
+        // Auto-download
+        const blob = new Blob([d.csv], { type: "text/csv;charset=utf-8;" });
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
-        a.download = data.filename;
+        a.download = d.filename;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
-        shopify.toast.show(`Exported ${data.count} ${exporting || "items"} to CSV`);
       }
-      setExporting(null);
+
+      // Next in queue
+      if (exportQueueRef.current.length > 0) {
+        const next = exportQueueRef.current.shift();
+        setCurrentExport(next);
+        fetcher.submit({ intent: EXPORT_MODULES[next].intent }, { method: "POST" });
+      } else {
+        setCurrentExport(null);
+        setStep(STEP_RESULTS);
+        const hadErrors = Object.values({ ...exportResultsRef.current, [d.intent.replace("export-", "")]: d }).some((r) => !r.ok);
+        shopify.toast.show(hadErrors ? "Export done with some errors" : "Export complete!");
+      }
     }
-  }, [fetcher.state, fetcher.data, shopify, exporting]);
+  }, [fetcher.state, fetcher.data, fetcher.error, step, shopify, fetcher]);
 
-  const handleExport = useCallback((type) => {
-    setExporting(type);
-    setError("");
-    downloadedRef.current = false;
-    fetcher.submit({ exportType: type }, { method: "POST" });
-  }, [fetcher]);
+  // ── Computed ──
+  const moduleKeys = exportMode === "full" ? Object.keys(EXPORT_MODULES) : (exportMode ? [exportMode] : []);
+  const totalExported = Object.values(exportResults).reduce((s, r) => s + (r.ok ? (r.count || 0) : 0), 0);
+  const totalFiles = Object.values(exportResults).filter((r) => r.ok).length;
+  const totalErrors = Object.values(exportResults).filter((r) => !r.ok).length;
 
-  const primary = "#17320A";
-  const secondary = "#2E6316";
+  // ── Download a result again ──
+  const redownload = useCallback((moduleKey) => {
+    const r = exportResults[moduleKey];
+    if (!r?.csv) return;
+    const blob = new Blob([r.csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = r.filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, [exportResults]);
 
-  const exportOptions = [
-    {
-      type: "products",
-      title: "Products",
-      desc: "Export all products with variants, prices, images, and inventory",
-      icon: (
-        <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
-        </svg>
-      ),
-    },
-    {
-      type: "customers",
-      title: "Customers",
-      desc: "Export all customers with addresses, tags, and contact info",
-      icon: (
-        <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z" />
-        </svg>
-      ),
-    },
-    {
-      type: "collections",
-      title: "Collections",
-      desc: "Export all custom and smart collections",
-      icon: (
-        <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" />
-        </svg>
-      ),
-    },
-  ];
-
+  // ═══════════════════════════════════════════════════════════════
+  // Render
+  // ═══════════════════════════════════════════════════════════════
   return (
-    <s-page heading="Export Data" subtitle="Download your Shopify data as CSV" backAction={JSON.stringify({ content: "Dashboard", url: "/app" })}>
+    <s-page heading="Export" backAction={JSON.stringify({ content: "Dashboard", url: "/app" })}>
       <div className="space-y-6 animate-fade-in">
+        {/* Header */}
         <div className="flex items-center gap-2.5">
           <img src="/logo.png" alt="Importzo" style={{ height: 40, width: "auto", objectFit: "contain" }} />
-          <span style={{ fontSize: 18, fontWeight: 600, color: "#17320A", fontFamily: "'ImportzoFont', sans-serif" }}>Export Data</span>
+          <span style={{ fontSize: 18, fontWeight: 600, color: P, fontFamily: F }}>Export</span>
         </div>
 
-        {error && (
-          <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 flex items-center gap-3">
-            <svg className="w-5 h-5 text-red-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            <span className="text-sm font-medium text-red-800">{error}</span>
+        {/* ═══ HUB VIEW ═══ */}
+        {view === "hub" && (
+          <div className="animate-fade-in space-y-6">
+            {/* Hero: Full Store Export */}
+            <button
+              onClick={() => startFlow("full")}
+              className="group w-full text-left bg-white rounded-xl border-2 border-green-800/20 p-6 shadow-sm hover:shadow-lg hover:border-green-800/40 transition-all duration-200 hover:-translate-y-0.5"
+              style={{ background: "linear-gradient(135deg, rgba(23,50,10,0.03) 0%, rgba(46,99,22,0.06) 100%)" }}
+            >
+              <div className="flex items-start gap-4">
+                <div className="w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: P, color: "#fff" }}>
+                  <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+                  </svg>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-base font-bold text-gray-900" style={{ fontFamily: F }}>Full Store Export</h2>
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wider" style={{ background: "rgba(23,50,10,0.1)", color: S }}>Recommended</span>
+                  </div>
+                  <p className="text-sm text-gray-500 mt-1 leading-relaxed">
+                    Export your entire store as CSV files. Products, collections, customers, and inventory &mdash; all at once.
+                  </p>
+                  <div className="mt-3 inline-flex items-center gap-1.5 text-sm font-semibold group-hover:gap-2.5 transition-all" style={{ color: S }}>
+                    Start Full Export
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}><path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" /></svg>
+                  </div>
+                </div>
+              </div>
+            </button>
+
+            {/* Divider */}
+            <div className="flex items-center gap-3">
+              <div className="flex-1 h-px bg-gray-200" />
+              <span className="text-xs font-medium text-gray-400 uppercase tracking-wider">Or export selectively</span>
+              <div className="flex-1 h-px bg-gray-200" />
+            </div>
+
+            {/* Selective Export Cards */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              {Object.entries(EXPORT_MODULES).map(([key, mod]) => (
+                <button
+                  key={key}
+                  onClick={() => startFlow(key)}
+                  className="group text-left bg-white rounded-xl border border-gray-200 p-5 shadow-sm hover:shadow-md transition-all duration-200 hover:-translate-y-0.5"
+                >
+                  <div className="w-9 h-9 rounded-lg flex items-center justify-center mb-3" style={{ background: "rgba(23,50,10,0.08)", color: S }}>
+                    <svg className="w-[18px] h-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d={MODULE_ICONS[key]} />
+                    </svg>
+                  </div>
+                  <p className="text-sm font-semibold text-gray-900" style={{ fontFamily: F }}>Export {mod.label}</p>
+                  <p className="text-xs text-gray-500 mt-1 leading-relaxed">{mod.desc}</p>
+                  <span className="mt-3 inline-flex items-center gap-1 text-xs font-semibold group-hover:gap-1.5 transition-all" style={{ color: S }}>
+                    Export <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}><path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" /></svg>
+                  </span>
+                </button>
+              ))}
+            </div>
+
+            {/* Not yet available — explained clearly */}
+            <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
+              <div className="flex items-start gap-3">
+                <svg className="w-5 h-5 text-gray-400 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z" />
+                </svg>
+                <div className="flex-1">
+                  <p className="text-sm font-medium text-gray-700">Pages, Blog Posts, Files and Metafields</p>
+                  <p className="text-xs text-gray-500 mt-1 leading-relaxed">
+                    CSV export for these content types isn&apos;t available yet. To migrate them between stores today,
+                    use <a href="/app/collection-transfer" className="font-semibold hover:underline" style={{ color: S }}>Transfer Store</a>, or use Shopify&apos;s admin
+                    bulk actions. They&apos;ll appear here once we finalize a reliable field schema.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Info */}
+            <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
+              <div className="flex items-start gap-3">
+                <svg className="w-5 h-5 text-gray-400 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z" />
+                </svg>
+                <div>
+                  <p className="text-sm font-medium text-gray-700">About exports</p>
+                  <p className="text-sm text-gray-500 mt-1">
+                    All exports are downloaded as standard Shopify-compatible CSV files. Products include all variants and images.
+                    Collections include both custom and smart types. Customer exports include primary address.
+                  </p>
+                </div>
+              </div>
+            </div>
           </div>
         )}
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          {exportOptions.map((opt) => (
-            <div key={opt.type} className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm hover:shadow-md transition-all duration-200 hover:-translate-y-0.5">
-              <div className="flex flex-col items-center text-center gap-4">
-                <div className="w-14 h-14 rounded-full flex items-center justify-center" style={{ background: "rgba(23,50,10,0.1)", color: secondary }}>
-                  {opt.icon}
+        {/* ═══ FLOW VIEW ═══ */}
+        {view === "flow" && (
+          <div className="animate-fade-in space-y-5">
+            {/* Stepper */}
+            <div className="px-1 pb-2">
+              <div className="flex items-center justify-between max-w-lg mx-auto">
+                {["Preview", "Exporting", "Results"].map((label, i) => (
+                  <div key={label} className="flex items-center flex-1 last:flex-initial">
+                    <div className="flex flex-col items-center gap-1.5">
+                      <div style={{
+                        width: 32, height: 32, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center",
+                        fontSize: 13, fontWeight: 600,
+                        ...(i <= step ? { background: P, color: "#fff", boxShadow: "0 4px 12px rgba(23,50,10,0.3)" } : { background: "#E5E7EB", color: "#6b7280" }),
+                      }}>
+                        {i < step ? <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg> : i + 1}
+                      </div>
+                      <span className={`text-xs font-medium hidden sm:block ${i <= step ? "text-gray-900" : "text-gray-400"}`}>{label}</span>
+                    </div>
+                    {i < 2 && <div style={{ flex: 1, height: 2, marginLeft: 10, marginRight: 10, borderRadius: 1, background: i < step ? P : "#e5e7eb" }} />}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Error */}
+            {error && (
+              <div className="bg-red-50 border border-red-200 rounded-xl px-5 py-4 flex items-start gap-3">
+                <svg className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <p className="text-sm text-red-700">{error}</p>
+              </div>
+            )}
+
+            {/* ── STEP 0: PREVIEW ── */}
+            {step === STEP_PREVIEW && (
+              <div className="animate-fade-in space-y-4">
+                <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
+                  <h3 className="text-base font-semibold text-gray-900 mb-1" style={{ fontFamily: F }}>
+                    {exportMode === "full" ? "Full Store Export" : `Export ${EXPORT_MODULES[exportMode]?.label}`}
+                  </h3>
+                  <p className="text-sm text-gray-500 mb-5">
+                    {exportMode === "full"
+                      ? "Select the data you want to export. Each module will be saved as a separate CSV file."
+                      : `This will export all ${EXPORT_MODULES[exportMode]?.label.toLowerCase()} from your store as a CSV file.`}
+                  </p>
+
+                  {/* Module checkboxes (full store only) */}
+                  {exportMode === "full" && (
+                    <div className="space-y-3 mb-5">
+                      <div className="flex items-center gap-3">
+                        <button onClick={() => setSelectedModules(new Set(Object.keys(EXPORT_MODULES)))} className="text-xs font-medium px-2.5 py-1 rounded border border-gray-200 hover:bg-gray-50" style={{ color: S }}>Select All</button>
+                        <button onClick={() => setSelectedModules(new Set())} className="text-xs font-medium text-gray-500 px-2.5 py-1 rounded border border-gray-200 hover:bg-gray-50">Clear All</button>
+                      </div>
+                      {Object.entries(EXPORT_MODULES).map(([key, mod]) => (
+                        <label key={key} className={`flex items-center gap-3 px-4 py-3 rounded-lg border cursor-pointer transition-colors ${selectedModules.has(key) ? "border-green-200 bg-green-50/30" : "border-gray-200 bg-white"}`}>
+                          <input type="checkbox" checked={selectedModules.has(key)} onChange={() => toggleModule(key)} className="w-4 h-4 rounded" style={{ accentColor: P }} />
+                          <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background: "rgba(23,50,10,0.08)", color: S }}>
+                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d={MODULE_ICONS[key]} /></svg>
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-medium text-gray-900">{mod.label}</p>
+                            <p className="text-xs text-gray-500">{mod.desc}</p>
+                          </div>
+                          {counts && (
+                            <span className="text-sm font-semibold text-gray-700 tabular-nums">
+                              {key === "inventory" ? (counts.products ?? "—") : (counts[key] ?? "—")}
+                            </span>
+                          )}
+                        </label>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Single module count */}
+                  {exportMode !== "full" && counts && (
+                    <div className="mb-5 px-4 py-3 rounded-lg" style={{ background: "rgba(23,50,10,0.04)", border: "1px solid rgba(23,50,10,0.1)" }}>
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-lg flex items-center justify-center" style={{ background: "rgba(23,50,10,0.08)", color: S }}>
+                          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d={MODULE_ICONS[exportMode]} /></svg>
+                        </div>
+                        <div>
+                          <p className="text-sm font-semibold text-gray-900">
+                            {exportMode === "inventory" ? counts.products : counts[exportMode]} {EXPORT_MODULES[exportMode]?.label.toLowerCase()}
+                          </p>
+                          <p className="text-xs text-gray-500">Will be exported as CSV</p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Loading counts */}
+                  {!counts && isBusy && (
+                    <div className="flex items-center gap-2 text-sm text-gray-500 mb-5">
+                      <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" /></svg>
+                      Loading store data...
+                    </div>
+                  )}
+
+                  {/* Output details */}
+                  <div className="text-xs text-gray-500 space-y-1 border-t border-gray-100 pt-4">
+                    <p><strong>Format:</strong> CSV (comma-separated values)</p>
+                    <p><strong>Files:</strong> {selectedModules.size} file{selectedModules.size !== 1 ? "s" : ""}</p>
+                    <p><strong>Encoding:</strong> UTF-8</p>
+                  </div>
                 </div>
-                <div>
-                  <h3 className="text-lg font-semibold text-gray-900">{opt.title}</h3>
-                  <p className="text-sm text-gray-500 mt-1">{opt.desc}</p>
+
+                {/* Actions */}
+                <div className="flex items-center gap-3">
+                  <button onClick={backToHub} className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">Back</button>
+                  <button
+                    onClick={startExport}
+                    disabled={selectedModules.size === 0 || isBusy}
+                    style={selectedModules.size > 0 && !isBusy ? { background: P, color: "#fff", borderRadius: 8, fontWeight: 600, fontFamily: F } : { borderRadius: 8 }}
+                    className={`px-5 py-2.5 text-sm rounded-lg transition-all ${selectedModules.size > 0 && !isBusy ? "shadow-sm hover:brightness-110 active:scale-[0.98]" : "bg-gray-200 text-gray-400 cursor-not-allowed"}`}
+                  >
+                    Export {selectedModules.size} Module{selectedModules.size !== 1 ? "s" : ""}
+                  </button>
                 </div>
-                <button
-                  onClick={() => handleExport(opt.type)}
-                  disabled={exporting !== null}
-                  style={exporting === null ? { background: primary, color: "#fff", borderRadius: 8, fontWeight: 600 } : { borderRadius: 8 }}
-                  className={`w-full px-5 py-2.5 text-sm rounded-lg transition-all ${
-                    exporting === null
-                      ? "shadow-sm hover:brightness-110 hover:shadow-[0_4px_12px_rgba(23,50,10,0.3)] active:scale-[0.98]"
-                      : "bg-gray-200 text-gray-400 cursor-not-allowed"
-                  }`}
-                >
-                  {exporting === opt.type ? (
-                    <span className="flex items-center justify-center gap-2">
-                      <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+              </div>
+            )}
+
+            {/* ── STEP 1: EXPORTING ── */}
+            {step === STEP_EXPORTING && (
+              <div className="animate-fade-in">
+                <div className="bg-white rounded-xl border border-gray-200 p-8 shadow-sm max-w-xl mx-auto">
+                  <div className="flex flex-col items-center gap-5">
+                    <div className="w-16 h-16 rounded-full bg-green-50 flex items-center justify-center">
+                      <svg className="w-8 h-8 animate-spin" style={{ color: P }} fill="none" viewBox="0 0 24 24">
                         <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                         <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
                       </svg>
-                      Exporting...
-                    </span>
-                  ) : (
-                    <span className="flex items-center justify-center gap-2">
-                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
-                      </svg>
-                      Export CSV
-                    </span>
-                  )}
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
+                    </div>
+                    <div className="text-center w-full">
+                      <h3 className="text-lg font-semibold text-gray-900">Exporting store data...</h3>
+                      <p className="text-sm text-gray-500 mt-1">
+                        Files will download automatically as they complete.{exportElapsed > 0 ? ` · ${Math.floor(exportElapsed / 60)}m ${exportElapsed % 60}s` : ""}
+                      </p>
+                      {exportElapsed >= 45 && (
+                        <p className="text-xs text-amber-600 mt-1">Large exports can take a while — still working.</p>
+                      )}
 
-        <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
-          <div className="flex items-start gap-3">
-            <svg className="w-5 h-5 text-gray-400 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z" />
-            </svg>
-            <div>
-              <p className="text-sm font-medium text-gray-700">About exports</p>
-              <p className="text-sm text-gray-500 mt-1">
-                Exports include all data from your Shopify store in standard CSV format.
-                Products include all variants. Customers include primary address.
-                Collections include both custom and smart types.
-              </p>
-            </div>
+                      {/* Progress */}
+                      <div className="mt-6 space-y-2 text-left">
+                        {[...selectedModules].map((key) => {
+                          const result = exportResults[key];
+                          const isCurrent = currentExport === key;
+                          return (
+                            <div key={key} className="flex items-center gap-3 px-4 py-2.5 rounded-lg bg-gray-50">
+                              {result?.ok ? (
+                                <svg className="w-5 h-5 text-green-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4" /></svg>
+                              ) : result && !result.ok ? (
+                                <svg className="w-5 h-5 text-red-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                              ) : isCurrent ? (
+                                <svg className="w-5 h-5 animate-spin flex-shrink-0" style={{ color: P }} fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" /></svg>
+                              ) : (
+                                <div className="w-5 h-5 rounded-full border-2 border-gray-300 flex-shrink-0" />
+                              )}
+                              <span className={`text-sm font-medium flex-1 ${result?.ok ? "text-green-700" : result && !result.ok ? "text-red-700" : isCurrent ? "text-gray-900" : "text-gray-400"}`}>
+                                {EXPORT_MODULES[key]?.label}
+                              </span>
+                              {result?.ok && <span className="text-xs text-gray-500">{result.count} records</span>}
+                              {result && !result.ok && <span className="text-xs text-red-600">Failed</span>}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* ── STEP 2: RESULTS ── */}
+            {step === STEP_RESULTS && (
+              <div className="animate-fade-in space-y-4">
+                {/* Summary stats */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  <div className="bg-white rounded-xl border border-green-200 p-5 shadow-sm">
+                    <p className="text-2xl font-bold text-gray-900">{totalFiles}</p>
+                    <p className="text-sm text-green-600 font-medium">Files Exported</p>
+                  </div>
+                  <div className="bg-white rounded-xl border border-green-200 p-5 shadow-sm">
+                    <p className="text-2xl font-bold text-gray-900">{totalExported.toLocaleString()}</p>
+                    <p className="text-sm text-green-600 font-medium">Total Records</p>
+                  </div>
+                  {totalErrors > 0 && (
+                    <div className="bg-white rounded-xl border border-red-200 p-5 shadow-sm">
+                      <p className="text-2xl font-bold text-gray-900">{totalErrors}</p>
+                      <p className="text-sm text-red-600 font-medium">Failed Exports</p>
+                    </div>
+                  )}
+                </div>
+
+                {/* Per-module results */}
+                <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+                  <div className="px-6 py-4 border-b border-gray-100">
+                    <h3 className="text-sm font-semibold text-gray-900">Export Results</h3>
+                  </div>
+                  <div className="divide-y divide-gray-100">
+                    {[...selectedModules].map((key) => {
+                      const r = exportResults[key];
+                      if (!r) return null;
+                      return (
+                        <div key={key} className="px-6 py-4 flex items-center gap-4">
+                          {r.ok ? (
+                            <svg className="w-5 h-5 text-green-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4" /></svg>
+                          ) : (
+                            <svg className="w-5 h-5 text-red-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                          )}
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-medium text-gray-900">{EXPORT_MODULES[key]?.label}</p>
+                            {r.ok ? (
+                              <p className="text-xs text-gray-500">{r.count} records &middot; {r.filename}</p>
+                            ) : (
+                              <p className="text-xs text-red-600">{r.error}</p>
+                            )}
+                          </div>
+                          {r.ok && (
+                            <button onClick={() => redownload(key)} className="text-xs font-medium px-3 py-1.5 rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors" style={{ color: S }}>
+                              Download Again
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Actions */}
+                <div className="flex items-center gap-3">
+                  <button onClick={backToHub} style={{ background: P, color: "#fff", borderRadius: 8, fontWeight: 600, fontFamily: F }} className="px-5 py-2.5 text-sm rounded-lg shadow-sm hover:brightness-110 transition-all">
+                    New Export
+                  </button>
+                  <a href="/app" className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">Back to Dashboard</a>
+                </div>
+              </div>
+            )}
           </div>
-        </div>
+        )}
       </div>
     </s-page>
   );
 }
 
+export function ErrorBoundary() {
+  const error = useRouteError();
+  return (
+    <FriendlyErrorBoundary
+      heading="Export"
+      title="We couldn't load Export"
+      message="Please try again. Your store data is untouched — this is just a display issue."
+      error={error}
+    />
+  );
+}
 export const headers = (headersArgs) => boundary.headers(headersArgs);
