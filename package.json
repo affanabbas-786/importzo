@@ -35,10 +35,13 @@
     "@shopify/shopify-app-react-router": "^1.1.0",
     "@shopify/shopify-app-session-storage-prisma": "^8.0.0",
     "isbot": "^5.1.31",
+    "libsodium": "^0.8.3",
     "prisma": "^6.16.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router": "^7.12.0",
+    "tweetnacl": "^1.0.3",
+    "tweetnacl-util": "^0.15.1",
     "vite-tsconfig-paths": "^5.1.4"
   },
   "devDependencies": {

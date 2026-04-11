@@ -17,7 +17,12 @@
       "Bash(grep:*)",
       "Bash(sqlite3:*)",
       "Bash(npx --yes eslint app/routes/app.jsx app/routes/app._index.jsx app/routes/app.settings.jsx app/routes/app.collection-transfer.jsx app/components/FriendlyErrorBoundary.jsx app/components/SupportWidget.jsx app/components/NavProgress.jsx app/lib/safe-db.js app/lib/support.js)",
-      "Bash(npx eslint:*)"
+      "Bash(npx eslint:*)",
+      "Bash(ssh:*)",
+      "Bash(cat)",
+      "Bash(scp /tmp/fix_transfer.py root@72.61.3.94:/tmp/fix_transfer.py)",
+      "Bash(scp C:/tmp/fix_export.py root@72.61.3.94:/tmp/fix_export.py)",
+      "Bash(scp C:/tmp/fix_ux.py root@72.61.3.94:/tmp/fix_ux.py)"
     ]
   }
 }
