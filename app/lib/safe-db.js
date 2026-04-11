@@ -10,6 +10,7 @@
 // ═══════════════════════════════════════════════════════════════════
 
 import prisma from "../db.server";
+import { encryptToken, decryptToken } from "./encryption.js";
 
 // Ensure the SourceStore table exists at runtime. This is a safety net
 // for environments where `prisma migrate deploy` has not yet been run
@@ -48,7 +49,23 @@ export async function getSavedSourceStore(shop) {
   try {
     await ensureSourceStoreTable();
     if (!hasSourceStoreModel()) return null;
-    return await prisma.sourceStore.findUnique({ where: { shop } });
+    const record = await prisma.sourceStore.findUnique({ where: { shop } });
+    if (!record) return null;
+
+    // ✅ Decrypt token when retrieving
+    const decrypted = await decryptToken(record.token);
+
+    return {
+      id: record.id,
+      shop: record.shop,
+      sourceUrl: record.sourceUrl,
+      sourceName: record.sourceName,
+      sourceEmail: record.sourceEmail,
+      sourcePlan: record.sourcePlan,
+      token: decrypted, // Now plaintext only in memory
+      lastUsed: record.lastUsed,
+      createdAt: record.createdAt,
+    };
   } catch (err) {
     console.warn("[importzo] getSavedSourceStore failed:", err?.message || err);
     return null;
@@ -59,10 +76,28 @@ export async function upsertSourceStore(shop, data) {
   try {
     await ensureSourceStoreTable();
     if (!hasSourceStoreModel()) return null;
+
+    // ✅ Encrypt token before storing
+    const encryptedToken = await encryptToken(data.token);
+
     return await prisma.sourceStore.upsert({
       where: { shop },
-      update: { ...data, lastUsed: new Date() },
-      create: { shop, ...data },
+      create: {
+        shop,
+        sourceUrl: data.sourceUrl,
+        sourceName: data.sourceName || "",
+        sourceEmail: data.sourceEmail || "",
+        sourcePlan: data.sourcePlan || "",
+        token: encryptedToken,
+      },
+      update: {
+        sourceUrl: data.sourceUrl,
+        sourceName: data.sourceName || "",
+        sourceEmail: data.sourceEmail || "",
+        sourcePlan: data.sourcePlan || "",
+        token: encryptedToken,
+        lastUsed: new Date(),
+      },
     });
   } catch (err) {
     console.warn("[importzo] upsertSourceStore failed:", err?.message || err);
