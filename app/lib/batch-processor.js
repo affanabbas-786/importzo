@@ -6,6 +6,7 @@ export async function batchProcess(items, options = {}) {
   const {
     batchSize = 10,
     delayMs = 200,
+    // eslint-disable-next-line no-unused-vars
     maxRetries = 3,
     worker // async function that processes one item
   } = options;
