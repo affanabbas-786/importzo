@@ -277,17 +277,41 @@ export const action = async ({ request }) => {
       const { url, token } = await getSourceCreds();
       const custom = await fetchAllPages(`https://${url}/admin/api/${version}/custom_collections.json?limit=250`, token);
       const smart = await fetchAllPages(`https://${url}/admin/api/${version}/smart_collections.json?limit=250`, token);
+
       const collections = [];
+
+      // Custom collections
       for (const c of custom) {
-        let productCount = 0;
-        try { const r = await fetch(`https://${url}/admin/api/${version}/products/count.json?collection_id=${c.id}`, { headers: { "X-Shopify-Access-Token": token } }); if (r.ok) productCount = (await r.json()).count || 0; } catch (_) { }
-        collections.push({ id: c.id, title: c.title, handle: c.handle, body_html: c.body_html || "", image: c.image?.src || "", published: !!c.published_at, sort_order: c.sort_order || "", type: "custom", productCount });
+        collections.push({
+          id: c.id,
+          title: c.title,
+          handle: c.handle,
+          body_html: c.body_html || "",
+          image: c.image?.src || "",
+          published: !!c.published_at,
+          sort_order: c.sort_order || "",
+          type: "custom",
+          // ✅ Removed productCount - calculate during transfer instead
+        });
       }
+
+      // Smart collections
       for (const c of smart) {
-        let productCount = 0;
-        try { const r = await fetch(`https://${url}/admin/api/${version}/products/count.json?collection_id=${c.id}`, { headers: { "X-Shopify-Access-Token": token } }); if (r.ok) productCount = (await r.json()).count || 0; } catch (_) { }
-        collections.push({ id: c.id, title: c.title, handle: c.handle, body_html: c.body_html || "", image: c.image?.src || "", published: !!c.published_at, sort_order: c.sort_order || "", type: "smart", rules: c.rules || [], disjunctive: c.disjunctive || false, productCount });
+        collections.push({
+          id: c.id,
+          title: c.title,
+          handle: c.handle,
+          body_html: c.body_html || "",
+          image: c.image?.src || "",
+          published: !!c.published_at,
+          sort_order: c.sort_order || "",
+          type: "smart",
+          rules: c.rules || [],
+          disjunctive: c.disjunctive || false,
+          // ✅ Removed productCount
+        });
       }
+
       return { intent: "fetch-collections", rid, ok: true, collections };
     } catch (err) {
       return { intent: "fetch-collections", rid, ok: false, error: err.message };
