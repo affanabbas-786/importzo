@@ -10,6 +10,7 @@ import {
   touchSourceStore,
   deleteSourceStore,
 } from "../lib/safe-db";
+import { batchProcess } from "../lib/batch-processor.js";
 import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
 import { loadPrefs } from "../lib/prefs";
 import { friendlyError, summarizeFailures } from "../lib/friendly-errors";
@@ -298,53 +299,203 @@ export const action = async ({ request }) => {
     const { url: sourceUrl, token: sourceToken } = await getSourceCreds();
     const col = JSON.parse(formData.get("collection"));
     const dryRun = formData.get("dryRun") === "true";
-    const out = { collectionId: col.id, collectionTitle: col.title, collectionType: col.type, newCollectionId: null, collectionWarning: null, collectionError: null, products: [] };
+    const out = {
+      collectionId: col.id,
+      collectionTitle: col.title,
+      collectionType: col.type,
+      newCollectionId: null,
+      collectionWarning: null,
+      collectionError: null,
+      products: [],
+    };
 
     if (dryRun) {
-      // Dry run — count products without creating anything
       try {
-        const products = await fetchAllPages(`https://${sourceUrl}/admin/api/${version}/collections/${col.id}/products.json?limit=250`, sourceToken);
-        out.products = products.map((p) => ({ sourceId: p.id, title: p.title, status: "dry-run", error: null, warnings: [] }));
-      } catch (err) { out.collectionError = err.message; }
+        const products = await fetchAllPages(
+          `https://${sourceUrl}/admin/api/${version}/collections/${col.id}/products.json?limit=250`,
+          sourceToken
+        );
+        out.products = products.map((p) => ({
+          sourceId: p.id,
+          title: p.title,
+          status: "dry-run",
+          error: null,
+          warnings: [],
+        }));
+      } catch (err) {
+        out.collectionError = err.message;
+      }
       return { intent: "transfer", rid, ok: true, result: out };
     }
 
     try {
+      // Create target collection (smart or custom)
       let newColId = null;
       if (col.type === "smart") {
-        const body = { smart_collection: { title: col.title, body_html: col.body_html || "", published: col.published, sort_order: col.sort_order || "alpha-asc", rules: col.rules?.length > 0 ? col.rules : [{ column: "tag", relation: "equals", condition: col.title || "imported" }], disjunctive: col.disjunctive || false } };
+        const body = {
+          smart_collection: {
+            title: col.title,
+            body_html: col.body_html || "",
+            published: col.published,
+            sort_order: col.sort_order || "alpha-asc",
+            rules:
+              col.rules && col.rules.length > 0
+                ? col.rules
+                : [{ column: "tag", relation: "equals", condition: col.title || "imported" }],
+            disjunctive: col.disjunctive || false,
+          },
+        };
         if (col.image) body.smart_collection.image = { src: col.image };
-        let res = await fetch(`https://${targetShop}/admin/api/${version}/smart_collections.json`, { method: "POST", headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": targetToken }, body: JSON.stringify(body) });
-        if (!res.ok && col.image) { delete body.smart_collection.image; out.collectionWarning = "Collection image skipped"; res = await fetch(`https://${targetShop}/admin/api/${version}/smart_collections.json`, { method: "POST", headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": targetToken }, body: JSON.stringify(body) }); }
-        if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.errors ? JSON.stringify(err.errors) : `HTTP ${res.status}`); }
+
+        let res = await fetch(
+          `https://${targetShop}/admin/api/${version}/smart_collections.json`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Shopify-Access-Token": targetToken,
+            },
+            body: JSON.stringify(body),
+          }
+        );
+
+        // Retry without image if it fails
+        if (!res.ok && col.image) {
+          delete body.smart_collection.image;
+          out.collectionWarning = "Collection image skipped";
+          res = await fetch(
+            `https://${targetShop}/admin/api/${version}/smart_collections.json`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "X-Shopify-Access-Token": targetToken,
+              },
+              body: JSON.stringify(body),
+            }
+          );
+        }
+
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(
+            err.errors ? JSON.stringify(err.errors) : `HTTP ${res.status}`
+          );
+        }
         newColId = (await res.json()).smart_collection.id;
       } else {
-        const body = { custom_collection: { title: col.title, body_html: col.body_html || "", published: col.published, sort_order: col.sort_order || "" } };
+        // Custom collection (same pattern, omitted for brevity)
+        const body = {
+          custom_collection: {
+            title: col.title,
+            body_html: col.body_html || "",
+            published: col.published,
+            sort_order: col.sort_order || "",
+          },
+        };
         if (col.image) body.custom_collection.image = { src: col.image };
-        let res = await fetch(`https://${targetShop}/admin/api/${version}/custom_collections.json`, { method: "POST", headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": targetToken }, body: JSON.stringify(body) });
-        if (!res.ok && col.image) { delete body.custom_collection.image; out.collectionWarning = "Collection image skipped"; res = await fetch(`https://${targetShop}/admin/api/${version}/custom_collections.json`, { method: "POST", headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": targetToken }, body: JSON.stringify(body) }); }
-        if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.errors ? JSON.stringify(err.errors) : `HTTP ${res.status}`); }
+
+        let res = await fetch(
+          `https://${targetShop}/admin/api/${version}/custom_collections.json`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Shopify-Access-Token": targetToken,
+            },
+            body: JSON.stringify(body),
+          }
+        );
+
+        if (!res.ok && col.image) {
+          delete body.custom_collection.image;
+          out.collectionWarning = "Collection image skipped";
+          res = await fetch(
+            `https://${targetShop}/admin/api/${version}/custom_collections.json`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "X-Shopify-Access-Token": targetToken,
+              },
+              body: JSON.stringify(body),
+            }
+          );
+        }
+
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(
+            err.errors ? JSON.stringify(err.errors) : `HTTP ${res.status}`
+          );
+        }
         newColId = (await res.json()).custom_collection.id;
       }
+
       out.newCollectionId = newColId;
 
-      const sourceProducts = await fetchAllPages(`https://${sourceUrl}/admin/api/${version}/collections/${col.id}/products.json?limit=250`, sourceToken);
-      for (const src of sourceProducts) {
-        const pr = { sourceId: src.id, title: src.title, status: "success", error: null, warnings: [] };
-        try {
-          const { id: newId, warnings } = await createProductOnTarget(src);
-          pr.newProductId = newId;
-          pr.warnings = warnings;
-          if (col.type !== "smart" && newColId) {
-            try {
-              const collectRes = await fetch(`https://${targetShop}/admin/api/${version}/collects.json`, { method: "POST", headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": targetToken }, body: JSON.stringify({ collect: { product_id: newId, collection_id: newColId } }) });
-              if (!collectRes.ok) pr.warnings.push("Could not link to collection");
-            } catch (_) { pr.warnings.push("Collection link failed"); }
-          }
-        } catch (err) { pr.status = "error"; pr.error = err.message; }
-        out.products.push(pr);
+      // ✅ CHANGE: Fetch all products first, then process in parallel
+      const sourceProducts = await fetchAllPages(
+        `https://${sourceUrl}/admin/api/${version}/collections/${col.id}/products.json?limit=250`,
+        sourceToken
+      );
+
+      // ✅ CHANGE: Use batch processor instead of sequential loop
+      const { results: processedProducts, failedItems } = await batchProcess(
+        sourceProducts,
+        {
+          batchSize: 10,
+          delayMs: 200,
+          worker: async (src) => {
+            const pr = {
+              sourceId: src.id,
+              title: src.title,
+              status: "success",
+              error: null,
+              warnings: [],
+            };
+
+            const { id: newId, warnings } = await createProductOnTarget(src);
+            pr.newProductId = newId;
+            pr.warnings = warnings;
+
+            // Add to custom collection (not needed for smart collections)
+            if (col.type !== "smart" && newColId) {
+              try {
+                const collectRes = await fetch(
+                  `https://${targetShop}/admin/api/${version}/collects.json`,
+                  {
+                    method: "POST",
+                    headers: {
+                      "Content-Type": "application/json",
+                      "X-Shopify-Access-Token": targetToken,
+                    },
+                    body: JSON.stringify({
+                      collect: { product_id: newId, collection_id: newColId },
+                    }),
+                  }
+                );
+                if (!collectRes.ok) pr.warnings.push("Could not link to collection");
+              } catch (_) {
+                pr.warnings.push("Collection link failed");
+              }
+            }
+
+            return pr;
+          },
+        }
+      );
+
+      out.products = processedProducts;
+
+      // Report failures
+      if (failedItems.length > 0) {
+        out.collectionError = `${failedItems.length} products failed to transfer`;
       }
-    } catch (err) { out.collectionError = err.message; }
+    } catch (err) {
+      out.collectionError = err.message;
+    }
+
     return { intent: "transfer", rid, ok: true, result: out };
   }
 
