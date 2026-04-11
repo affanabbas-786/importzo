@@ -58,14 +58,23 @@ export const action = async ({ request }) => {
     const MAX_RETRIES = 3;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       const res = await fetch(url, opts);
+
       if (res.status === 429) {
-        const retryAfter = parseFloat(res.headers.get("Retry-After") || "0");
+        // ✅ Respect Retry-After header
+        const retryAfter = parseFloat(res.headers.get("Retry-After") || "1");
         const delay = Math.max(retryAfter * 1000, 1000 * Math.pow(2, attempt));
-        if (attempt < MAX_RETRIES) { await new Promise((r) => setTimeout(r, delay)); continue; }
+
+        console.warn(
+          `Rate limited. Retry after ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`
+        );
+
+        if (attempt < MAX_RETRIES) {
+          await new Promise((r) => setTimeout(r, delay));
+          continue;
+        }
       }
       return res;
     }
-    // Should not reach here, but just in case
     return fetch(url, opts);
   }
 

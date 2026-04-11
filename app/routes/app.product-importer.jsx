@@ -253,17 +253,24 @@ export const action = async ({ request }) => {
                 mediaContentType: "VIDEO",
               }));
               const res = await attachMedia(input);
-              const errs = res?.data?.productCreateMedia?.mediaUserErrors;
-              if (errs && errs.length > 0) {
+
+              // ✅ Check for GraphQL errors (not HTTP errors)
+              if (res.errors) {
+                console.error("GraphQL error:", res.errors[0].message);
+                videoNotes.push(`Video attachment failed: ${res.errors[0].message}`);
+              } else if (res.data?.productCreateMedia?.mediaUserErrors?.length > 0) {
+                const errs = res.data.productCreateMedia.mediaUserErrors;
+                console.warn("Media errors:", errs);
                 videoNotes.push(
-                  "Note: Videos must be added manually via Shopify Media Manager",
+                  `Video format unsupported: ${errs.map((e) => e.message).join(", ")}`
                 );
               } else {
                 videoNotes.push(
                   `${shopifyCdn.length} video${shopifyCdn.length > 1 ? "s" : ""} added successfully`,
                 );
               }
-            } catch {
+            } catch (err) {
+              console.error("Video attachment error:", err);
               videoNotes.push("Note: Videos must be added manually via Shopify Media Manager");
             }
           }
@@ -276,17 +283,24 @@ export const action = async ({ request }) => {
                 mediaContentType: "EXTERNAL_VIDEO",
               }));
               const res = await attachMedia(input);
-              const errs = res?.data?.productCreateMedia?.mediaUserErrors;
-              if (errs && errs.length > 0) {
+
+              // ✅ Check for GraphQL errors (not HTTP errors)
+              if (res.errors) {
+                console.error("GraphQL error:", res.errors[0].message);
+                videoNotes.push(`Video attachment failed: ${res.errors[0].message}`);
+              } else if (res.data?.productCreateMedia?.mediaUserErrors?.length > 0) {
+                const errs = res.data.productCreateMedia.mediaUserErrors;
+                console.warn("Media errors:", errs);
                 videoNotes.push(
-                  "Note: Videos must be added manually via Shopify Media Manager",
+                  `Video format unsupported: ${errs.map((e) => e.message).join(", ")}`
                 );
               } else {
                 videoNotes.push(
                   `${externalEmbed.length} external video${externalEmbed.length > 1 ? "s" : ""} added successfully`,
                 );
               }
-            } catch {
+            } catch (err) {
+              console.error("Video attachment error:", err);
               videoNotes.push("Note: Videos must be added manually via Shopify Media Manager");
             }
           }
