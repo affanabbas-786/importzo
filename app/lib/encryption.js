@@ -21,6 +21,7 @@ export async function encryptToken(plaintext) {
   const nonce = sodium.randombytes_buf(sodium.crypto_secretbox_NONCEBYTES);
   // eslint-disable-next-line no-undef
   const ciphertext = sodium.crypto_secretbox_easy(
+    // eslint-disable-next-line no-undef
     Buffer.from(plaintext),
     nonce,
     key
