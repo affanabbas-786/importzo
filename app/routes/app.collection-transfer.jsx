@@ -277,15 +277,35 @@ export const action = async ({ request }) => {
       const custom = await fetchAllPages(`https://${url}/admin/api/${version}/custom_collections.json?limit=250`, token);
       const smart = await fetchAllPages(`https://${url}/admin/api/${version}/smart_collections.json?limit=250`, token);
       const collections = [];
+
+      // Batch all collection product counts in ONE GraphQL request (eliminates N+1)
+      const countMap = {};
+      try {
+        let hasCursorNext = true;
+        let afterCursor = null;
+        while (hasCursorNext) {
+          const q = `{ collections(first:250${afterCursor ? `,after:"${afterCursor}"` : ""}) { edges { cursor node { id productsCount { count } } } pageInfo { hasNextPage } } }`;
+          const gqlRes = await shopifyFetch(`https://${url}/admin/api/${version}/graphql.json`, {
+            method: "POST", headers: { "X-Shopify-Access-Token": token, "Content-Type": "application/json" },
+            body: JSON.stringify({ query: q }),
+          });
+          if (gqlRes.ok) {
+            const gd = await gqlRes.json();
+            for (const edge of (gd.data?.collections?.edges || [])) {
+              const numId = parseInt(edge.node.id.split("/").pop(), 10);
+              countMap[numId] = edge.node.productsCount?.count ?? 0;
+              afterCursor = edge.cursor;
+            }
+            hasCursorNext = gd.data?.collections?.pageInfo?.hasNextPage || false;
+          } else { hasCursorNext = false; }
+        }
+      } catch (_) { /* non-fatal */ }
+
       for (const c of custom) {
-        let productCount = 0;
-        try { const r = await fetch(`https://${url}/admin/api/${version}/products/count.json?collection_id=${c.id}`, { headers: { "X-Shopify-Access-Token": token } }); if (r.ok) productCount = (await r.json()).count || 0; } catch (_) { }
-        collections.push({ id: c.id, title: c.title, handle: c.handle, body_html: c.body_html || "", image: c.image?.src || "", published: !!c.published_at, sort_order: c.sort_order || "", type: "custom", productCount });
+        collections.push({ id: c.id, title: c.title, handle: c.handle, body_html: c.body_html || "", image: c.image?.src || "", published: !!c.published_at, sort_order: c.sort_order || "", type: "custom", productCount: countMap[c.id] ?? 0 });
       }
       for (const c of smart) {
-        let productCount = 0;
-        try { const r = await fetch(`https://${url}/admin/api/${version}/products/count.json?collection_id=${c.id}`, { headers: { "X-Shopify-Access-Token": token } }); if (r.ok) productCount = (await r.json()).count || 0; } catch (_) { }
-        collections.push({ id: c.id, title: c.title, handle: c.handle, body_html: c.body_html || "", image: c.image?.src || "", published: !!c.published_at, sort_order: c.sort_order || "", type: "smart", rules: c.rules || [], disjunctive: c.disjunctive || false, productCount });
+        collections.push({ id: c.id, title: c.title, handle: c.handle, body_html: c.body_html || "", image: c.image?.src || "", published: !!c.published_at, sort_order: c.sort_order || "", type: "smart", rules: c.rules || [], disjunctive: c.disjunctive || false, productCount: countMap[c.id] ?? 0 });
       }
       return { intent: "fetch-collections", rid, ok: true, collections };
     } catch (err) {
@@ -329,20 +349,26 @@ export const action = async ({ request }) => {
       out.newCollectionId = newColId;
 
       const sourceProducts = await fetchAllPages(`https://${sourceUrl}/admin/api/${version}/collections/${col.id}/products.json?limit=250`, sourceToken);
-      for (const src of sourceProducts) {
-        const pr = { sourceId: src.id, title: src.title, status: "success", error: null, warnings: [] };
-        try {
-          const { id: newId, warnings } = await createProductOnTarget(src);
-          pr.newProductId = newId;
-          pr.warnings = warnings;
-          if (col.type !== "smart" && newColId) {
-            try {
-              const collectRes = await fetch(`https://${targetShop}/admin/api/${version}/collects.json`, { method: "POST", headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": targetToken }, body: JSON.stringify({ collect: { product_id: newId, collection_id: newColId } }) });
-              if (!collectRes.ok) pr.warnings.push("Could not link to collection");
-            } catch (_) { pr.warnings.push("Collection link failed"); }
-          }
-        } catch (err) { pr.status = "error"; pr.error = err.message; }
-        out.products.push(pr);
+      // Parallel transfer: batches of 10
+      const TRANSFER_BATCH = 10;
+      for (let _bi = 0; _bi < sourceProducts.length; _bi += TRANSFER_BATCH) {
+        const batch = sourceProducts.slice(_bi, _bi + TRANSFER_BATCH);
+        const batchOut = await Promise.all(batch.map(async (src) => {
+          const pr = { sourceId: src.id, title: src.title, status: "success", error: null, warnings: [] };
+          try {
+            const { id: newId, warnings } = await createProductOnTarget(src);
+            pr.newProductId = newId;
+            pr.warnings = warnings;
+            if (col.type !== "smart" && newColId) {
+              try {
+                const collectRes = await fetch(`https://${targetShop}/admin/api/${version}/collects.json`, { method: "POST", headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": targetToken }, body: JSON.stringify({ collect: { product_id: newId, collection_id: newColId } }) });
+                if (!collectRes.ok) pr.warnings.push("Could not link to collection");
+              } catch (_) { pr.warnings.push("Collection link failed"); }
+            }
+          } catch (err) { pr.status = "error"; pr.error = err.message; }
+          return pr;
+        }));
+        out.products.push(...batchOut);
       }
     } catch (err) { out.collectionError = err.message; }
     return { intent: "transfer", rid, ok: true, result: out };
@@ -376,13 +402,19 @@ export const action = async ({ request }) => {
       }
 
       const results = [];
-      for (const src of productsToTransfer) {
-        try {
-          const { warnings } = await createProductOnTarget(src);
-          results.push({ title: src.title, status: "success", warnings });
-        } catch (err) {
-          results.push({ title: src.title, status: "error", error: err.message });
-        }
+      // Parallel transfer: batches of 10
+      const TRANSFER_BATCH = 10;
+      for (let _bi = 0; _bi < productsToTransfer.length; _bi += TRANSFER_BATCH) {
+        const batch = productsToTransfer.slice(_bi, _bi + TRANSFER_BATCH);
+        const batchOut = await Promise.all(batch.map(async (src) => {
+          try {
+            const { warnings } = await createProductOnTarget(src);
+            return { title: src.title, status: "success", warnings };
+          } catch (err) {
+            return { title: src.title, status: "error", error: err.message };
+          }
+        }));
+        results.push(...batchOut);
       }
       return { intent: "transfer-products", rid, ok: true, total: allProducts.length, transferred: productsToTransfer.length, results };
     } catch (err) {
@@ -794,6 +826,9 @@ export default function StoreTransferPage() {
       const updated = { ...transferResultsRef.current, themes: d };
       transferResultsRef.current = updated;
       setTransferResults(updated);
+      if (d.ok && d.previewUrl) {
+        shopify.toast.show(`Theme "${d.newThemeName || d.themeName}" created as unpublished`);
+      }
       advanceModuleQueue();
       return;
     }
@@ -805,6 +840,19 @@ export default function StoreTransferPage() {
     const id = setInterval(() => setTransferElapsed((s) => s + 1), 1000);
     return () => clearInterval(id);
   }, [step]);
+
+  // Safety: if fetcher stalls for >180s during transfer, surface an error
+  useEffect(() => {
+    if (step !== STEP_TRANSFER) return;
+    const safetyId = setTimeout(() => {
+      if (step === STEP_TRANSFER) {
+        setError("Transfer has been running for 3+ minutes without a response. Check your connection and try again.");
+        setCurrentModule(null);
+        setStep(STEP_RESULTS);
+      }
+    }, 180000);
+    return () => clearTimeout(safetyId);
+  }, [step, fetcher.state]);
 
   // ── Save record ──
   function saveRecord() {

@@ -1,3 +1,4 @@
+import { encrypt, decrypt } from "../utils/encryption.server";
 // ═══════════════════════════════════════════════════════════════════
 // Importzo — Safe DB Helpers
 // Defensive wrappers around Prisma calls that can crash the app if the
@@ -48,7 +49,9 @@ export async function getSavedSourceStore(shop) {
   try {
     await ensureSourceStoreTable();
     if (!hasSourceStoreModel()) return null;
-    return await prisma.sourceStore.findUnique({ where: { shop } });
+    const row = await prisma.sourceStore.findUnique({ where: { shop } });
+    if (row && row.token) row.token = decrypt(row.token);
+    return row;
   } catch (err) {
     console.warn("[importzo] getSavedSourceStore failed:", err?.message || err);
     return null;
@@ -61,8 +64,8 @@ export async function upsertSourceStore(shop, data) {
     if (!hasSourceStoreModel()) return null;
     return await prisma.sourceStore.upsert({
       where: { shop },
-      update: { ...data, lastUsed: new Date() },
-      create: { shop, ...data },
+      update: { ...data, token: data.token ? encrypt(data.token) : data.token, lastUsed: new Date() },
+      create: { shop, ...data, token: data.token ? encrypt(data.token) : data.token },
     });
   } catch (err) {
     console.warn("[importzo] upsertSourceStore failed:", err?.message || err);

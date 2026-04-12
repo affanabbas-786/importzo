@@ -17,7 +17,12 @@
       "Bash(grep:*)",
       "Bash(sqlite3:*)",
       "Bash(npx --yes eslint app/routes/app.jsx app/routes/app._index.jsx app/routes/app.settings.jsx app/routes/app.collection-transfer.jsx app/components/FriendlyErrorBoundary.jsx app/components/SupportWidget.jsx app/components/NavProgress.jsx app/lib/safe-db.js app/lib/support.js)",
-      "Bash(npx eslint:*)"
+      "Bash(npx eslint:*)",
+      "Bash(DATABASE_URL=\"file:./prisma/production.sqlite\" npx prisma:*)",
+      "Bash(pm2 restart:*)",
+      "Bash(pm2 logs:*)",
+      "Bash(ls -la prisma/*.sqlite)",
+      "Bash(node:*)"
     ]
   }
 }

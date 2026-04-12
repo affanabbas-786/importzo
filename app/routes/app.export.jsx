@@ -125,28 +125,32 @@ export const action = async ({ request }) => {
       const allCustomers = [];
       let hasNextPage = true;
       let cursor = null;
-      const CUSTOMER_TIMEOUT_MS = 30000;
-      const CUSTOMER_MAX_RETRIES = 2;
-      while (hasNextPage) {
+      const CUSTOMER_PAGE_TIMEOUT_MS = 45000;
+      const CUSTOMER_MAX_RETRIES = 3;
+      const OVERALL_TIMEOUT_MS = 120000; // 2 min hard cap — return partial results
+      const overallStart = Date.now();
+      let timedOut = false;
+      while (hasNextPage && !timedOut) {
+        if (Date.now() - overallStart > OVERALL_TIMEOUT_MS) { timedOut = true; break; }
         const query = `{ customers(first:250${cursor ? `,after:"${cursor}"` : ""}) { edges { cursor node { id firstName lastName email phone createdAt tags note taxExempt addresses { address1 city province zip country } } } pageInfo { hasNextPage } } }`;
         let gqlData = null;
         let lastErr = null;
         for (let attempt = 0; attempt <= CUSTOMER_MAX_RETRIES; attempt++) {
           const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), CUSTOMER_TIMEOUT_MS);
+          const timer = setTimeout(() => controller.abort(), CUSTOMER_PAGE_TIMEOUT_MS);
           try {
             const gqlRes = await fetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
               method: "POST", headers: authHeaders, body: JSON.stringify({ query }), signal: controller.signal,
             });
             clearTimeout(timer);
-            if (!gqlRes.ok) { lastErr = new Error(`Failed to fetch customers: HTTP ${gqlRes.status}`); continue; }
+            if (!gqlRes.ok) { lastErr = new Error(`Failed to fetch customers: HTTP ${gqlRes.status}`); if (gqlRes.status === 429) { await new Promise(r => setTimeout(r, 2000 * (attempt + 1))); } continue; }
             const data = await gqlRes.json();
             if (data.errors) { lastErr = new Error(data.errors.map((e) => e.message).join(", ")); continue; }
             gqlData = data;
             break;
           } catch (err) {
             clearTimeout(timer);
-            lastErr = err.name === "AbortError" ? new Error("Customer export timed out (30s). Try again.") : err;
+            lastErr = err.name === "AbortError" ? new Error("Customer page timed out (45s). Retrying...") : err;
           }
         }
         if (!gqlData) throw lastErr || new Error("Failed to fetch customers after retries");
@@ -154,6 +158,8 @@ export const action = async ({ request }) => {
         for (const edge of edges) { allCustomers.push(edge.node); cursor = edge.cursor; }
         hasNextPage = gqlData.data?.customers?.pageInfo?.hasNextPage || false;
       }
+      // If timed out with partial data, return what we have with a warning instead of failing
+      const partialWarning = timedOut ? ` (partial — export timed out after 2 min, got ${allCustomers.length} customers)` : "";
       const rows = allCustomers.map((c) => {
         const addr = (c.addresses || [])[0] || {};
         return {
@@ -166,7 +172,7 @@ export const action = async ({ request }) => {
         };
       });
       const csvH = ["First Name", "Last Name", "Email", "Phone", "Address", "City", "Province", "Zip", "Country", "Tags", "Note", "Tax Exempt"];
-      return Response.json({ intent: "export-customers", ok: true, csv: toCsv(csvH, rows), filename: `customers_${new Date().toISOString().slice(0, 10)}.csv`, count: allCustomers.length });
+      return Response.json({ intent: "export-customers", ok: true, csv: toCsv(csvH, rows), filename: `customers_${new Date().toISOString().slice(0, 10)}.csv`, count: allCustomers.length, warning: partialWarning || undefined });
     }
 
     // ── Export Inventory ──
@@ -285,6 +291,19 @@ export default function ExportPage() {
     setExportElapsed(0);
     const id = setInterval(() => setExportElapsed((s) => s + 1), 1000);
     return () => clearInterval(id);
+  }, [step]);
+
+  // Safety valve: if fetcher stays busy for >150s in export mode, unblock UI
+  useEffect(() => {
+    if (step !== STEP_EXPORTING) return;
+    const safetyId = setTimeout(() => {
+      if (step === STEP_EXPORTING) {
+        setError("Export is taking longer than expected. Please try again or export in smaller batches.");
+        setCurrentExport(null);
+        setStep(STEP_RESULTS);
+      }
+    }, 150000);
+    return () => clearTimeout(safetyId);
   }, [step]);
 
   // ── Toggle module in full store export ──
