@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-import { useFetcher, useRouteError } from "react-router";
+import { useFetcher, useRouteError, Link } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
 import { useAppBridge } from "@shopify/app-bridge-react";
@@ -496,7 +496,7 @@ export default function FullImportPage() {
             </div>
 
             <div className="flex items-center gap-3">
-              <a href="/app/import" className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">Back</a>
+              <Link to="/app/import" className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">Back</Link>
               <button onClick={() => { setActiveTab(enabledMods[0] || "products"); setStep(STEP_UPLOAD); }} disabled={!canAdvance(STEP_CONFIG)}
                 style={canAdvance(STEP_CONFIG) ? { background: P, color: "#fff", borderRadius: 8, fontWeight: 600, fontFamily: F } : { borderRadius: 8 }}
                 className={`px-5 py-2 text-sm rounded-lg transition-all ${canAdvance(STEP_CONFIG) ? "shadow-sm hover:brightness-110 active:scale-[0.98]" : "bg-gray-200 text-gray-400 cursor-not-allowed"}`}>
@@ -863,8 +863,8 @@ export default function FullImportPage() {
                 className="px-5 py-2.5 text-sm rounded-lg shadow-sm hover:brightness-110 transition-all active:scale-[0.98]">
                 New Import
               </button>
-              <a href="/app" className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">Dashboard</a>
-              <a href="/app/activity" className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">View Activity</a>
+              <Link to="/app" className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">Dashboard</Link>
+              <Link to="/app/activity" className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">View Activity</Link>
             </div>
           </div>
         )}

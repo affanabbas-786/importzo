@@ -1,4 +1,5 @@
-import { useRouteError } from "react-router";
+import { useRouteError, Link } from "react-router";
+
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
@@ -22,8 +23,8 @@ export default function ImportHub() {
         </div>
 
         {/* ── Hero: Full Store Import ── */}
-        <a
-          href="/app/full-import"
+        <Link
+          to="/app/full-import"
           className="group block bg-white rounded-xl border-2 border-green-800/20 p-6 shadow-sm hover:shadow-lg hover:border-green-800/40 transition-all duration-200 hover:-translate-y-0.5"
           style={{ background: "linear-gradient(135deg, rgba(23,50,10,0.03) 0%, rgba(46,99,22,0.06) 100%)" }}
         >
@@ -49,7 +50,7 @@ export default function ImportHub() {
               </div>
             </div>
           </div>
-        </a>
+        </Link>
 
         {/* ── Divider ── */}
         <div className="flex items-center gap-3">
@@ -80,24 +81,6 @@ export default function ImportHub() {
           ))}
         </div>
 
-        {/* ── Customers (protected) ── */}
-        <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm opacity-80">
-          <div className="flex items-start gap-4">
-            <div className="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center flex-shrink-0">
-              <svg className="w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" />
-              </svg>
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-2">
-                <p className="text-sm font-semibold text-gray-600">Customers</p>
-                <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 text-gray-500">Protected</span>
-              </div>
-              <p className="text-xs text-gray-400 mt-0.5">Customer data contains PII and is protected. Use Shopify admin for customer imports.</p>
-            </div>
-          </div>
-        </div>
-
         {/* ── Not yet supported — explained, not vague ── */}
         <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
           <div className="flex items-start gap-3">
@@ -108,7 +91,7 @@ export default function ImportHub() {
               <p className="text-sm font-medium text-gray-700">Pages, Blog Posts, Files and Metafields</p>
               <p className="text-xs text-gray-500 mt-1 leading-relaxed">
                 These content types aren&apos;t available via CSV import yet. If you need to move them between stores
-                today, use <a href="/app/collection-transfer" className="font-semibold hover:underline" style={{ color: S }}>Transfer Store</a> with a direct
+                today, use <Link to="/app/collection-transfer" className="font-semibold hover:underline" style={{ color: S }}>Transfer Store</Link> with a direct
                 store-to-store connection, or manage them in the Shopify admin. We&apos;ll enable CSV import for these
                 once a stable field mapping is finalized.
               </p>

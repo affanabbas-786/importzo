@@ -4,6 +4,7 @@ client_id = "70b047c7b1057f7a8ca94c044f6568ae"
 name = "importzo"
 application_url = "https://importzo.dazzletech.co"
 embedded = true
+privacy_policy_url = "https://importzo.dazzletech.co/privacy"
 
 [build]
 automatically_update_urls_on_dev = true

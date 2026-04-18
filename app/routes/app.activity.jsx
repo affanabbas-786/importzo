@@ -1,4 +1,4 @@
-import { useLoaderData, useRouteError } from "react-router";
+import { useLoaderData, useRouteError, Link } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
@@ -46,13 +46,13 @@ export default function ActivityPage() {
                 </svg>
               </div>
               <p className="text-sm text-gray-500 mb-4">No import history yet.</p>
-              <a
-                href="/app/import"
+              <Link
+                to="/app/import"
                 className="inline-flex items-center gap-2 px-4 py-2 text-white text-sm rounded-lg transition-all hover:brightness-110"
                 style={{ background: primary, fontWeight: 600, fontFamily: font }}
               >
                 Start Importing
-              </a>
+              </Link>
             </div>
           ) : (
             <div className="overflow-x-auto">

@@ -57,3 +57,17 @@ model SourceStore {
   lastUsed    DateTime @default(now())
   createdAt   DateTime @default(now())
 }
+
+model TransferSession {
+  id           String   @id @default(cuid())
+  code         String   @unique
+  password     String
+  sourceShop   String
+  sourceToken  String
+  destShop     String?
+  destToken    String?
+  status       String   @default("pending")
+  attemptCount Int      @default(0)
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+}

@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-import { useFetcher, useRouteError } from "react-router";
+import { useFetcher, useRouteError, Link } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate, apiVersion } from "../shopify.server";
@@ -529,7 +529,7 @@ export default function CollectionsImportPage() {
             )}
             <div className="flex items-center gap-3">
               <button onClick={resetImport} style={{ background: primary, color: "#fff", borderRadius: 8, fontWeight: 600, fontFamily: "'ImportzoFont', sans-serif" }} className="px-5 py-2.5 text-sm rounded-lg shadow-sm hover:brightness-110 transition-all">New Import</button>
-              <a href="/app" className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">Dashboard</a>
+              <Link to="/app" className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">Dashboard</Link>
             </div>
           </div>
         )}

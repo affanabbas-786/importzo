@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-import { useFetcher, useRouteError } from "react-router";
+import { useFetcher, useRouteError, Link } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate, apiVersion } from "../shopify.server";
@@ -1622,12 +1622,12 @@ export default function ImportPage() {
               >
                 New Import
               </button>
-              <a
-                href="/app"
+              <Link
+                to="/app"
                 className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
               >
                 Back to Dashboard
-              </a>
+              </Link>
             </div>
           </div>
         )}

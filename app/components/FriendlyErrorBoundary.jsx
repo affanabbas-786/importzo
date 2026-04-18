@@ -12,7 +12,7 @@
 // everything else.
 // ═══════════════════════════════════════════════════════════════════
 
-import { isRouteErrorResponse } from "react-router";
+import { isRouteErrorResponse, Link } from "react-router";
 
 const P = "#17320A";
 const S = "#2E6316";
@@ -86,12 +86,12 @@ export function FriendlyErrorBoundary({
           >
             Try Again
           </button>
-          <a
-            href="/app"
+          <Link
+            to="/app"
             className="px-4 py-2.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
           >
             Back to Dashboard
-          </a>
+          </Link>
           <a
             href={`mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent("Importzo issue — " + heading)}&body=${encodeURIComponent("Hi Importzo team,\n\nI ran into an issue:\n" + (detail || "(no details)") + "\n\n")}`}
             className="px-4 py-2.5 text-sm font-medium rounded-lg border transition-colors"

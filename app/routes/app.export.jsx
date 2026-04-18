@@ -1,9 +1,10 @@
 import { useState, useCallback, useEffect, useRef } from "react";
-import { useFetcher, useRouteError } from "react-router";
+import { useFetcher, useRouteError, Link } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate, apiVersion } from "../shopify.server";
 import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
+import { ErrorBanner } from "../components/ui";
 
 // ═══════════════════════════════════════════════════════════════════
 // Server action
@@ -28,7 +29,14 @@ export const action = async ({ request }) => {
     while (url) {
       let res;
       for (let attempt = 0; attempt < 4; attempt++) {
-        res = await fetch(url, { headers: { "X-Shopify-Access-Token": accessToken } });
+        // 30s per-page timeout — prevents infinite hang on slow/stalled connections
+        const pageCtrl = new AbortController();
+        const pageTimeout = setTimeout(() => pageCtrl.abort(), 30000);
+        try {
+          res = await fetch(url, { headers: { "X-Shopify-Access-Token": accessToken }, signal: pageCtrl.signal });
+        } finally {
+          clearTimeout(pageTimeout);
+        }
         if (res.status !== 429) break;
         const retryAfter = parseFloat(res.headers.get("Retry-After") || "2");
         await new Promise((r) => setTimeout(r, Math.max(retryAfter * 1000, 500 * Math.pow(2, attempt))));
@@ -120,61 +128,6 @@ export const action = async ({ request }) => {
       return Response.json({ intent: "export-collections", ok: true, csv: toCsv(csvH, rows), filename: `collections_${new Date().toISOString().slice(0, 10)}.csv`, count: all.length });
     }
 
-    // ── Export Customers ──
-    if (intent === "export-customers") {
-      const allCustomers = [];
-      let hasNextPage = true;
-      let cursor = null;
-      const CUSTOMER_PAGE_TIMEOUT_MS = 45000;
-      const CUSTOMER_MAX_RETRIES = 3;
-      const OVERALL_TIMEOUT_MS = 120000; // 2 min hard cap — return partial results
-      const overallStart = Date.now();
-      let timedOut = false;
-      while (hasNextPage && !timedOut) {
-        if (Date.now() - overallStart > OVERALL_TIMEOUT_MS) { timedOut = true; break; }
-        const query = `{ customers(first:250${cursor ? `,after:"${cursor}"` : ""}) { edges { cursor node { id firstName lastName email phone createdAt tags note taxExempt addresses { address1 city province zip country } } } pageInfo { hasNextPage } } }`;
-        let gqlData = null;
-        let lastErr = null;
-        for (let attempt = 0; attempt <= CUSTOMER_MAX_RETRIES; attempt++) {
-          const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), CUSTOMER_PAGE_TIMEOUT_MS);
-          try {
-            const gqlRes = await fetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
-              method: "POST", headers: authHeaders, body: JSON.stringify({ query }), signal: controller.signal,
-            });
-            clearTimeout(timer);
-            if (!gqlRes.ok) { lastErr = new Error(`Failed to fetch customers: HTTP ${gqlRes.status}`); if (gqlRes.status === 429) { await new Promise(r => setTimeout(r, 2000 * (attempt + 1))); } continue; }
-            const data = await gqlRes.json();
-            if (data.errors) { lastErr = new Error(data.errors.map((e) => e.message).join(", ")); continue; }
-            gqlData = data;
-            break;
-          } catch (err) {
-            clearTimeout(timer);
-            lastErr = err.name === "AbortError" ? new Error("Customer page timed out (45s). Retrying...") : err;
-          }
-        }
-        if (!gqlData) throw lastErr || new Error("Failed to fetch customers after retries");
-        const edges = gqlData.data?.customers?.edges || [];
-        for (const edge of edges) { allCustomers.push(edge.node); cursor = edge.cursor; }
-        hasNextPage = gqlData.data?.customers?.pageInfo?.hasNextPage || false;
-      }
-      // If timed out with partial data, return what we have with a warning instead of failing
-      const partialWarning = timedOut ? ` (partial — export timed out after 2 min, got ${allCustomers.length} customers)` : "";
-      const rows = allCustomers.map((c) => {
-        const addr = (c.addresses || [])[0] || {};
-        return {
-          "First Name": c.firstName || "", "Last Name": c.lastName || "",
-          Email: c.email || "", Phone: c.phone || "",
-          Address: addr.address1 || "", City: addr.city || "",
-          Province: addr.province || "", Zip: addr.zip || "", Country: addr.country || "",
-          Tags: Array.isArray(c.tags) ? c.tags.join(", ") : (c.tags || ""),
-          Note: c.note || "", "Tax Exempt": c.taxExempt ? "TRUE" : "FALSE",
-        };
-      });
-      const csvH = ["First Name", "Last Name", "Email", "Phone", "Address", "City", "Province", "Zip", "Country", "Tags", "Note", "Tax Exempt"];
-      return Response.json({ intent: "export-customers", ok: true, csv: toCsv(csvH, rows), filename: `customers_${new Date().toISOString().slice(0, 10)}.csv`, count: allCustomers.length, warning: partialWarning || undefined });
-    }
-
     // ── Export Inventory ──
     if (intent === "export-inventory") {
       const products = await fetchAll("products", "id,title,variants");
@@ -195,6 +148,25 @@ export const action = async ({ request }) => {
       return Response.json({ intent: "export-inventory", ok: true, csv: toCsv(csvH, rows), filename: `inventory_${new Date().toISOString().slice(0, 10)}.csv`, count: rows.length });
     }
 
+    // ── Export Customers ──
+    if (intent === "export-customers") {
+      const customers = await fetchAll("customers", "id,first_name,last_name,email,phone,accepts_marketing,orders_count,total_spent,tags,note,state");
+      const rows = customers.map((c) => ({
+        "First Name": c.first_name || "",
+        "Last Name": c.last_name || "",
+        "Email": c.email || "",
+        "Phone": c.phone || "",
+        "Accepts Marketing": c.accepts_marketing ? "yes" : "no",
+        "Orders Count": c.orders_count ?? 0,
+        "Total Spent": c.total_spent || "0.00",
+        "Tags": c.tags || "",
+        "Note": c.note || "",
+        "State": c.state || "",
+      }));
+      const csvH = ["First Name", "Last Name", "Email", "Phone", "Accepts Marketing", "Orders Count", "Total Spent", "Tags", "Note", "State"];
+      return Response.json({ intent: "export-customers", ok: true, csv: toCsv(csvH, rows), filename: `customers_${new Date().toISOString().slice(0, 10)}.csv`, count: customers.length });
+    }
+
     return Response.json({ intent, ok: false, error: "Unknown intent" }, { status: 400 });
   } catch (error) {
     return Response.json({ intent: intent ?? "", ok: false, error: error.message }, { status: 500 });
@@ -211,15 +183,15 @@ const F = "'ImportzoFont', sans-serif";
 const EXPORT_MODULES = {
   products:    { label: "Products",    desc: "All products with variants, images, pricing, and SKUs", intent: "export-products" },
   collections: { label: "Collections", desc: "Custom and smart collections with metadata",            intent: "export-collections" },
-  customers:   { label: "Customers",   desc: "Customer profiles, addresses, tags, and contact info",  intent: "export-customers" },
   inventory:   { label: "Inventory",   desc: "Stock quantities by SKU with pricing info",             intent: "export-inventory" },
+  customers:   { label: "Customers",   desc: "Customer emails, names, phone numbers, and order data", intent: "export-customers" },
 };
 
 const MODULE_ICONS = {
   products:    "M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4",
   collections: "M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z",
-  customers:   "M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z",
   inventory:   "M3.75 12h16.5m-16.5 3.75h16.5M3.75 19.5h16.5M5.625 4.5h12.75a1.875 1.875 0 010 3.75H5.625a1.875 1.875 0 010-3.75z",
+  customers:   "M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z",
 };
 
 const STEP_PREVIEW = 0;
@@ -349,7 +321,7 @@ export default function ExportPage() {
     const d = fetcher.data;
 
     if (d.intent === "counts") {
-      if (d.ok) setCounts({ products: d.products, collections: d.collections, customers: d.customers });
+      if (d.ok) setCounts({ products: d.products, collections: d.collections, customers: d.customers ?? 0 });
       else setError(d.error || "Failed to fetch counts");
       return;
     }
@@ -446,7 +418,7 @@ export default function ExportPage() {
                     <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wider" style={{ background: "rgba(23,50,10,0.1)", color: S }}>Recommended</span>
                   </div>
                   <p className="text-sm text-gray-500 mt-1 leading-relaxed">
-                    Export your entire store as CSV files. Products, collections, customers, and inventory &mdash; all at once.
+                    Export your entire store as CSV files. Products, collections, inventory, and customers &mdash; all at once.
                   </p>
                   <div className="mt-3 inline-flex items-center gap-1.5 text-sm font-semibold group-hover:gap-2.5 transition-all" style={{ color: S }}>
                     Start Full Export
@@ -495,7 +467,7 @@ export default function ExportPage() {
                   <p className="text-sm font-medium text-gray-700">Pages, Blog Posts, Files and Metafields</p>
                   <p className="text-xs text-gray-500 mt-1 leading-relaxed">
                     CSV export for these content types isn&apos;t available yet. To migrate them between stores today,
-                    use <a href="/app/collection-transfer" className="font-semibold hover:underline" style={{ color: S }}>Transfer Store</a>, or use Shopify&apos;s admin
+                    use <Link to="/app/collection-transfer" className="font-semibold hover:underline" style={{ color: S }}>Transfer Store</Link>, or use Shopify&apos;s admin
                     bulk actions. They&apos;ll appear here once we finalize a reliable field schema.
                   </p>
                 </div>
@@ -512,7 +484,7 @@ export default function ExportPage() {
                   <p className="text-sm font-medium text-gray-700">About exports</p>
                   <p className="text-sm text-gray-500 mt-1">
                     All exports are downloaded as standard Shopify-compatible CSV files. Products include all variants and images.
-                    Collections include both custom and smart types. Customer exports include primary address.
+                    Collections include both custom and smart types.
                   </p>
                 </div>
               </div>
@@ -544,15 +516,8 @@ export default function ExportPage() {
               </div>
             </div>
 
-            {/* Error */}
-            {error && (
-              <div className="bg-red-50 border border-red-200 rounded-xl px-5 py-4 flex items-start gap-3">
-                <svg className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                <p className="text-sm text-red-700">{error}</p>
-              </div>
-            )}
+            {/* Error — replaced raw red div with shared ErrorBanner (critical) */}
+            {error && <ErrorBanner message={error} onDismiss={() => setError("")} />}
 
             {/* ── STEP 0: PREVIEW ── */}
             {step === STEP_PREVIEW && (
@@ -661,6 +626,9 @@ export default function ExportPage() {
                       {exportElapsed >= 45 && (
                         <p className="text-xs text-amber-600 mt-1">Large exports can take a while — still working.</p>
                       )}
+                      {currentExport === "customers" && (
+                        <p className="text-xs text-blue-600 mt-1">Customer export may take 1–2 min for large stores — fetching all pages.</p>
+                      )}
 
                       {/* Progress */}
                       <div className="mt-6 space-y-2 text-left">
@@ -754,7 +722,7 @@ export default function ExportPage() {
                   <button onClick={backToHub} style={{ background: P, color: "#fff", borderRadius: 8, fontWeight: 600, fontFamily: F }} className="px-5 py-2.5 text-sm rounded-lg shadow-sm hover:brightness-110 transition-all">
                     New Export
                   </button>
-                  <a href="/app" className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">Back to Dashboard</a>
+                  <Link to="/app" className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">Back to Dashboard</Link>
                 </div>
               </div>
             )}

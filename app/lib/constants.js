@@ -12,7 +12,6 @@ export const BRAND = {
 // Job type config — used in dashboard, activity, and hub pages
 export const JOB_TYPE_CONFIG = {
   products:    { label: "Products",    bg: "bg-green-50",   text: "text-green-700",   route: "/app/product-importer" },
-  customers:   { label: "Customers",   bg: "bg-blue-50",    text: "text-blue-700",    route: "/app/customers" },
   collections: { label: "Collections", bg: "bg-purple-50",  text: "text-purple-700",  route: "/app/collections" },
   inventory:   { label: "Inventory",   bg: "bg-amber-50",   text: "text-amber-700",   route: "/app/inventory" },
   transfer:    { label: "Transfer",    bg: "bg-indigo-50",  text: "text-indigo-700",  route: "/app/collection-transfer" },

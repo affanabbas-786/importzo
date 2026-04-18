@@ -1,9 +1,10 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-import { useFetcher, useLoaderData, useRouteError } from "react-router";
+import { useFetcher, useLoaderData, useRouteError, Link } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate, apiVersion } from "../shopify.server";
 import prisma from "../db.server";
+import { decrypt } from "../utils/encryption.server";
 import {
   getSavedSourceStore,
   upsertSourceStore,
@@ -11,6 +12,7 @@ import {
   deleteSourceStore,
 } from "../lib/safe-db";
 import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
+import { ErrorBanner } from "../components/ui";
 import { loadPrefs } from "../lib/prefs";
 import { friendlyError, summarizeFailures } from "../lib/friendly-errors";
 import { notifyJobComplete } from "../lib/notify";
@@ -40,8 +42,23 @@ export const action = async ({ request }) => {
   const version = apiVersion || "2025-10";
   const rid = formData.get("rid") || "";
 
-  // Helper: get source credentials from form or saved DB
+  // Helper: get source credentials — checks active TransferSession first, then falls
+  // back to form data or saved SourceStore (legacy / direct-token flow).
   async function getSourceCreds() {
+    // ── Session-based path (new secure flow) ──────────────────────────────────
+    const sessionId = (formData.get("sessionId") || "").trim();
+    if (sessionId) {
+      try {
+        const ts = await prisma.transferSession.findUnique({ where: { id: sessionId } });
+        if (ts && ts.status !== "done") {
+          return { url: ts.sourceShop, token: decrypt(ts.sourceToken) };
+        }
+      } catch (err) {
+        // Model may not exist on older deployments — fall through gracefully
+        console.warn("[importzo] getSourceCreds session lookup:", err?.message);
+      }
+    }
+    // ── Legacy / direct-token path ────────────────────────────────────────────
     let url = (formData.get("sourceUrl") || "").trim().replace(/^https?:\/\//i, "").replace(/\/+$/, "");
     let token = (formData.get("sourceToken") || "").trim();
     if (!url || !token) {
@@ -53,27 +70,39 @@ export const action = async ({ request }) => {
   }
 
   // Helper: fetch with automatic 429 retry + exponential backoff
+  // Bug fix: MAX_RETRIES 3→5; add console.log on every retry
   async function shopifyFetch(url, opts = {}) {
-    const MAX_RETRIES = 3;
+    const MAX_RETRIES = 5;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       const res = await fetch(url, opts);
       if (res.status === 429) {
         const retryAfter = parseFloat(res.headers.get("Retry-After") || "0");
         const delay = Math.max(retryAfter * 1000, 1000 * Math.pow(2, attempt));
-        if (attempt < MAX_RETRIES) { await new Promise((r) => setTimeout(r, delay)); continue; }
+        if (attempt < MAX_RETRIES) {
+          console.log(`[importzo] 429 rate limit — ${url.split("?")[0]} — attempt ${attempt + 1}/${MAX_RETRIES}, waiting ${delay}ms`);
+          await new Promise((r) => setTimeout(r, delay));
+          continue;
+        }
       }
       return res;
     }
-    // Should not reach here, but just in case
     return fetch(url, opts);
   }
 
-  // Helper: paginated REST fetch from any Shopify store (with 429 retry)
+  // Helper: paginated REST fetch from any Shopify store (with 429 retry + 30s per-page timeout)
+  // Bug fix: added AbortController timeout to prevent infinite hang on stalled connections
   async function fetchAllPages(baseUrl, token) {
     const items = [];
     let url = baseUrl;
     while (url) {
-      const res = await shopifyFetch(url, { headers: { "X-Shopify-Access-Token": token, "Content-Type": "application/json" } });
+      const pageCtrl = new AbortController();
+      const pageTimeout = setTimeout(() => pageCtrl.abort(), 30000);
+      let res;
+      try {
+        res = await shopifyFetch(url, { headers: { "X-Shopify-Access-Token": token, "Content-Type": "application/json" }, signal: pageCtrl.signal });
+      } finally {
+        clearTimeout(pageTimeout);
+      }
       if (!res.ok) {
         const body = await res.text().catch(() => "");
         throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
@@ -124,6 +153,9 @@ export const action = async ({ request }) => {
   const conflictMode = formData.get("conflictMode") || "create";
 
   async function createProductOnTarget(src) {
+    // Bug fix: gift card products cannot be transferred via REST API — skip early
+    if (src.gift_card) throw new Error("Gift card products cannot be transferred");
+
     // Conflict detection: look up by handle
     if (src.handle && conflictMode !== "create") {
       const existing = await findProductByHandle(src.handle);
@@ -157,7 +189,8 @@ export const action = async ({ request }) => {
         if (v.weight_unit) vd.weight_unit = v.weight_unit;
         if (v.inventory_quantity !== undefined) vd.inventory_quantity = v.inventory_quantity;
         if (v.inventory_policy) vd.inventory_policy = v.inventory_policy;
-        if (v.fulfillment_service) vd.fulfillment_service = v.fulfillment_service;
+        // Bug fix: "gift_card" fulfillment_service is rejected by destination — replace with "manual"
+        if (v.fulfillment_service) vd.fulfillment_service = v.fulfillment_service === "gift_card" ? "manual" : v.fulfillment_service;
         vd.requires_shipping = v.requires_shipping !== false;
         vd.taxable = v.taxable !== false;
         return vd;
@@ -436,7 +469,13 @@ export const action = async ({ request }) => {
       const assetsList = (await assetsRes.json()).assets || [];
 
       if (dryRun) {
-        return { intent: "transfer-theme", rid, ok: true, themeName, assetCount: assetsList.length, results: assetsList.map((a) => ({ key: a.key, status: "dry-run" })) };
+        // Dry run: never touch the destination store. Count assets only.
+        return {
+          intent: "transfer-theme", rid, ok: true, dryRun: true,
+          themeName, assetCount: assetsList.length,
+          message: `${assetsList.length} assets would be transferred`,
+          results: assetsList.map((a) => ({ key: a.key, status: "dry-run" })),
+        };
       }
 
       // Create unpublished theme on target (with retry)
@@ -444,9 +483,24 @@ export const action = async ({ request }) => {
         method: "POST", headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": targetToken },
         body: JSON.stringify({ theme: { name: `${themeName} (Transferred)`, role: "unpublished" } }),
       });
-      if (!createRes.ok) { const err = await createRes.json().catch(() => ({})); throw new Error(`Failed to create theme: ${err.errors ? JSON.stringify(err.errors) : createRes.status}`); }
+      if (!createRes.ok) {
+        const rawBody = await createRes.text().catch(() => "");
+        console.error("[importzo] Theme create failed — HTTP", createRes.status, "body:", rawBody);
+        let errJson = {};
+        try { errJson = JSON.parse(rawBody); } catch {}
+        throw new Error(`Failed to create theme (HTTP ${createRes.status}): ${errJson.errors ? JSON.stringify(errJson.errors) : rawBody.slice(0, 300) || "no response body"}`);
+      }
       const newTheme = (await createRes.json()).theme;
       if (!newTheme?.id) throw new Error("Theme creation failed: API did not return a theme ID");
+
+      // Verify the theme actually exists on the destination before uploading assets
+      const verifyRes = await shopifyFetch(`https://${targetShop}/admin/api/${version}/themes/${newTheme.id}.json`, {
+        headers: { "X-Shopify-Access-Token": targetToken },
+      });
+      if (!verifyRes.ok) {
+        const vBody = await verifyRes.json().catch(() => ({}));
+        throw new Error(`Theme was created (id=${newTheme.id}) but verification GET failed (HTTP ${verifyRes.status}): ${JSON.stringify(vBody.errors || vBody)}`);
+      }
 
       // Copy each asset with rate-limit handling
       // Process layout/ and config/ files first — Shopify validates theme
@@ -457,8 +511,9 @@ export const action = async ({ request }) => {
         if (key.startsWith("sections/")) return 2;
         if (key.startsWith("snippets/")) return 3;
         if (key.startsWith("templates/")) return 4;
-        if (key.startsWith("assets/")) return 5;
-        return 6;
+        if (key.startsWith("locales/")) return 5;
+        if (key.startsWith("assets/")) return 6;
+        return 7;
       };
       const sortedAssets = [...assetsList].sort((a, b) => priorityOrder(a.key) - priorityOrder(b.key));
 
@@ -473,15 +528,24 @@ export const action = async ({ request }) => {
           let lastResult = null;
           for (let attempt = 0; attempt <= MAX_ASSET_RETRIES; attempt++) {
             try {
-              // GET asset from source
-              const assetRes = await shopifyFetch(
-                `https://${sourceUrl}/admin/api/${version}/themes/${themeId}/assets.json?asset[key]=${encodeURIComponent(asset.key)}`,
-                { headers: { "X-Shopify-Access-Token": sourceToken } }
-              );
+              // GET asset from source (25s timeout per asset to prevent hanging)
+              const getController = new AbortController();
+              const getTimeout = setTimeout(() => getController.abort(), 25000);
+              let assetRes;
+              try {
+                assetRes = await shopifyFetch(
+                  `https://${sourceUrl}/admin/api/${version}/themes/${themeId}/assets.json?asset[key]=${encodeURIComponent(asset.key)}`,
+                  { headers: { "X-Shopify-Access-Token": sourceToken }, signal: getController.signal }
+                );
+              } finally {
+                clearTimeout(getTimeout);
+              }
 
-              // Handle 429 rate-limit
+              // Handle 429 rate-limit — bug fix: was 500ms minimum, now ≥1000ms
               if (assetRes.status === 429) {
-                await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+                const wait = Math.max(1000, 1500 * (attempt + 1));
+                console.log(`[importzo] 429 on asset GET ${asset.key}, attempt ${attempt + 1}, waiting ${wait}ms`);
+                await new Promise(r => setTimeout(r, wait));
                 continue;
               }
 
@@ -491,17 +555,39 @@ export const action = async ({ request }) => {
               }
 
               const assetData = (await assetRes.json()).asset;
+              if (!assetData) {
+                lastResult = { key: asset.key, status: "error", error: "Empty asset response from source" };
+                continue;
+              }
 
               // Prepare asset for PUT
               const putBody = { asset: { key: asset.key } };
               if (assetData.value !== undefined && assetData.value !== null) {
+                // Text asset: liquid, json, css, js, etc.
                 putBody.asset.value = assetData.value;
               } else if (assetData.attachment) {
+                // Binary asset: already base64-encoded by Shopify's API.
                 putBody.asset.attachment = assetData.attachment;
               } else if (assetData.public_url) {
-                putBody.asset.src = assetData.public_url;
+                // CDN-only binary asset (images, fonts, videos).
+                // Shopify doesn't return value/attachment for these — fetch
+                // the raw bytes from the public CDN URL and re-encode as base64.
+                const cdnCtrl = new AbortController();
+                const cdnTout = setTimeout(() => cdnCtrl.abort(), 20000);
+                try {
+                  const cdnRes = await fetch(assetData.public_url, { signal: cdnCtrl.signal });
+                  if (!cdnRes.ok) throw new Error(`CDN HTTP ${cdnRes.status}`);
+                  const buf = await cdnRes.arrayBuffer();
+                  putBody.asset.attachment = Buffer.from(buf).toString("base64");
+                } catch (cdnErr) {
+                  // CDN fetch failed — log as warning, do not abort the transfer.
+                  return { key: asset.key, status: "warning", error: `CDN fetch failed: ${cdnErr.message}` };
+                } finally {
+                  clearTimeout(cdnTout);
+                }
               } else {
-                return { key: asset.key, status: "skipped", error: "No content available" };
+                // Truly no content — skip without failing the transfer.
+                return { key: asset.key, status: "skipped", error: "No content in API response" };
               }
 
               // PUT asset to target
@@ -510,15 +596,17 @@ export const action = async ({ request }) => {
                 { method: "PUT", headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": targetToken }, body: JSON.stringify(putBody) }
               );
 
-              // Handle 429 rate-limit on PUT
+              // Handle 429 rate-limit on PUT — bug fix: was 500ms minimum, now ≥1000ms
               if (putRes.status === 429) {
-                await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+                const wait = Math.max(1000, 1500 * (attempt + 1));
+                console.log(`[importzo] 429 on asset PUT ${asset.key}, attempt ${attempt + 1}, waiting ${wait}ms`);
+                await new Promise(r => setTimeout(r, wait));
                 continue;
               }
 
               if (putRes.ok) return { key: asset.key, status: "success" };
               const e = await putRes.text().catch(() => "");
-              lastResult = { key: asset.key, status: "error", error: e.slice(0, 100) };
+              lastResult = { key: asset.key, status: "error", error: `PUT ${putRes.status}: ${e.slice(0, 120)}` };
 
             } catch (err) {
               lastResult = { key: asset.key, status: "error", error: err.message };
@@ -529,6 +617,11 @@ export const action = async ({ request }) => {
           return lastResult || { key: asset.key, status: "error", error: "Unknown error" };
         }));
         results.push(...batchResults);
+        // Inter-batch sleep: after every 10 assets uploaded, pause 500ms to avoid
+        // burst rate-limiting on the destination store during large theme transfers.
+        if (results.length % 10 === 0 && results.length < sortedAssets.length) {
+          await new Promise(r => setTimeout(r, 500));
+        }
       }
 
       return {
@@ -568,6 +661,13 @@ export const action = async ({ request }) => {
     } catch (err) {
       console.warn("[importzo] save transfer record failed:", err?.message || err);
     }
+    // Clean up the TransferSession on transfer completion (security: no lingering tokens)
+    const completedSessionId = (formData.get("sessionId") || "").trim();
+    if (completedSessionId) {
+      try {
+        await prisma.transferSession.deleteMany({ where: { id: completedSessionId } });
+      } catch (_) { /* non-fatal — table may not exist on older deployments */ }
+    }
     return { intent: "save-record", rid, ok: true };
   }
 
@@ -590,14 +690,10 @@ const STEP_RESULTS = 5;
 
 const STEP_LABELS = ["Connect", "Scope", "Configure", "Preview", "Transfer", "Results"];
 
-// Only modules we actually transfer today + a single, clearly-explained
-// "protected" row for Customers. Vague coming-soon placeholders have
-// been removed — they make the app feel broken.
 const MODULES = [
   { key: "collections", label: "Collections & Products", desc: "Custom and smart collections with all linked products", icon: "M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z", available: true },
   { key: "products", label: "Standalone Products", desc: "Products not in any collection", icon: "M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4", available: true },
   { key: "themes", label: "Themes", desc: "Copies theme files as an unpublished theme on the destination", icon: "M9.53 16.122a3 3 0 00-5.78 1.128 2.25 2.25 0 01-2.4 2.245 4.5 4.5 0 008.4-2.245c0-.399-.078-.78-.22-1.128zm0 0a15.998 15.998 0 003.388-1.62m-5.043-.025a15.994 15.994 0 011.622-3.395m3.42 3.42a15.995 15.995 0 004.764-4.648l3.876-5.814a1.151 1.151 0 00-1.597-1.597L14.146 6.32a15.996 15.996 0 00-4.649 4.763m3.42 3.42a6.776 6.776 0 00-3.42-3.42", available: true },
-  { key: "customers", label: "Customers", desc: "Customer data contains PII and is protected — not transferable", icon: "M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z", protected: true },
 ];
 
 // Present the current store as a destination label — strip the myshopify
@@ -617,6 +713,7 @@ export default function StoreTransferPage() {
   const shopify = useAppBridge();
   const fetcher = useFetcher();
   const saveFetcher = useFetcher();
+  const sessionFetcher = useFetcher();
 
   const destinationName = formatShopName(currentShop);
 
@@ -626,6 +723,17 @@ export default function StoreTransferPage() {
   const [sourceInfo, setSourceInfo] = useState(null);
   const [showInstructions, setShowInstructions] = useState(false);
   const [hasSavedConnection, setHasSavedConnection] = useState(!!savedConnection);
+
+  // Session pairing state
+  const [sessionTab, setSessionTab] = useState("dest"); // "source" | "dest"
+  const [sessionPassword, setSessionPassword] = useState("");
+  const [sessionConfirmPassword, setSessionConfirmPassword] = useState("");
+  const [sessionCodeInput, setSessionCodeInput] = useState(""); // dest: code entered by user
+  const [sessionCode, setSessionCode] = useState(""); // source: generated code
+  const [sessionId, setSessionId] = useState(null);
+  const [sessionExpiresAt, setSessionExpiresAt] = useState(null);
+  const [sessionCountdown, setSessionCountdown] = useState(null);
+  const [sessionError, setSessionError] = useState("");
 
   // Scope
   const [scope, setScope] = useState("full"); // "full" | "custom"
@@ -659,6 +767,10 @@ export default function StoreTransferPage() {
   const collectionsDataRef = useRef([]);
   const transferResultsRef = useRef({});
   const savingRecord = useRef(false);
+  // Bug fix: tracks completion so safety timeout doesn't fire after transfer done
+  const transferDoneRef = useRef(false);
+  // Session ID ref: keeps sessionId accessible in callbacks/effects without stale closures
+  const sessionIdRef = useRef(null);
 
   const isBusy = fetcher.state !== "idle";
 
@@ -702,6 +814,7 @@ export default function StoreTransferPage() {
       const next = moduleQueueRef.current.shift();
       startModuleTransfer(next);
     } else {
+      transferDoneRef.current = true; // mark done before setStep so safety timeout won't fire
       setCurrentModule(null);
       setStep(STEP_RESULTS);
       shopify.toast.show("Transfer complete!");
@@ -718,6 +831,7 @@ export default function StoreTransferPage() {
       const fd = new FormData();
       fd.append("intent", "fetch-collections");
       fd.append("rid", nextRid());
+      if (sessionIdRef.current) fd.append("sessionId", sessionIdRef.current);
       fetcher.submit(fd, { method: "POST" });
     } else if (moduleKey === "products") {
       setLoadingMsg("Transferring standalone products...");
@@ -727,20 +841,44 @@ export default function StoreTransferPage() {
       fd.append("dryRun", String(dryRun));
       fd.append("conflictMode", conflictMode);
       fd.append("rid", nextRid());
+      if (sessionIdRef.current) fd.append("sessionId", sessionIdRef.current);
       fetcher.submit(fd, { method: "POST" });
     } else if (moduleKey === "themes") {
       if (!selectedThemeId) { advanceModuleQueue(); return; }
-      setLoadingMsg("Transferring theme assets...");
       const theme = sourceInfo?.themes?.find((t) => t.id === selectedThemeId);
+      setLoadingMsg(`Copying "${theme?.name || "theme"}" files to destination — large themes may take 1–2 min...`);
       const fd = new FormData();
       fd.append("intent", "transfer-theme");
       fd.append("themeId", String(selectedThemeId));
       fd.append("themeName", theme?.name || "Theme");
       fd.append("dryRun", String(dryRun));
       fd.append("rid", nextRid());
+      if (sessionIdRef.current) fd.append("sessionId", sessionIdRef.current);
       fetcher.submit(fd, { method: "POST" });
     }
   }
+
+  // ── Cycling loading messages during theme transfer ──
+  // Theme transfer is a single server round-trip so per-asset progress is
+  // unavailable on the client. Cycle descriptive messages every 15s to
+  // reassure the user that work is still happening.
+  useEffect(() => {
+    if (currentModule !== "themes") return;
+    const MESSAGES = [
+      "Copying theme files to destination...",
+      "Transferring CSS, JS and Liquid templates...",
+      "Uploading images and binary assets (this takes longer)...",
+      "Almost done — finalizing theme...",
+      "Large theme detected — still working, please wait...",
+    ];
+    let idx = 0;
+    setLoadingMsg(MESSAGES[0]);
+    const iv = setInterval(() => {
+      idx = Math.min(idx + 1, MESSAGES.length - 1);
+      setLoadingMsg(MESSAGES[idx]);
+    }, 15000);
+    return () => clearInterval(iv);
+  }, [currentModule]);
 
   // ── Main fetcher response handler ──
   useEffect(() => {
@@ -783,6 +921,7 @@ export default function StoreTransferPage() {
       fd.append("dryRun", String(dryRun));
       fd.append("conflictMode", conflictMode);
       fd.append("rid", nextRid());
+      if (sessionIdRef.current) fd.append("sessionId", sessionIdRef.current);
       fetcher.submit(fd, { method: "POST" });
       return;
     }
@@ -805,6 +944,7 @@ export default function StoreTransferPage() {
         fd.append("dryRun", String(dryRun));
         fd.append("conflictMode", conflictMode);
         fd.append("rid", nextRid());
+        if (sessionIdRef.current) fd.append("sessionId", sessionIdRef.current);
         fetcher.submit(fd, { method: "POST" });
       } else {
         advanceModuleQueue();
@@ -842,10 +982,12 @@ export default function StoreTransferPage() {
   }, [step]);
 
   // Safety: if fetcher stalls for >180s during transfer, surface an error
+  // Bug fix: was checking stale `step` closure (always STEP_TRANSFER) — now uses ref so it
+  // won't fire after transfer already completed via advanceModuleQueue
   useEffect(() => {
     if (step !== STEP_TRANSFER) return;
     const safetyId = setTimeout(() => {
-      if (step === STEP_TRANSFER) {
+      if (!transferDoneRef.current) {
         setError("Transfer has been running for 3+ minutes without a response. Check your connection and try again.");
         setCurrentModule(null);
         setStep(STEP_RESULTS);
@@ -884,6 +1026,7 @@ export default function StoreTransferPage() {
     fd.append("summary", JSON.stringify({ source: sourceInfo?.shopName || "unknown", totalItems, successItems, errorItems }));
     fd.append("results", JSON.stringify(r));
     fd.append("rid", nextRid());
+    if (sessionIdRef.current) fd.append("sessionId", sessionIdRef.current);
     saveFetcher.submit(fd, { method: "POST" });
   }
 
@@ -907,11 +1050,20 @@ export default function StoreTransferPage() {
   }, [fetcher]);
 
   const handleDisconnect = useCallback(() => {
+    // Cancel any active transfer session first (security: revoke paired session)
+    if (sessionIdRef.current) {
+      const sfd = new FormData();
+      sfd.append("intent", "cancel-session");
+      sfd.append("sessionId", sessionIdRef.current);
+      sessionFetcher.submit(sfd, { method: "POST", action: "/app/transfer-session" });
+      sessionIdRef.current = null;
+      setSessionId(null);
+    }
     const fd = new FormData();
     fd.append("intent", "disconnect");
     fd.append("rid", nextRid());
     fetcher.submit(fd, { method: "POST" });
-  }, [fetcher]);
+  }, [fetcher, sessionFetcher]);
 
   const handleChangeStore = useCallback(() => {
     setHasSavedConnection(false);
@@ -920,6 +1072,104 @@ export default function StoreTransferPage() {
     setSourceToken("");
     credsRef.current = { url: "", token: "" };
   }, []);
+
+  // ── Session pairing handlers ──────────────────────────────────────────────
+
+  const handleCreateSession = useCallback(() => {
+    if (sessionPassword !== sessionConfirmPassword) {
+      setSessionError("Passwords do not match");
+      return;
+    }
+    if (sessionPassword.length < 4) {
+      setSessionError("Password must be at least 4 characters");
+      return;
+    }
+    setSessionError("");
+    const fd = new FormData();
+    fd.append("intent", "create-session");
+    fd.append("password", sessionPassword);
+    sessionFetcher.submit(fd, { method: "POST", action: "/app/transfer-session" });
+  }, [sessionFetcher, sessionPassword, sessionConfirmPassword]);
+
+  const handleJoinSession = useCallback(() => {
+    if (!sessionCodeInput.trim() || !sessionPassword) {
+      setSessionError("Please enter both the session code and password");
+      return;
+    }
+    setSessionError("");
+    const fd = new FormData();
+    fd.append("intent", "join-session");
+    fd.append("code", sessionCodeInput.trim().toUpperCase());
+    fd.append("password", sessionPassword);
+    sessionFetcher.submit(fd, { method: "POST", action: "/app/transfer-session" });
+  }, [sessionFetcher, sessionCodeInput, sessionPassword]);
+
+  const handleCancelSession = useCallback(() => {
+    if (sessionIdRef.current) {
+      const fd = new FormData();
+      fd.append("intent", "cancel-session");
+      fd.append("sessionId", sessionIdRef.current);
+      sessionFetcher.submit(fd, { method: "POST", action: "/app/transfer-session" });
+    }
+    setSessionCode("");
+    setSessionId(null);
+    sessionIdRef.current = null;
+    setSessionExpiresAt(null);
+    setSessionPassword("");
+    setSessionConfirmPassword("");
+    setSessionError("");
+  }, [sessionFetcher]);
+
+  // Countdown timer for source store session code
+  useEffect(() => {
+    if (!sessionExpiresAt) { setSessionCountdown(null); return; }
+    const update = () => {
+      const secs = Math.max(0, Math.round((new Date(sessionExpiresAt) - Date.now()) / 1000));
+      setSessionCountdown(secs);
+      if (secs === 0) {
+        setSessionCode("");
+        setSessionExpiresAt(null);
+        setSessionId(null);
+        sessionIdRef.current = null;
+      }
+    };
+    update();
+    const id = setInterval(update, 1000);
+    return () => clearInterval(id);
+  }, [sessionExpiresAt]);
+
+  // Session fetcher response handler
+  useEffect(() => {
+    if (sessionFetcher.state !== "idle" || !sessionFetcher.data) return;
+    const d = sessionFetcher.data;
+
+    if (d.intent === "create-session") {
+      if (d.ok) {
+        setSessionCode(d.code);
+        setSessionId(d.sessionId);
+        sessionIdRef.current = d.sessionId;
+        setSessionExpiresAt(d.expiresAt);
+        setSessionError("");
+      } else {
+        setSessionError(d.error || "Failed to create session");
+      }
+      return;
+    }
+
+    if (d.intent === "join-session") {
+      if (d.ok) {
+        setSessionId(d.sessionId);
+        sessionIdRef.current = d.sessionId;
+        setSessionError("");
+        // Reuse existing connect-response handler — populates sourceInfo and advances to STEP_SCOPE
+        handleConnectResponse({ ...d, intent: "connect" });
+      } else {
+        setSessionError(d.error || "Failed to connect to source store");
+      }
+      return;
+    }
+    // cancel-session: client state already cleared before submitting — no-op here
+  }, [sessionFetcher.state, sessionFetcher.data]);
 
   const startTransfer = useCallback(() => {
     const modules = [...selectedModules].filter((k) => MODULES.find((m) => m.key === k)?.available);
@@ -930,6 +1180,7 @@ export default function StoreTransferPage() {
     transferResultsRef.current = {};
     setError("");
     savingRecord.current = false;
+    transferDoneRef.current = false;
     collectionsDataRef.current = [];
     collectionQueueRef.current = [];
 
@@ -951,6 +1202,15 @@ export default function StoreTransferPage() {
     setError("");
     setLoadingMsg("");
     savingRecord.current = false;
+    // Reset session state
+    setSessionCode("");
+    setSessionId(null);
+    sessionIdRef.current = null;
+    setSessionExpiresAt(null);
+    setSessionPassword("");
+    setSessionConfirmPassword("");
+    setSessionCodeInput("");
+    setSessionError("");
   }, []);
 
   const toggleModule = useCallback((key) => {
@@ -1084,16 +1344,8 @@ export default function StoreTransferPage() {
           </div>
         )}
 
-        {/* Error */}
-        {error && (
-          <div className="bg-red-50 border border-red-200 rounded-xl px-5 py-4 flex items-start gap-3">
-            <svg className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-            <div>
-              <p className="text-sm font-semibold text-red-800">Something went wrong</p>
-              <p className="text-sm text-red-700 mt-0.5">{error}</p>
-            </div>
-          </div>
-        )}
+        {/* Error — replaced raw red div with shared ErrorBanner (critical) */}
+        {error && <ErrorBanner title="Something went wrong" message={error} onDismiss={() => setError("")} />}
 
         {/* ═══ STEP 0: CONNECT ═══ */}
         {step === STEP_CONNECT && (
@@ -1131,105 +1383,179 @@ export default function StoreTransferPage() {
               </div>
             )}
 
-            {/* New connection form */}
+            {/* New connection — Transfer Session pairing */}
             {(!hasSavedConnection || !savedConnection) && (
-              <>
-                {/* Instructions toggle */}
-                <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-                  <button onClick={() => setShowInstructions((p) => !p)} className="w-full px-6 py-4 flex items-center justify-between text-left hover:bg-gray-50/50 transition-colors">
-                    <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: "rgba(23,50,10,0.08)" }}>
-                        <svg className="w-4 h-4" style={{ color: P }} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25" /></svg>
-                      </div>
-                      <span className="text-sm font-semibold text-gray-900">How to get your source store access token</span>
+              <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden max-w-xl mx-auto">
+                {/* How it works banner */}
+                <div className="px-6 pt-5 pb-4 border-b border-gray-100" style={{ background: "rgba(23,50,10,0.03)" }}>
+                  <p className="text-sm font-semibold text-gray-900 mb-1">How store pairing works</p>
+                  <p className="text-xs text-gray-500">
+                    Both stores install Importzo. The <strong>source store</strong> generates a one-time session code.
+                    The <strong>destination store</strong> enters that code to pair — no API tokens needed.
+                  </p>
+                </div>
+
+                {/* Tab switcher */}
+                <div className="px-6 pt-5">
+                  <div className="grid grid-cols-2 gap-1.5 p-1 rounded-xl bg-gray-100 mb-6">
+                    {[
+                      { val: "dest", label: "I'm the Destination Store", sub: "Receiving data" },
+                      { val: "source", label: "I'm the Source Store", sub: "Exporting data" },
+                    ].map((t) => (
+                      <button key={t.val} onClick={() => { setSessionTab(t.val); setSessionError(""); }}
+                        className={`px-3 py-2.5 rounded-lg text-left transition-all text-sm ${sessionTab === t.val ? "bg-white shadow-sm font-semibold text-gray-900" : "text-gray-500 hover:text-gray-700"}`}
+                      >
+                        {t.label}
+                        <span className="block text-[10px] font-normal mt-0.5 opacity-70">{t.sub}</span>
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Session error */}
+                  {sessionError && (
+                    <div className="mb-4 rounded-lg px-4 py-3 bg-red-50 border border-red-200 flex items-start gap-2">
+                      <svg className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" /></svg>
+                      <p className="text-xs text-red-700">{sessionError}</p>
                     </div>
-                    <svg className={`w-5 h-5 text-gray-400 transition-transform ${showInstructions ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" /></svg>
-                  </button>
-                  {showInstructions && (
-                    <div className="px-6 pb-6 border-t border-gray-100">
-                      <div className="mt-4 space-y-3">
-                        {[
-                          ["Open your source store's Shopify Admin", "Go to https://your-store.myshopify.com/admin"],
-                          ["Go to Settings \u2192 Apps and sales channels \u2192 Develop apps", "Click Settings in bottom-left, then Apps and sales channels, then Develop apps"],
-                          ["Enable custom app development if needed", "Click Allow custom app development and confirm"],
-                          ["Create a new app", "Click Create an app, name it (e.g. Store Transfer), then Create app"],
-                          ["Configure Admin API scopes", "Check: read_products, read_product_listings, read_collections, read_themes. Then Save"],
-                          ["Install the app and copy the token", "Click Install app, then API credentials tab, Reveal token once. Copy it immediately!"],
-                          ["Paste it below", "Enter your source store URL and token below"],
-                        ].map(([title, desc], i) => (
-                          <div key={i} className="flex gap-3">
-                            <span className="flex-shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold text-white" style={{ background: P }}>{i + 1}</span>
-                            <div>
-                              <p className="text-sm font-medium text-gray-900">{title}</p>
-                              <p className="text-xs text-gray-500 mt-0.5">{desc}</p>
-                            </div>
-                          </div>
-                        ))}
-                        <div className="mt-3 rounded-lg px-4 py-3 bg-amber-50 border border-amber-200">
-                          <p className="text-xs text-amber-700">The token starts with <strong>shpat_</strong>. You only need <strong>read</strong> permissions on the source store. Your connection will be saved securely for future visits.</p>
-                        </div>
+                  )}
+
+                  {/* ── TAB: DESTINATION STORE ── */}
+                  {sessionTab === "dest" && (
+                    <div className="pb-6 space-y-4">
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1.5">Session Code</label>
+                        <input
+                          type="text"
+                          value={sessionCodeInput}
+                          onChange={(e) => setSessionCodeInput(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6))}
+                          onKeyDown={(e) => e.key === "Enter" && handleJoinSession()}
+                          placeholder="X7K2P9"
+                          maxLength={6}
+                          className="w-full px-4 py-2.5 text-sm border border-gray-300 rounded-lg outline-none transition-all focus:ring-2 focus:border-transparent font-mono tracking-widest text-center text-lg uppercase"
+                          disabled={sessionFetcher.state !== "idle"}
+                        />
+                        <p className="text-[11px] text-gray-400 mt-1">6-character code shared by the source store owner</p>
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1.5">Transfer Password</label>
+                        <input
+                          type="password"
+                          value={sessionPassword}
+                          onChange={(e) => setSessionPassword(e.target.value)}
+                          onKeyDown={(e) => e.key === "Enter" && handleJoinSession()}
+                          placeholder="Password set by the source store"
+                          className="w-full px-4 py-2.5 text-sm border border-gray-300 rounded-lg outline-none transition-all focus:ring-2 focus:border-transparent"
+                          disabled={sessionFetcher.state !== "idle"}
+                        />
+                      </div>
+                      <button
+                        onClick={handleJoinSession}
+                        disabled={sessionFetcher.state !== "idle" || !sessionCodeInput.trim() || !sessionPassword}
+                        style={sessionFetcher.state === "idle" && sessionCodeInput.trim() && sessionPassword ? { background: P, color: "#fff", borderRadius: 8, fontWeight: 600, fontFamily: F } : { borderRadius: 8 }}
+                        className={`w-full px-5 py-3 text-sm rounded-lg transition-all ${sessionFetcher.state === "idle" && sessionCodeInput.trim() && sessionPassword ? "shadow-sm hover:brightness-110 active:scale-[0.98]" : "bg-gray-200 text-gray-400 cursor-not-allowed"}`}
+                      >
+                        {sessionFetcher.state !== "idle" ? (
+                          <span className="flex items-center justify-center gap-2">
+                            <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" /></svg>
+                            Connecting to Source Store...
+                          </span>
+                        ) : "Connect to Source Store"}
+                      </button>
+                      <div className="rounded-lg px-4 py-3 flex items-start gap-2.5" style={{ background: "rgba(23,50,10,0.04)", border: "1px solid rgba(23,50,10,0.08)" }}>
+                        <svg className="w-4 h-4 flex-shrink-0 mt-0.5" style={{ color: S }} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" /></svg>
+                        <p className="text-[11px] text-gray-500">Tokens are matched server-side — they never appear in your browser. Session codes expire after 30 minutes.</p>
                       </div>
                     </div>
                   )}
-                </div>
 
-                {/* Connection form */}
-                <div className="bg-white rounded-xl border border-gray-200 p-6 sm:p-8 shadow-sm max-w-xl mx-auto">
-                  <div className="flex items-center gap-3 mb-2">
-                    <div className="w-12 h-12 rounded-full flex items-center justify-center" style={{ background: "rgba(23,50,10,0.08)" }}>
-                      <svg className="w-6 h-6" style={{ color: P }} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M13.19 8.688a4.5 4.5 0 011.242 7.244l-4.5 4.5a4.5 4.5 0 01-6.364-6.364l1.757-1.757m13.35-.622l1.757-1.757a4.5 4.5 0 00-6.364-6.364l-4.5 4.5a4.5 4.5 0 001.242 7.244" /></svg>
+                  {/* ── TAB: SOURCE STORE ── */}
+                  {sessionTab === "source" && (
+                    <div className="pb-6">
+                      {!sessionCode ? (
+                        // Pre-generation: set password
+                        <div className="space-y-4">
+                          <p className="text-xs text-gray-500">
+                            Generate a one-time session code and share it with the destination store owner along with the password you set below.
+                          </p>
+                          <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1.5">Transfer Password</label>
+                            <input
+                              type="password"
+                              value={sessionPassword}
+                              onChange={(e) => setSessionPassword(e.target.value)}
+                              placeholder="Set a transfer password"
+                              className="w-full px-4 py-2.5 text-sm border border-gray-300 rounded-lg outline-none transition-all focus:ring-2 focus:border-transparent"
+                              disabled={sessionFetcher.state !== "idle"}
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1.5">Confirm Password</label>
+                            <input
+                              type="password"
+                              value={sessionConfirmPassword}
+                              onChange={(e) => setSessionConfirmPassword(e.target.value)}
+                              onKeyDown={(e) => e.key === "Enter" && handleCreateSession()}
+                              placeholder="Confirm transfer password"
+                              className="w-full px-4 py-2.5 text-sm border border-gray-300 rounded-lg outline-none transition-all focus:ring-2 focus:border-transparent"
+                              disabled={sessionFetcher.state !== "idle"}
+                            />
+                          </div>
+                          <button
+                            onClick={handleCreateSession}
+                            disabled={sessionFetcher.state !== "idle" || !sessionPassword || !sessionConfirmPassword}
+                            style={sessionFetcher.state === "idle" && sessionPassword && sessionConfirmPassword ? { background: P, color: "#fff", borderRadius: 8, fontWeight: 600, fontFamily: F } : { borderRadius: 8 }}
+                            className={`w-full px-5 py-3 text-sm rounded-lg transition-all ${sessionFetcher.state === "idle" && sessionPassword && sessionConfirmPassword ? "shadow-sm hover:brightness-110 active:scale-[0.98]" : "bg-gray-200 text-gray-400 cursor-not-allowed"}`}
+                          >
+                            {sessionFetcher.state !== "idle" ? (
+                              <span className="flex items-center justify-center gap-2">
+                                <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" /></svg>
+                                Generating...
+                              </span>
+                            ) : "Generate Session Code"}
+                          </button>
+                        </div>
+                      ) : (
+                        // Post-generation: show code + countdown
+                        <div className="space-y-4">
+                          <div className="text-center">
+                            <p className="text-xs font-semibold uppercase tracking-wider text-gray-400 mb-2">Your Session Code</p>
+                            <div className="inline-flex items-center justify-center rounded-xl px-8 py-5 border-2" style={{ borderColor: "rgba(46,99,22,0.3)", background: "rgba(46,99,22,0.05)" }}>
+                              <span className="font-mono text-4xl font-bold tracking-[0.3em]" style={{ color: S }}>{sessionCode}</span>
+                            </div>
+                            {sessionCountdown !== null && sessionCountdown > 0 && (
+                              <div className="mt-3 flex items-center justify-center gap-1.5">
+                                <svg className="w-3.5 h-3.5 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><circle cx="12" cy="12" r="10"/><path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6l4 2"/></svg>
+                                <span className="text-xs font-medium text-amber-600">
+                                  Expires in {String(Math.floor(sessionCountdown / 60)).padStart(2, "0")}:{String(sessionCountdown % 60).padStart(2, "0")}
+                                </span>
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="rounded-lg px-4 py-3 bg-blue-50 border border-blue-200">
+                            <p className="text-xs font-semibold text-blue-800 mb-1">Share with the destination store owner:</p>
+                            <ul className="text-xs text-blue-700 space-y-0.5 list-disc list-inside">
+                              <li>Session code: <strong className="font-mono">{sessionCode}</strong></li>
+                              <li>The password you just set</li>
+                              <li>Ask them to open Importzo → Transfer Store → &ldquo;I&apos;m the Destination Store&rdquo;</li>
+                            </ul>
+                          </div>
+
+                          <p className="text-xs text-gray-500 text-center">
+                            Once the destination store connects using this code, the transfer will proceed on their side. You don&apos;t need to do anything else.
+                          </p>
+
+                          <button onClick={handleCancelSession}
+                            className="w-full px-4 py-2 text-xs font-medium text-red-600 border border-red-200 rounded-lg hover:bg-red-50 transition-colors"
+                          >
+                            Cancel Session
+                          </button>
+                        </div>
+                      )}
                     </div>
-                    <div>
-                      <h2 className="text-lg font-semibold text-gray-900">Connect Source Store</h2>
-                      <p className="text-sm text-gray-500">The store you want to copy data <strong>from</strong></p>
-                    </div>
-                  </div>
-                  <div className="rounded-lg px-3 py-2 mb-5 text-[11px]" style={{ background: "rgba(46,99,22,0.06)", color: S }}>
-                    The credentials below belong to the <strong>source store</strong>. Data will be copied into your current store (<strong>{destinationName}</strong>).
-                  </div>
-                  <div className="space-y-4">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1.5">Source Store URL</label>
-                      <div className="relative">
-                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-gray-400">https://</span>
-                        <input type="text" value={sourceUrl} onChange={(e) => updateSourceUrl(e.target.value)}
-                          onKeyDown={(e) => e.key === "Enter" && sourceUrl.trim() && sourceToken.trim() && handleConnect()}
-                          placeholder="my-store.myshopify.com"
-                          className="w-full pl-[70px] pr-4 py-2.5 text-sm border border-gray-300 rounded-lg outline-none transition-all focus:ring-2 focus:border-transparent"
-                          disabled={isBusy} />
-                      </div>
-                      <p className="text-[11px] text-gray-400 mt-1">The myshopify domain of the store you&apos;re copying <strong>from</strong> — not this current store.</p>
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1.5">Source Store Admin API Access Token</label>
-                      <input type="password" value={sourceToken} onChange={(e) => updateSourceToken(e.target.value)}
-                        onKeyDown={(e) => e.key === "Enter" && sourceUrl.trim() && sourceToken.trim() && handleConnect()}
-                        placeholder="shpat_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-                        className="w-full px-4 py-2.5 text-sm border border-gray-300 rounded-lg outline-none transition-all focus:ring-2 focus:border-transparent font-mono"
-                        disabled={isBusy} />
-                      <p className="text-[11px] text-gray-400 mt-1">Create this token in the source store&apos;s Shopify admin (Settings → Develop apps). Read-only scopes only.</p>
-                    </div>
-                    <button onClick={handleConnect} disabled={isBusy || !sourceUrl.trim() || !sourceToken.trim()}
-                      style={!isBusy && sourceUrl.trim() && sourceToken.trim() ? { background: P, color: "#fff", borderRadius: 8, fontWeight: 600, fontFamily: F } : { borderRadius: 8 }}
-                      className={`w-full px-5 py-3 text-sm rounded-lg transition-all ${!isBusy && sourceUrl.trim() && sourceToken.trim() ? "shadow-sm hover:brightness-110 active:scale-[0.98]" : "bg-gray-200 text-gray-400 cursor-not-allowed"}`}
-                    >
-                      {isBusy ? (
-                        <span className="flex items-center justify-center gap-2">
-                          <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" /></svg>
-                          {loadingMsg || "Connecting..."}
-                        </span>
-                      ) : "Connect & Continue"}
-                    </button>
-                  </div>
-                  <div className="mt-6 rounded-lg px-4 py-3 flex items-start gap-3" style={{ background: "rgba(23,50,10,0.04)", border: "1px solid rgba(23,50,10,0.1)" }}>
-                    <svg className="w-5 h-5 flex-shrink-0 mt-0.5" style={{ color: S }} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" /></svg>
-                    <div>
-                      <p className="text-sm font-medium" style={{ color: P }}>Secure connection</p>
-                      <p className="text-xs text-gray-500 mt-0.5">Your credentials are encrypted and saved for future visits. Only <strong>read</strong> access is needed. Data is <strong>created as new</strong> — nothing is deleted.</p>
-                    </div>
-                  </div>
+                  )}
                 </div>
-              </>
+              </div>
             )}
           </div>
         )}
@@ -1385,13 +1711,13 @@ export default function StoreTransferPage() {
         {/* ═══ STEP 3: PREVIEW ═══ */}
         {step === STEP_PREVIEW && (
           <div className="animate-fade-in space-y-5">
-            {/* Dry run banner */}
+            {/* Dry run info banner — replaced raw blue div with shared info banner pattern */}
             {dryRun && (
-              <div className="rounded-xl px-5 py-4 border-2 border-blue-200 bg-blue-50/50 flex items-center gap-3">
-                <svg className="w-5 h-5 text-blue-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z" /></svg>
+              <div className="rounded-xl px-5 py-4 border-2 border-blue-200 bg-blue-50/50 flex items-start gap-3" role="status" aria-live="polite">
+                <svg className="w-5 h-5 text-blue-500 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z" /></svg>
                 <div>
                   <p className="text-sm font-semibold text-blue-800">Dry Run Mode Active</p>
-                  <p className="text-xs text-blue-600">No data will be created or modified. This is a simulation only.</p>
+                  <p className="text-xs text-blue-600 mt-0.5">No data will be created or modified. This is a simulation only.</p>
                 </div>
               </div>
             )}
@@ -1447,16 +1773,17 @@ export default function StoreTransferPage() {
                 })}
               </div>
 
-              {/* Warnings */}
+              {/* Overwrite warning banner — replaced raw amber div; role="alert" matches Polaris Banner warning semantics */}
               {conflictMode === "overwrite" && (
-                <div className="mt-4 rounded-lg px-4 py-3 bg-amber-50 border border-amber-200">
+                <div className="mt-4 rounded-lg px-4 py-3 bg-amber-50 border border-amber-200" role="alert">
                   <p className="text-xs font-semibold text-amber-800">Warning: Overwrite mode</p>
                   <p className="text-xs text-amber-700 mt-0.5">Existing products and collections with matching handles may be overwritten. This cannot be undone.</p>
                 </div>
               )}
 
+              {/* Theme info banner — replaced raw blue div; role="status" matches Polaris Banner info semantics */}
               {selectedModules.has("themes") && (
-                <div className="mt-4 rounded-lg px-4 py-3 bg-blue-50 border border-blue-200">
+                <div className="mt-4 rounded-lg px-4 py-3 bg-blue-50 border border-blue-200" role="status">
                   <p className="text-xs text-blue-700">Theme will be transferred as <strong>unpublished</strong>. Review it before publishing.</p>
                 </div>
               )}
@@ -1519,15 +1846,21 @@ export default function StoreTransferPage() {
                   {loadingMsg && <p className="text-xs text-gray-400 mt-3">{loadingMsg}</p>}
                   {(() => {
                     const completedCount = activeModules.filter((k) => !!getModuleStats(k)).length;
-                    const pct = activeModules.length > 0 ? Math.round((completedCount / activeModules.length) * 100) : 0;
+                    // Add partial within-module progress for collections (they come back one at a time)
+                    let partial = 0;
+                    if (currentModule === "collections" && moduleProgress.total > 0) {
+                      partial = (moduleProgress.idx - 1) / moduleProgress.total;
+                    }
+                    const pct = activeModules.length > 0 ? Math.min(99, Math.round(((completedCount + partial) / activeModules.length) * 100)) : 0;
+                    const displayPct = completedCount === activeModules.length ? 100 : pct;
                     return (
                       <div className="mt-3 w-full">
                         <div className="flex justify-between text-xs text-gray-500 mb-1">
                           <span>{completedCount} / {activeModules.length} modules complete</span>
-                          <span>{pct}%</span>
+                          <span>{displayPct}%</span>
                         </div>
                         <div className="w-full bg-gray-100 rounded-full h-1.5">
-                          <div className="h-1.5 rounded-full transition-all duration-500" style={{ width: `${pct}%`, background: P }} />
+                          <div className="h-1.5 rounded-full transition-all duration-500" style={{ width: `${displayPct}%`, background: P }} />
                         </div>
                       </div>
                     );
@@ -1541,13 +1874,14 @@ export default function StoreTransferPage() {
         {/* ═══ STEP 5: RESULTS ═══ */}
         {step === STEP_RESULTS && (
           <div className="animate-fade-in space-y-5">
+            {/* Results status banners — dry-run info and transfer success replaced with role-annotated banners */}
             {dryRun ? (
-              <div className="rounded-xl px-5 py-4 border-2 border-blue-200 bg-blue-50/50 flex items-center gap-3">
+              <div className="rounded-xl px-5 py-4 border-2 border-blue-200 bg-blue-50/50 flex items-center gap-3" role="status" aria-live="polite">
                 <svg className="w-5 h-5 text-blue-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z" /></svg>
                 <p className="text-sm font-semibold text-blue-800">Dry Run Results — No data was modified in {destinationName}</p>
               </div>
             ) : (
-              <div className="rounded-xl px-5 py-4 border-2 flex items-center gap-3" style={{ borderColor: "rgba(46,99,22,0.25)", background: "rgba(46,99,22,0.04)" }}>
+              <div className="rounded-xl px-5 py-4 border-2 flex items-center gap-3" style={{ borderColor: "rgba(46,99,22,0.25)", background: "rgba(46,99,22,0.04)" }} role="status" aria-live="polite">
                 <svg className="w-5 h-5 flex-shrink-0" style={{ color: S }} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
@@ -1651,7 +1985,19 @@ export default function StoreTransferPage() {
 
                   {key === "themes" && transferResults.themes && (
                     <div className="px-6 py-4 border-t border-gray-100 bg-gray-50/60">
-                      {transferResults.themes.ok && transferResults.themes.newThemeId ? (
+                      {transferResults.themes.ok && transferResults.themes.dryRun ? (
+                        // ── Dry-run result — no destination store touched ──
+                        <div className="flex items-center gap-3 rounded-lg px-4 py-3" style={{ background: "rgba(37,99,235,0.05)", border: "1px solid rgba(37,99,235,0.2)" }}>
+                          <svg className="w-5 h-5 flex-shrink-0 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-semibold text-blue-800">Dry run — no changes made</p>
+                            <p className="text-xs text-blue-700 mt-0.5">
+                              Theme &quot;{transferResults.themes.themeName}&quot; has <strong>{transferResults.themes.assetCount}</strong> assets that would be transferred. No theme was created on the destination store.
+                            </p>
+                          </div>
+                        </div>
+                      ) : transferResults.themes.ok && transferResults.themes.newThemeId ? (
+                        // ── Real transfer success ──
                         <div className="space-y-3">
                           <div className="flex items-center gap-3 rounded-lg px-4 py-3" style={{ background: "rgba(46,99,22,0.06)", border: "1px solid rgba(46,99,22,0.15)" }}>
                             <svg className="w-5 h-5 flex-shrink-0" style={{ color: S }} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4" /></svg>
@@ -1662,23 +2008,29 @@ export default function StoreTransferPage() {
                               <p className="text-xs text-gray-600 mt-0.5">Saved as <strong>unpublished</strong> — preview it before publishing.</p>
                             </div>
                             <div className="flex flex-col gap-1.5 flex-shrink-0">
-                            <a href={`https://${currentShop}/admin/themes`} target="_top" rel="noopener noreferrer"
+                            <a href={`https://${currentShop}/admin/themes/${transferResults.themes.newThemeId}`} target="_blank" rel="noopener noreferrer"
                               className="px-3 py-1.5 text-xs font-semibold rounded-lg text-white whitespace-nowrap text-center" style={{ background: S }}>
-                              View in Admin
+                              Open Theme ↗
                             </a>
                             {transferResults.themes?.previewUrl && (
-                              <a href={transferResults.themes.previewUrl} target="_top" rel="noopener noreferrer"
+                              <a href={transferResults.themes.previewUrl} target="_blank" rel="noopener noreferrer"
                                 className="px-3 py-1.5 text-xs font-semibold rounded-lg whitespace-nowrap text-center border" style={{ color: S, borderColor: "rgba(46,99,22,0.3)" }}>
-                                Preview Theme
+                                Preview ↗
                               </a>
                             )}
                           </div>
                           </div>
                           <p className="text-[11px] text-gray-500">
-                            Asset copy: {stats.success} succeeded{stats.errors > 0 ? `, ${stats.errors} failed` : ""}. Failed assets are typically binary files whose source URL isn&apos;t accessible — the rest of the theme is still usable.
+                            Asset copy: {stats.success} succeeded
+                            {stats.errors > 0 ? `, ${stats.errors} failed` : ""}
+                            {transferResults.themes.results?.filter((a) => a.status === "warning").length > 0
+                              ? `, ${transferResults.themes.results.filter((a) => a.status === "warning").length} CDN warnings`
+                              : ""}.
+                            Theme is still usable — failed assets are typically large binary files.
                           </p>
                         </div>
                       ) : (
+                        // ── Error ──
                         <p className="text-xs text-red-600">
                           Theme creation failed on the destination store: {friendlyError(transferResults.themes.error)}
                         </p>
@@ -1735,7 +2087,7 @@ export default function StoreTransferPage() {
             <div className="flex items-center gap-3">
               <button onClick={resetAll} style={{ background: P, color: "#fff", borderRadius: 8, fontWeight: 600, fontFamily: F }}
                 className="px-5 py-2.5 text-sm rounded-lg shadow-sm hover:brightness-110 transition-all">New Transfer</button>
-              <a href="/app" className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">Back to Dashboard</a>
+              <Link to="/app" className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">Back to Dashboard</Link>
               {dryRun && (
                 <button onClick={() => { setDryRun(false); setStep(STEP_PREVIEW); setTransferResults({}); transferResultsRef.current = {}; savingRecord.current = false; }}
                   style={{ background: S, color: "#fff", borderRadius: 8, fontWeight: 600, fontFamily: F }}

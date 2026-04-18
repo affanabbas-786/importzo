@@ -1,5 +1,5 @@
 import { useState, useCallback, Fragment } from "react";
-import { useLoaderData, useNavigation, useRouteError } from "react-router";
+import { useLoaderData, useNavigation, useRouteError, Link } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
@@ -235,8 +235,8 @@ export default function Dashboard() {
 
         {/* ── 3 Primary Action Cards ── */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          <a
-            href="/app/import"
+          <Link
+            to="/app/import"
             className="group bg-white rounded-xl border border-gray-200 p-5 shadow-sm hover:shadow-lg transition-all duration-200 hover:-translate-y-1 flex items-start gap-4"
           >
             <div className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0 transition-colors" style={{ background: "rgba(23,50,10,0.08)", color: secondary }}>
@@ -251,10 +251,10 @@ export default function Dashboard() {
             <svg className="w-4 h-4 text-gray-300 group-hover:text-gray-500 mt-0.5 flex-shrink-0 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
             </svg>
-          </a>
+          </Link>
 
-          <a
-            href="/app/export"
+          <Link
+            to="/app/export"
             className="group bg-white rounded-xl border border-gray-200 p-5 shadow-sm hover:shadow-lg transition-all duration-200 hover:-translate-y-1 flex items-start gap-4"
           >
             <div className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: "rgba(23,50,10,0.08)", color: secondary }}>
@@ -269,10 +269,10 @@ export default function Dashboard() {
             <svg className="w-4 h-4 text-gray-300 group-hover:text-gray-500 mt-0.5 flex-shrink-0 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
             </svg>
-          </a>
+          </Link>
 
-          <a
-            href="/app/collection-transfer"
+          <Link
+            to="/app/collection-transfer"
             className="group bg-white rounded-xl border border-gray-200 p-5 shadow-sm hover:shadow-lg transition-all duration-200 hover:-translate-y-1 flex items-start gap-4"
           >
             <div className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: "rgba(23,50,10,0.08)", color: secondary }}>
@@ -287,7 +287,7 @@ export default function Dashboard() {
             <svg className="w-4 h-4 text-gray-300 group-hover:text-gray-500 mt-0.5 flex-shrink-0 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
             </svg>
-          </a>
+          </Link>
         </div>
 
         {/* ── Summary Stats ── */}
@@ -319,7 +319,7 @@ export default function Dashboard() {
           <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
             <h2 className="text-base font-semibold text-gray-900" style={{ fontFamily: font }}>Recent Activity</h2>
             {imports.length > 0 && (
-              <a href="/app/activity" className="text-xs font-medium hover:underline" style={{ color: secondary }}>View all</a>
+              <Link to="/app/activity" className="text-xs font-medium hover:underline" style={{ color: secondary }}>View all</Link>
             )}
           </div>
 
@@ -332,8 +332,8 @@ export default function Dashboard() {
               </div>
               <p className="text-sm font-medium text-gray-700 mb-1">No activity yet</p>
               <p className="text-xs text-gray-400 mb-5">Import your first CSV file to get started.</p>
-              <a
-                href="/app/import"
+              <Link
+                to="/app/import"
                 className="inline-flex items-center gap-2 px-5 py-2.5 text-white text-sm rounded-lg transition-all hover:brightness-110"
                 style={{ background: primary, fontWeight: 600, fontFamily: font }}
               >
@@ -341,7 +341,7 @@ export default function Dashboard() {
                   <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
                 </svg>
                 Start Importing
-              </a>
+              </Link>
             </div>
           ) : (
             <div className="overflow-x-auto">
@@ -419,15 +419,15 @@ export default function Dashboard() {
                                 </svg>
                               </button>
                               {(job.status === "failed" || job.status === "completed_with_errors") && (
-                                <a
-                                  href={tc.route}
+                                <Link
+                                  to={tc.route}
                                   title="Retry import"
                                   className="p-1.5 rounded-md text-gray-400 hover:text-amber-600 hover:bg-amber-50 transition-colors"
                                 >
                                   <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                                     <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182" />
                                   </svg>
-                                </a>
+                                </Link>
                               )}
                               {hasErrors && (
                                 <button
