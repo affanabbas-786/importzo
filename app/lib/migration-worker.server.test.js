@@ -204,6 +204,54 @@ describe("runMigrationWorker", () => {
     expect(job.processedProducts).toBe(1);
   });
 
+  // Reported regression after the productCreate/productVariantsBulkCreate split:
+  // metafields silently stopped copying to newly created products. Reproduces
+  // the exact scenario (a product WITH variants AND a metafield) to check
+  // whether copyMetafields still runs, and with the right destination GID.
+  it("copies metafields after both productCreate and productVariantsBulkCreate succeed for a multi-variant product", async () => {
+    fakePrisma = createFakePrisma(baseJob());
+    let metafieldsQuerySeen = null;
+    let metafieldsIdQueried = null;
+    let metafieldsSetVariables = null;
+    global.fetch = makeFetch({
+      productPages: [{
+        nodes: [productNode(1, {
+          options: [{ name: "Color" }],
+          variants: {
+            edges: [
+              { node: { sku: "MUG-RED", price: "12.00", selectedOptions: [{ name: "Color", value: "Red" }] } },
+              { node: { sku: "MUG-BLUE", price: "12.00", selectedOptions: [{ name: "Color", value: "Blue" }] } },
+            ],
+          },
+        })],
+        hasNextPage: false,
+      }],
+      productCreateHandler: () => jsonResponse({ data: { productCreate: { product: { id: "gid://shopify/Product/new-1" }, userErrors: [] } } }),
+      variantsBulkCreateHandler: () => jsonResponse({ data: { productVariantsBulkCreate: { productVariants: [{ id: "v1" }, { id: "v2" }], userErrors: [] } } }),
+      metafieldsHandler: (query, resourceKey) => {
+        metafieldsQuerySeen = resourceKey;
+        return jsonResponse({ data: { [resourceKey]: { metafields: { edges: [{ node: { namespace: "custom", key: "material", value: "Cotton", type: "single_line_text_field" } }] } } } });
+      },
+    });
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn(async (url, opts) => {
+      const body = JSON.parse(opts.body);
+      if (body.query.includes("query Metafields")) metafieldsIdQueried = body.variables.id;
+      if (body.query.includes("mutation MetafieldsSet")) metafieldsSetVariables = body.variables;
+      return originalFetch(url, opts);
+    });
+
+    await runMigrationWorker("job-1");
+
+    expect(metafieldsQuerySeen).toBe("product");
+    expect(metafieldsIdQueried).toBe("gid://shopify/Product/1"); // source product
+    expect(metafieldsSetVariables).not.toBeNull();
+    expect(metafieldsSetVariables.metafields[0]).toMatchObject({
+      ownerId: "gid://shopify/Product/new-1", // the newly created destination product
+      namespace: "custom", key: "material", value: "Cotton",
+    });
+  });
+
   it("is idempotent on resume: does not re-create products already marked DONE", async () => {
     fakePrisma = createFakePrisma(baseJob({ lastCursor: null }));
     // Pre-seed as if product 1 already succeeded in a prior run.

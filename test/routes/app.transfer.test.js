@@ -102,7 +102,7 @@ describe("app.transfer action — transfer-products (products, media, metafields
     vi.restoreAllMocks();
   });
 
-  function makeProductTransferFetch({ sourceProducts, existingByHandle = null, onProductCreate, onVariantsBulkCreate } = {}) {
+  function makeProductTransferFetch({ sourceProducts, existingByHandle = null, onProductCreate, onVariantsBulkCreate, onMetafieldsSet, sourceMetafields = [] } = {}) {
     const seenResourceTypes = new Set();
     const { handleMetafieldsQuery, handleMetafieldsSet } = metafieldsFetchHandlers(seenResourceTypes);
     const fetchFn = vi.fn(async (url, opts) => {
@@ -124,8 +124,19 @@ describe("app.transfer action — transfer-products (products, media, metafields
       if (query.includes("mutation ProductUpdate")) return jsonResponse({ data: { productUpdate: { product: { id: existingByHandle?.id }, userErrors: [] } } });
       if (query.includes("productCreateMedia")) return jsonResponse({ data: { productCreateMedia: { media: [], mediaUserErrors: [] } } });
       if (query.includes("query ProductMedia")) return jsonResponse({ data: { product: { media: { nodes: [] } } } });
-      if (query.includes("query Metafields")) return handleMetafieldsQuery(query);
-      if (query.includes("mutation MetafieldsSet")) return handleMetafieldsSet(body);
+      if (query.includes("query Metafields")) {
+        if (sourceMetafields.length) {
+          const match = query.match(/query Metafields\(\$id: ID!\) {\s*(\w+)\(id: \$id\)/);
+          const resourceKey = match?.[1] || "product";
+          seenResourceTypes.add(resourceKey);
+          return jsonResponse({ data: { [resourceKey]: { metafields: { edges: sourceMetafields.map((m) => ({ node: m })) } } } });
+        }
+        return handleMetafieldsQuery(query);
+      }
+      if (query.includes("mutation MetafieldsSet")) {
+        onMetafieldsSet?.(body.variables);
+        return handleMetafieldsSet(body);
+      }
 
       throw new Error(`Unexpected fetch in transfer-products test: ${query.slice(0, 100)}`);
     });
@@ -159,6 +170,43 @@ describe("app.transfer action — transfer-products (products, media, metafields
     await action({ request: req });
 
     expect(fetchFn.__seenResourceTypes.has("product")).toBe(true);
+  });
+
+  // Reported regression after the productCreate/productVariantsBulkCreate
+  // split: metafields silently stopped copying. Reproduces the exact
+  // scenario (a multi-variant product with a real metafield value) and
+  // asserts metafieldsSet actually fires with the correct destination GID.
+  it("copies a real metafield value to the newly created product after variants are created", async () => {
+    let createdProductGid = null;
+    let metafieldsSetVariables = null;
+    global.fetch = makeProductTransferFetch({
+      sourceProducts: [sourceProduct(1, {
+        options: [{ name: "Color" }],
+        variants: { edges: [{ node: { sku: "MUG-RED", price: "12.00", selectedOptions: [{ name: "Color", value: "Red" }] } }] },
+      })],
+      sourceMetafields: [{ namespace: "custom", key: "material", value: "Cotton", type: "single_line_text_field" }],
+      onMetafieldsSet: (variables) => { metafieldsSetVariables = variables; },
+    });
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn(async (url, opts) => {
+      const body = JSON.parse(opts.body);
+      const res = await originalFetch(url, opts);
+      if (body.query.includes("mutation ProductCreate")) {
+        const json = await res.json();
+        createdProductGid = json?.data?.productCreate?.product?.id || null;
+      }
+      return res;
+    });
+
+    const req = mockActionRequest({ intent: "transfer-products", sourceUrl: SOURCE_SHOP, sourceToken: "src-token", conflictMode: "create" });
+    const result = await action({ request: req });
+
+    expect(result.results[0].status).toBe("success");
+    expect(metafieldsSetVariables).not.toBeNull();
+    expect(metafieldsSetVariables.metafields[0]).toMatchObject({
+      namespace: "custom", key: "material", value: "Cotton",
+      ownerId: createdProductGid, // attached to the newly created destination product, not the source
+    });
   });
 
   // Regression coverage for a production bug: productCreate used to receive
