@@ -3,8 +3,42 @@
 Tracks execution of `Importzo-PRD-Growth-Plan.md`. Currently: **Phase 1 (Core Hardening) — complete.**
 Phase 2, 3, 4 have not been started, per instructions.
 
-Branch: `phase-1-hardening`. Five commits, one per Phase 1 checklist item. All committed only after
-the full test suite passed.
+Original work: five commits on `phase-1-hardening`, one per Phase 1 checklist item, each committed only
+after the full test suite passed. That branch was subsequently merged into `main` (fast-forward,
+outside this session) along with a separately-added PRD/growth-plan doc commit; all further work
+described below happened directly on `main`.
+
+---
+
+## Post-Phase-1 fix: invalid GraphQL fields found via manual production testing
+
+**Commit:** `8561abe` (on `main`)
+
+The user ran a real store-to-store transfer (demo-2-offofpnp.myshopify.com → check-12313180.myshopify.com)
+while manually verifying the metafields fix, and reported two symptoms:
+
+1. **Confirmed and fixed:** `migration-worker.server.js`'s `PRODUCT_QUERY` requested `Product.giftCard`
+   (doesn't exist as a query field — only `ProductInput.giftCard` exists, for mutations; the correct
+   field is `isGiftCard`), `ProductVariant.fulfillmentService` (removed from the API in version 2022-10),
+   and `ProductVariant.requiresShipping` (moved onto `InventoryItem` at some point). Verified against
+   shopify.dev's live GraphQL reference for the pinned API version (2025-10, from
+   `ApiVersion.October25` in `app/shopify.server.js` — note `shopify.app.toml`'s `[webhooks] api_version
+   = "2026-04"` is a separate, webhook-only setting and not what these queries use). A single invalid
+   field fails the *entire* query to parse, so every page fetch failed immediately and the whole
+   migration job aborted. Fixed the query and the two call sites that read the affected fields; added
+   regression tests asserting the actual query text sent is well-formed.
+
+2. **Investigated, not independently reproduced:** a second symptom — repeated GraphQL "syntax error,
+   unexpected INT (<large number>)" — was suspected to involve an inventory item ID interpolated
+   unquoted into a query string. Searched exhaustively across every GraphQL call site in the codebase
+   (every raw ID usage, every dynamic query-string construction, every `inventoryItemId` reference) and
+   found no second occurrence of a pattern that produces that specific error class. The only place in
+   the entire codebase that could produce exactly "unexpected INT" (a numeric value landing in a
+   GraphQL *field-name* position, not just an argument value) is `copyMetafields`/
+   `copyGraphqlMetafields`'s `resourceType` derivation — already fixed in the Phase 1 metafields commit
+   (`69b1c52`). Reported this back rather than inventing an unverifiable second fix. If it still
+   reproduces after this commit, the exact log line and which entity type (product/page/collection/
+   article) triggered it would pinpoint it definitively.
 
 ---
 
