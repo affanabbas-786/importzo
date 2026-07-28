@@ -54,6 +54,76 @@ describe("shop data inventory", () => {
     expect(stale, `SHOP_SCOPED_MODELS references removed model(s): ${stale.join(", ")}`).toEqual([]);
   });
 
+  // Regression guard for a bug a live smoke test caught that these unit
+  // tests did not: deleteShopData issued `where: { shop }` against
+  // TransferSession, which has no `shop` column (it has sourceShop/destShop).
+  // Prisma rejected the query, the per-model catch swallowed it, and the rows
+  // survived erasure still holding both stores' encrypted tokens.
+  //
+  // The fake Prisma below accepts any where-clause, so only checking the
+  // clause against the real schema can catch this class of mistake.
+  it("only filters on columns that actually exist on each model", async () => {
+    const schema = fs.readFileSync(path.resolve(process.cwd(), "prisma/schema.prisma"), "utf8");
+
+    // model Name { ... } → set of field names
+    const columnsByModel = {};
+    for (const m of schema.matchAll(/^model\s+(\w+)\s*\{([\s\S]*?)^\}/gm)) {
+      const clientKey = m[1].charAt(0).toLowerCase() + m[1].slice(1);
+      columnsByModel[clientKey] = new Set(
+        m[2].split("\n")
+          .map((l) => l.trim())
+          .filter((l) => l && !l.startsWith("//") && !l.startsWith("@@"))
+          .map((l) => l.split(/\s+/)[0]),
+      );
+    }
+
+    const prisma = fakePrisma({ jobs: [{ id: "job-1" }] });
+    await deleteShopData(prisma, "merchant.myshopify.com");
+
+    // Collects every field name referenced in a where clause, including
+    // inside OR/AND/NOT groupings.
+    const fieldsIn = (where) => {
+      const found = [];
+      const walk = (node) => {
+        if (Array.isArray(node)) return node.forEach(walk);
+        if (!node || typeof node !== "object") return;
+        for (const [key, value] of Object.entries(node)) {
+          if (["OR", "AND", "NOT"].includes(key)) walk(value);
+          else found.push(key);
+        }
+      };
+      walk(where);
+      return found;
+    };
+
+    const problems = [];
+    for (const { model, where } of prisma.__calls()) {
+      const columns = columnsByModel[model];
+      if (!columns) { problems.push(`${model}: not found in schema`); continue; }
+      for (const field of fieldsIn(where)) {
+        if (!columns.has(field)) problems.push(`${model}.${field} does not exist`);
+      }
+    }
+
+    expect(
+      problems,
+      `deleteShopData filters on non-existent column(s). Prisma rejects these at runtime and the ` +
+      `per-model catch hides it, so the rows silently survive GDPR erasure:\n  ${problems.join("\n  ")}`,
+    ).toEqual([]);
+  });
+
+  it("removes a TransferSession when either side of the store pair is redacted", async () => {
+    // It records a pairing and holds BOTH stores' encrypted tokens, so a
+    // redact of the source or the destination must remove it.
+    const prisma = fakePrisma({ jobs: [] });
+    await deleteShopData(prisma, "merchant.myshopify.com");
+
+    const call = prisma.__calls().find((c) => c.model === "transferSession");
+    expect(call.where).toEqual({
+      OR: [{ sourceShop: "merchant.myshopify.com" }, { destShop: "merchant.myshopify.com" }],
+    });
+  });
+
   it("deletes child rows before their parent job", () => {
     // Once MigrationJob rows are gone, ProductMapping/TransferLogEntry are
     // unreachable, so they must come first.

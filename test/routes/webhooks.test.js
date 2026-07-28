@@ -161,7 +161,11 @@ describe("GDPR — shop/redact", () => {
     expect(db.migrationJob.deleteMany).toHaveBeenCalledWith({ where: { shop: SHOP } });
     expect(db.scheduledSync.deleteMany).toHaveBeenCalledWith({ where: { shop: SHOP } });
     expect(db.storeBackup.deleteMany).toHaveBeenCalledWith({ where: { shop: SHOP } });
-    expect(db.transferSession.deleteMany).toHaveBeenCalledWith({ where: { shop: SHOP } });
+    // TransferSession has no `shop` column — it records a pairing between two
+    // stores, so a redact of either side must remove it.
+    expect(db.transferSession.deleteMany).toHaveBeenCalledWith({
+      where: { OR: [{ sourceShop: SHOP }, { destShop: SHOP }] },
+    });
     expect(db.productMapping.deleteMany).toHaveBeenCalled();
     expect(db.transferLogEntry.deleteMany).toHaveBeenCalled();
   });

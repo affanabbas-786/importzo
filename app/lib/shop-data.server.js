@@ -37,6 +37,16 @@ export const EXEMPT_MODELS = Object.freeze({});
 // MigrationJob by jobId. They're deleted via their parent's ids.
 const JOB_SCOPED_MODELS = Object.freeze(["transferLogEntry", "productMapping"]);
 
+// Models that identify the shop under different column name(s). Getting this
+// wrong is silent: Prisma rejects `where: { shop }` on a model without that
+// column, the per-model catch swallows it, and the rows survive erasure —
+// which is exactly what happened to TransferSession until a live smoke test
+// caught it. TransferSession is a pairing record between two stores, so a
+// redact of EITHER side must remove it: it holds both stores' tokens.
+const CUSTOM_SHOP_FILTERS = Object.freeze({
+  transferSession: (shop) => ({ OR: [{ sourceShop: shop }, { destShop: shop }] }),
+});
+
 /**
  * Deletes every record this app holds for `shop`.
  *
@@ -65,7 +75,7 @@ export async function deleteShopData(prisma, shop) {
     try {
       const where = JOB_SCOPED_MODELS.includes(model)
         ? { jobId: { in: jobIds } }
-        : { shop };
+        : (CUSTOM_SHOP_FILTERS[model]?.(shop) ?? { shop });
 
       // Nothing to delete if the parent lookup found no jobs.
       if (JOB_SCOPED_MODELS.includes(model) && jobIds.length === 0) {
