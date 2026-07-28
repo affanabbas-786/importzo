@@ -1,10 +1,10 @@
 # Importzo Hardening — Progress Log
 
 Tracks execution of `Importzo-PRD-Growth-Plan.md`. Currently: **Phases 1 and 2 complete and deployed.
-Phase 3 (Security Hardening) — 5 of 6 items committed; item 1 implemented but UNCOMMITTED, awaiting
-your explicit review.** Phase 4 has not been started.
+Phase 3 (Security Hardening) — all 7 PRD items committed EXCEPT item 3.1 (token encryption), which is
+implemented but UNCOMMITTED awaiting your explicit review.** Phase 4 has not been started.
 
-**Test suite: 455 passing across 25 files** (391 at end of Phase 2's fixes, 133 at end of Phase 1).
+**Test suite: 491 passing across 26 files** (455 → 491 with audit logging; 133 at end of Phase 1).
 
 ---
 
@@ -18,6 +18,8 @@ Committed:
 | `1aabaee` | 3.4 Rate limiting / abuse protection |
 | `24dc424` | 3.6 Dependency vulnerability scan |
 | `dd4cbe4` | 3.2 Scope minimization |
+| `3105863` | Fix: TransferSession survived GDPR erasure (found by live smoke test) |
+| `9a29efe` | 3.7 Audit logging |
 
 **NOT committed — item 3.1 (token encryption at rest).** Implemented and fully tested, held per your
 instruction to stop before committing changes to token/session storage. Details in its own section
@@ -25,16 +27,24 @@ below.
 
 ## 🔴 Decisions needed
 
-**1. react-router 7.13.2 has an unauthenticated RCE advisory. Not fixed.**
-The vendored turbo-stream TYPE_ERROR deserialization issue (fixed in 7.14.2), plus open redirect,
-CSRF on PUT/PATCH/DELETE document requests, XSS, and DoS. Version 7.18.1 fixes all but one, sits
-inside the declared `^7.12.0` range, and satisfies the Shopify adapter's `^7.6.2` peer requirement —
-so it is not a breaking change on paper. I attempted it and **backed it out**: npm's resolver
-deadlocks on a stale `@react-router/fs-routes` peer pin and only a full `node_modules` +
-lockfile regeneration gets past it. Rewriting the entire dependency tree of a live app days after an
-outage, with no staging environment to verify against, was not a call I was willing to make
-unilaterally. Recommended path: on a branch, `rm -rf node_modules package-lock.json`, pin the
-react-router family to `^7.18.1`, `npm install`, then build + test + **deploy to staging first**.
+**1. react-router 7.13.2 RCE — upgrade VERIFIED on a branch, ready for staging. Not merged.**
+
+Branch `fix-rce-upgrade` (local only, commit `12d7d79`, not pushed). Regenerating `node_modules` +
+lockfile cleared the resolver deadlock immediately — it was purely stale lockfile state, not a real
+version conflict. react-router 7.18.1 installs cleanly.
+
+Clears **9 of 10** advisories including the unauthenticated RCE (vendored turbo-stream `TYPE_ERROR`
+deserialization), open redirects, CSRF on document requests, XSS and DoS. Only "RSC Mode CSRF Bypass"
+remains — needs 8.3.0 (major) and applies to RSC mode this app doesn't use.
+
+Verified on the branch: 427 tests pass (455 minus the 28 stashed encryption tests), `npm run build`
+exits 0, no server-module leakage into the client bundle, `npm run dev` boots and tunnels to the dev
+store, the built server boots and SSRs, auth rejects unauthenticated requests, and webhook HMAC both
+**rejects unsigned** requests and **accepts correctly-signed** ones.
+
+Two caveats: v8 future-flag deprecation warnings now appear (informational only), and this was
+verified against a dev store, not production traffic. **Recommended: deploy the branch to staging,
+then merge.** It is the highest-severity item still open.
 
 **2. Token encryption is now fail-closed — verify your production key before deploying.**
 The uncommitted item 3.1 makes `encrypt()` throw rather than silently write plaintext. If
@@ -42,12 +52,26 @@ The uncommitted item 3.1 makes `encrypt()` throw rather than silently write plai
 on token writes immediately after deploy. Check it before this ships. (The 32-char minimum already
 caught a too-short key in our own test fixture.)
 
-**3. Scope change triggers merchant re-authorization.**
+**3. 🚨 The committed migration chain cannot build a working database. NOT fixed.**
+Found while smoke-testing: `MigrationJob`, `ProductMapping` and `TransferSession` are created by **no
+committed migration**. They exist only via `prisma/migrations/20260728094337_local_dev_setup/`, which
+has been **untracked in git** the whole time (it was already untracked before this work began).
+
+`prisma migrate deploy` against a fresh database fails hard at `20260729020000_add_store_backup` with
+`no such table: MigrationJob`, and Prisma then blocks every later migration. Your `npm run setup` and
+`deploy.sh` both run `prisma migrate deploy`, so **any rebuild, new environment, or fresh deploy is
+broken.** Existing production is presumably fine because its tables predate this.
+
+I did not fix it because there are two valid approaches with real trade-offs — commit the missing
+migration as-is, or squash a new baseline — and picking one affects your migration history
+permanently. Worth resolving before the next deploy.
+
+**4. Scope change triggers merchant re-authorization.**
 `dd4cbe4` removes `read_orders`. Shopify will prompt existing merchants to approve the updated
 (shorter) permission set on next load. Normal for a scope change, but merchant-visible — deploy
 deliberately.
 
-**4. `read_customers` vs the published privacy policy — your call.**
+**5. `read_customers` vs the published privacy policy — your call.**
 The PRD asked to audit scopes "against the privacy policy already published". `app/routes/privacy.jsx`
 says the app does "not collect personal information about your customers (names, emails, addresses,
 payment data)". That is literally true — the customer CSV export streams to the merchant's browser and
@@ -180,16 +204,39 @@ rather than destroying any chance of recovery).
 Suggested order: confirm `ENCRYPTION_KEY` is set and ≥32 chars → back up the DB → deploy → run
 `node scripts/reencrypt-tokens.mjs --dry-run` → review → run for real.
 
-## Not done — the PRD's 7th Phase 3 item
+## 3.7 — Audit logging (`9a29efe`)
 
-Your instruction listed six items; `Importzo-PRD-Growth-Plan.md` line 50 has a seventh:
+The PRD's seventh Phase 3 item (line 50), originally omitted from the task list, added on request.
 
-> Audit logging — who triggered what transfer, when, from which IP
+`actorType`/`actorId`/`actorEmail`/`actorIp` on `TransferLogEntry` (`createdAt` is the "when"), and
+the same four on `MigrationJob` for who triggered each transfer.
 
-I did **not** implement it, since it wasn't in your list and I didn't want to silently expand scope.
-Worth noting it's now cheap: `TransferLogEntry` (Phase 2.4) already carries the per-record history, so
-this is mostly adding actor/IP columns and stamping them at the route layer. Say the word and it's a
-short piece of work.
+**The design point:** `runMigrationWorker` is fire-and-forget and outlives the request that started
+it. By the time it writes log entries there is no request, no session and no IP — capturing the actor
+at write time would attribute every background-written row to nobody. So attribution is captured at
+**trigger** time onto `MigrationJob`, and the worker reads it back and stamps it onto every entry it
+writes. Tested end-to-end: a job triggered by a staff user yields log rows carrying that user's
+identity and IP, written minutes later by a detached worker.
+
+Actor types: `user` (human in the admin), `schedule` (cron-driven, no IP by definition), `system`,
+`unknown` (the default, including pre-migration rows).
+
+Two deliberate honesty choices:
+- This app uses **offline** Shopify sessions, which are shop-keyed, so staff `userId`/`email` are
+  frequently null. Those actions are still recorded as `user`, not downgraded to `system` — a human
+  did trigger them, and misattributing that is worse than a partial record.
+- `extractClientIp` returns `null` when no usable proxy header exists, rather than inventing one.
+
+**On `X-Forwarded-For`:** it is client-controllable and only meaningful because a trusted reverse
+proxy (PM2 behind TLS termination) rewrites it. The left-most entry is taken as closest to the origin
+client, but a determined client can forge it. It is recorded as best-effort evidence and is **never**
+used as an authorization input — nothing in the app makes a security decision from `actorIp`.
+
+GDPR: `actorEmail` is personal data. Both tables carrying it are already erased by `shop/redact`, and
+a new test parses `schema.prisma` and fails if any model gains actor PII without being wired into
+erasure. Verified it fires by temporarily adding a probe model.
+
+`api/migration-status/:jobId` now returns a `triggeredBy` block.
 
 ---
 
@@ -682,18 +729,19 @@ old code.
 
 # Next step
 
-**Phase 3 is done except item 3.1, which is implemented but deliberately uncommitted awaiting your
-explicit review** (it changes token storage). Stopping here per instructions — Phase 4 has not been
-started.
+**Phase 3 is done — all 7 PRD items — except item 3.1, which is implemented but deliberately
+uncommitted awaiting your explicit review** (it changes token storage). Phase 4 has not been started.
 
 Blocking on you, in priority order:
 
-1. **react-router RCE** — decision #1 at the top of the Phase 3 section. Highest-severity open issue.
-2. **Review + commit item 3.1** (token encryption). Confirm production `ENCRYPTION_KEY` is set and
+1. **react-router RCE** — upgrade is verified and waiting on branch `fix-rce-upgrade`. Deploy to
+   staging, then merge. Highest-severity open issue.
+2. **Migration chain can't build a fresh database** (decision #3) — breaks any rebuild or new
+   environment. Needs a call on how to repair the history.
+3. **Review + commit item 3.1** (token encryption). Confirm production `ENCRYPTION_KEY` is set and
    ≥32 chars first, or the fail-closed behavior will break token writes on deploy.
-3. **Deploy timing for the scope change** (`dd4cbe4`) — it triggers merchant re-authorization.
-4. `read_customers` vs privacy-policy wording — decision #4.
-5. Whether you want the PRD's 7th Phase 3 item (audit logging), which your list omitted.
+4. **Deploy timing for the scope change** (`dd4cbe4`) — it triggers merchant re-authorization.
+5. `read_customers` vs privacy-policy wording — decision #5.
 
 Still open from Phase 2 (unchanged): `backupPolicy` default, `SCHEDULER_SECRET` + cron, and the
 5000-product backup ceiling.
