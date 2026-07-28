@@ -107,9 +107,16 @@ model ProductMapping {
   destProductId   String?
   status          String  // DONE | FAILED
   error           String?
+  // Phase 2 (rollback safety): what this transfer actually DID to the
+  // destination product. Rollback may only delete rows it can prove this app
+  // created — a "skipped" row points at the merchant's own pre-existing
+  // product. Defaults to "unknown" so rows written before this column existed
+  // are never assumed safe to delete.
+  action          String  @default("unknown") // created | updated | skipped | unknown
 
   @@unique([jobId, sourceProductId])
   @@index([jobId])
+  @@index([jobId, action])
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

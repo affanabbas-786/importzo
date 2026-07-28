@@ -493,10 +493,15 @@ export async function runMigrationWorker(jobId) {
           try {
             const { id: destId, gid: destGid, skipped, action, reason, metafieldErrors } = await transferOneProduct(src, ctx);
             doneSet.add(srcId);
+            // `action` is persisted for rollback safety: it's the only record
+            // of whether THIS app created the destination product, or merely
+            // skipped/overwrote one the merchant already had. Rollback refuses
+            // to delete anything that isn't provably "created".
+            const mappingAction = action || "created";
             await prisma.productMapping.upsert({
               where: { jobId_sourceProductId: { jobId, sourceProductId: srcId } },
-              create: { jobId, sourceProductId: srcId, destProductId: destId, status: "DONE" },
-              update: { destProductId: destId, status: "DONE", error: null },
+              create: { jobId, sourceProductId: srcId, destProductId: destId, status: "DONE", action: mappingAction },
+              update: { destProductId: destId, status: "DONE", error: null, action: mappingAction },
             });
             processedDelta++;
             if (skipped) console.log(`[migration-worker] job=${jobId} skipped (conflict): ${src.title}`);
