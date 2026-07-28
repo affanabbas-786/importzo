@@ -246,6 +246,31 @@ lower-priority modernization note, not a live bug — left as-is.
 
 ---
 
+## Post-Phase-1 investigation: reported metafields regression — not reproduced
+
+**Commit:** `b364ed2` (on `main`)
+
+Reported: after the productCreate/productVariantsBulkCreate split above, metafields stopped copying to
+newly created products (repro: a product with a "Material: Cotton" metafield created correctly, but
+with no metafield on the destination).
+
+Checked whether the refactor dropped the `copyMetafields`/`copyGraphqlMetafields` call. It did not —
+both `migration-worker.server.js` and `app.transfer.jsx` still call it after product+variant creation,
+threaded with the correct destination GID, unchanged from before the refactor. Independently
+re-verified `MetafieldsSetInput`'s schema against shopify.dev too (ownerId/namespace/key/value/type —
+unchanged). Added regression tests reproducing the exact scenario (multi-variant product + a real
+metafield value) for both files; both pass, meaning the call sequence and GID threading are correct in
+this test harness.
+
+Since both functions silently swallow internal failures into a `console.warn` rather than surfacing
+them in the transfer's visible error log, if this is still reproducing the fastest path to the real
+cause is the server console log line itself (`[migration-worker] copyMetafields failed: ...` or
+app.transfer.jsx's equivalent warning) — that message carries whatever Shopify API error is being
+swallowed, which isn't something static analysis or a mocked test can surface if it's data- or
+environment-specific. Reported this back rather than inventing an unverifiable fix.
+
+---
+
 ## Next step
 
 Waiting for review/confirmation before starting Phase 2 (Trust & Safety features: pre-transfer
