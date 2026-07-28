@@ -52,7 +52,11 @@ vi.mock("../../app/lib/safe-db", () => ({
   getSavedSourceStore: vi.fn(async () => savedSourceStore.value),
 }));
 
-import { loader, action, startJobFromSchedule } from "../../app/routes/api.scheduled-sync.jsx";
+import { loader, action } from "../../app/routes/api.scheduled-sync.jsx";
+// Lives in lib, not the route: a route module may only export
+// loader/action/headers/middleware, or React Router bundles the rest — and
+// everything it imports — into the client build.
+import { startJobFromSchedule } from "../../app/lib/scheduled-sync.server.js";
 
 function seedSchedule(overrides = {}) {
   const row = {

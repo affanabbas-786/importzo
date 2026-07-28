@@ -9,9 +9,9 @@
 // the whole point of a recurring sync is that credentials outlive the
 // session, so they must not leak back out through the management surface.
 
-import { authenticate, apiVersion } from "../shopify.server";
+import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
-import { encrypt, decrypt } from "../utils/encryption.server";
+import { encrypt } from "../utils/encryption.server";
 import { getSavedSourceStore } from "../lib/safe-db";
 import { computeNextRun, isValidFrequency, FREQUENCY } from "../lib/scheduler.server";
 
@@ -170,21 +170,8 @@ export const action = async ({ request }) => {
   return Response.json({ ok: false, error: "Unknown intent" }, { status: 400 });
 };
 
-// Exported for the tick route: turns a schedule into a running MigrationJob.
-export async function startJobFromSchedule(schedule) {
-  const job = await prisma.migrationJob.create({
-    data: {
-      shop: schedule.shop,
-      sourceShop: schedule.sourceShop,
-      // Stored encrypted on the schedule; MigrationJob stores its own
-      // encrypted copy, so decrypt and re-encrypt rather than assuming the
-      // two models will always share an encryption scheme.
-      sourceToken: encrypt(decrypt(schedule.sourceToken)),
-      destToken: encrypt(decrypt(schedule.destToken)),
-      apiVersion: apiVersion || "2025-10",
-      conflictMode: schedule.conflictMode || "skip",
-      status: "PENDING",
-    },
-  });
-  return job.id;
-}
+// NOTE: this module must export ONLY loader/action (plus headers/middleware).
+// React Router treats any other export as client-safe and bundles it — and
+// everything it imports — into the browser build. startJobFromSchedule used
+// to live here, which dragged shopify.server and Prisma client-side and broke
+// the production build. It now lives in ../lib/scheduled-sync.server.js.

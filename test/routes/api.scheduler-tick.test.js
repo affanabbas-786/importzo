@@ -19,7 +19,7 @@ vi.mock("../../app/db.server", () => ({
 }));
 
 const startedJobs = [];
-vi.mock("../../app/routes/api.scheduled-sync", () => ({
+vi.mock("../../app/lib/scheduled-sync.server", () => ({
   startJobFromSchedule: vi.fn(async (schedule) => {
     const id = `job-${startedJobs.length + 1}`;
     startedJobs.push({ id, scheduleId: schedule.id });

@@ -15,7 +15,9 @@ import crypto from "crypto";
 import prisma from "../db.server";
 import { runScheduledSyncs } from "../lib/scheduler.server";
 import { runMigrationWorker } from "../lib/migration-worker.server";
-import { startJobFromSchedule } from "./api.scheduled-sync";
+// Imported from lib, not from the sibling route module: importing across
+// route files would pull that route's whole module graph in with it.
+import { startJobFromSchedule } from "../lib/scheduled-sync.server";
 
 function timingSafeEqual(a, b) {
   const bufA = Buffer.from(String(a || ""), "utf8"); // eslint-disable-line no-undef
