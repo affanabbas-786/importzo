@@ -559,7 +559,7 @@ export const action = async ({ request }) => {
   }
 
   async function copyStoreFiles(sourceShop, sourceToken, dryRun = false) {
-    const out = { type: "files", title: "Shopify Files", status: "success", total: 0, copied: 0, warnings: [] };
+    const out = { type: "files", title: "Shopify Files", status: "success", total: 0, copied: 0, skipped: 0, warnings: [] };
     try {
       const files = await fetchSourceFilesForCopy(sourceShop, sourceToken);
       const unique = new Map();
@@ -567,9 +567,23 @@ export const action = async ({ request }) => {
         const key = f.originalSource || f.filename;
         if (!unique.has(key)) unique.set(key, f);
       }
-      const items = [...unique.values()];
+      let items = [...unique.values()];
       out.total = items.length;
       if (dryRun) { out.status = "dry-run"; return out; }
+
+      // Idempotency: re-running a content transfer must not duplicate files
+      // that are already on the destination. fetchSourceFilesForCopy is
+      // shop-agnostic, so it doubles as a "list existing target files" call.
+      try {
+        const targetFiles = await fetchSourceFilesForCopy(targetShop, targetToken);
+        const existingFilenames = new Set(targetFiles.map((f) => f.filename).filter(Boolean));
+        const beforeDedupe = items.length;
+        items = items.filter((f) => !existingFilenames.has(f.filename));
+        out.skipped = beforeDedupe - items.length;
+      } catch (err) {
+        console.warn(`[importzo] copyStoreFiles: dedupe check failed, proceeding without it:`, err.message);
+      }
+
       const mutation = `#graphql
         mutation fileCreate($files: [FileCreateInput!]!) {
           fileCreate(files: $files) {
@@ -591,7 +605,7 @@ export const action = async ({ request }) => {
         if (errors.length) out.warnings.push(...errors.map((e) => `${e.message}${e.field ? ` (${e.field.join(".")})` : ""}`));
         if (i + 100 < items.length) await new Promise((r) => setTimeout(r, 1000));
       }
-      if (out.copied < out.total) out.status = "warning";
+      if (out.copied < items.length) out.status = "warning";
     } catch (err) {
       out.status = "warning";
       out.warnings.push(`Files copy skipped/failed: ${err.message}`);
@@ -1688,6 +1702,35 @@ export const action = async ({ request }) => {
           throw new Error("Source store session expired or the app was uninstalled from the source store. Please reconnect the source store using a new session code.");
         }
         throw err;
+      }
+
+      // Idempotency: theme creation has no natural "update" path via the ZIP-src
+      // flow, so re-running this transfer (e.g. after a timeout, or a merchant
+      // double-clicking) would otherwise create another full duplicate theme
+      // every time, eventually hitting the destination store's theme-count limit.
+      // Skip if a theme with the same generated name already exists.
+      const expectedThemeName = `${themeName} (Transferred)`;
+      try {
+        const existingThemesRes = await shopifyFetch(`https://${targetShop}/admin/api/${THEME_API_VERSION}/themes.json`, {
+          headers: { "X-Shopify-Access-Token": targetToken },
+        });
+        if (existingThemesRes.ok) {
+          const existingThemes = (await existingThemesRes.json()).themes || [];
+          const match = existingThemes.find((t) => t.name === expectedThemeName);
+          if (match) {
+            return {
+              intent: "transfer-theme", rid, ok: true, skipped: true,
+              themeName, themeId: match.id, newThemeId: match.id, newThemeName: match.name,
+              previewUrl: `https://${targetShop}/?preview_theme_id=${match.id}`,
+              assetCount: assetsList.length,
+              results: [],
+              message: `A theme named "${expectedThemeName}" already exists on the destination store — skipped to avoid creating a duplicate.`,
+              destinationAdminUrl: `https://${targetShop.replace(/\.myshopify\.com$/i, "")}.myshopify.com/admin/themes`,
+            };
+          }
+        }
+      } catch (err) {
+        console.warn(`[importzo] transfer-theme: existing-theme check failed, proceeding with creation:`, err.message);
       }
 
       // IMPORTANT: Do not create an empty theme and then PUT layout/theme.liquid.

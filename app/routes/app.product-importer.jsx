@@ -96,8 +96,46 @@ export const action = async ({ request }) => {
   // instead of one fully sequential await-per-product loop — meaningfully
   // shortens wall-clock time for large CSV imports without unbounded parallelism.
   const CONCURRENCY = 5;
+
+  // Idempotency: re-importing the same CSV (e.g. after a retry, or a
+  // merchant re-uploading by mistake) must not create duplicate products.
+  // A product's handle is stable and unique per store, so it's the
+  // dedupe key — mirrors the same handle-lookup pattern used by the
+  // clone/migration flow (app.transfer.jsx, migration-worker.server.js).
+  async function findExistingProductByHandle(handle) {
+    if (!handle) return null;
+    try {
+      const res = await shopifyFetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": accessToken },
+        body: JSON.stringify({ query: `{ products(first: 1, query: "handle:${handle}") { edges { node { id } } } }` }),
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      const node = data?.data?.products?.edges?.[0]?.node;
+      return node ? { id: node.id.split("/").pop() } : null;
+    } catch {
+      return null;
+    }
+  }
+
   async function processProduct(product, i) {
     try {
+      if (product.handle) {
+        const existing = await findExistingProductByHandle(product.handle);
+        if (existing) {
+          return {
+            row: i + 1,
+            title: product.title,
+            status: "success",
+            productId: existing.id,
+            variantCount: 0,
+            videoNote: " (Skipped — a product with this handle already exists)",
+            skipped: true,
+          };
+        }
+      }
+
       const productData = {
         title: product.title || "Untitled Product",
       };

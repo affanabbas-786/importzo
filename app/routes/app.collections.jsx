@@ -76,10 +76,45 @@ export const action = async ({ request }) => {
   // Bounded concurrency (mirrors migration-worker.server.js's CREATE_CONCURRENCY)
   // instead of one fully sequential await-per-collection loop.
   const CONCURRENCY = 5;
+
+  // Idempotency: re-importing the same CSV must not create duplicate
+  // collections. The importer doesn't set/map a handle (Shopify derives
+  // one from the title), so title is the practical dedupe key here.
+  async function findExistingCollectionByTitle(title) {
+    if (!title) return null;
+    try {
+      const res = await shopifyFetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": accessToken },
+        body: JSON.stringify({ query: `{ collections(first: 1, query: "title:${title.replace(/"/g, '\\"')}") { edges { node { id } } } }` }),
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      const node = data?.data?.collections?.edges?.[0]?.node;
+      return node ? { id: node.id.split("/").pop() } : null;
+    } catch {
+      return null;
+    }
+  }
+
   async function processCollection(collection, i) {
     const isSmartType = (collection.collection_type || "").toLowerCase() === "smart";
 
     try {
+      if (collection.title) {
+        const existing = await findExistingCollectionByTitle(collection.title);
+        if (existing) {
+          return {
+            row: i + 1,
+            title: collection.title,
+            status: "success",
+            collectionId: existing.id,
+            type: isSmartType ? "smart" : "custom",
+            warning: "Skipped — a collection with this title already exists",
+          };
+        }
+      }
+
       const isPublished = collection.published !== undefined && collection.published !== ""
         ? ["true", "yes", "1"].includes(String(collection.published).toLowerCase())
         : true;

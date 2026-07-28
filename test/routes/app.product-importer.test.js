@@ -121,4 +121,33 @@ describe("app.product-importer action", () => {
     expect(result.status).toBe("failed");
     expect(result.errorCount).toBe(1);
   });
+
+  it("idempotency: skips creating a product when one with the same handle already exists", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ data: { products: { edges: [{ node: { id: "gid://shopify/Product/777" } }] } } }));
+    const req = mockActionRequest({
+      products: JSON.stringify([{ title: "Duplicate Tee", handle: "duplicate-tee" }]),
+      fileName: "p.csv",
+    });
+    const result = await action({ request: req });
+
+    expect(result.successCount).toBe(1);
+    expect(result.results[0]).toMatchObject({ status: "success", productId: "777", skipped: true });
+    // location fetch + the handle-existence check — no productCreate call
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("creates the product when the handle doesn't already exist", async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ data: { products: { edges: [] } } })) // no existing product
+      .mockResolvedValueOnce(productCreateResponse("888"));
+    const req = mockActionRequest({
+      products: JSON.stringify([{ title: "New Tee", handle: "new-tee" }]),
+      fileName: "p.csv",
+    });
+    const result = await action({ request: req });
+
+    expect(result.successCount).toBe(1);
+    expect(result.results[0]).toMatchObject({ status: "success", productId: "888" });
+    expect(result.results[0].skipped).toBeUndefined();
+  });
 });

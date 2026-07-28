@@ -18,6 +18,15 @@ function collectionCreateResponse(id, errors = []) {
   return jsonResponse({ data: { collectionCreate: { collection: errors.length ? null : { id: `gid://shopify/Collection/${id}` }, userErrors: errors } } });
 }
 
+// Every collection with a title triggers an idempotency pre-check
+// (`collections(query: "title:...")`) before creation. This is the
+// "no existing collection found" response for that check.
+const noExistingCollectionResponse = jsonResponse({ data: { collections: { edges: [] } } });
+
+function existingCollectionResponse(id) {
+  return jsonResponse({ data: { collections: { edges: [{ node: { id: `gid://shopify/Collection/${id}` } }] } } });
+}
+
 describe("app.collections action", () => {
   let fetchMock;
 
@@ -32,7 +41,9 @@ describe("app.collections action", () => {
   });
 
   it("creates a custom collection", async () => {
-    fetchMock.mockResolvedValueOnce(collectionCreateResponse("1"));
+    fetchMock
+      .mockResolvedValueOnce(noExistingCollectionResponse)
+      .mockResolvedValueOnce(collectionCreateResponse("1"));
     const req = mockActionRequest({ collections: JSON.stringify([{ title: "Summer" }]), fileName: "c.csv" });
     const result = await action({ request: req });
 
@@ -41,7 +52,9 @@ describe("app.collections action", () => {
   });
 
   it("creates a smart collection with parsed rules", async () => {
-    fetchMock.mockResolvedValueOnce(collectionCreateResponse("2"));
+    fetchMock
+      .mockResolvedValueOnce(noExistingCollectionResponse)
+      .mockResolvedValueOnce(collectionCreateResponse("2"));
     const req = mockActionRequest({
       collections: JSON.stringify([{ title: "Sale Items", collection_type: "smart", rules_column: "tag:equals:sale" }]),
       fileName: "c.csv",
@@ -50,12 +63,13 @@ describe("app.collections action", () => {
 
     expect(result.successCount).toBe(1);
     expect(result.results[0].type).toBe("smart");
-    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    const body = JSON.parse(fetchMock.mock.calls[1][1].body);
     expect(body.variables.input.ruleSet.rules[0]).toMatchObject({ column: "TAG", relation: "EQUALS", condition: "sale" });
   });
 
   it("retries collection creation without the image if the image URL fails, marking it a warning-success", async () => {
     fetchMock
+      .mockResolvedValueOnce(noExistingCollectionResponse)
       .mockResolvedValueOnce(jsonResponse({ data: { collectionCreate: { collection: null, userErrors: [{ message: "Image could not be processed" }] } } }))
       .mockResolvedValueOnce(collectionCreateResponse("3"));
     const req = mockActionRequest({
@@ -80,8 +94,16 @@ describe("app.collections action", () => {
   });
 
   it("preserves row order across concurrent batches", async () => {
+    // Each collection now makes two calls (existence-check + create), and
+    // concurrent items interleave those calls in whatever order their
+    // microtasks settle in — so the mock must respond based on the request
+    // itself rather than a fixed FIFO queue of canned responses.
+    fetchMock.mockImplementation(async (_url, opts) => {
+      const body = JSON.parse(opts.body);
+      if (body.query?.includes("collections(first: 1")) return noExistingCollectionResponse;
+      return collectionCreateResponse("created");
+    });
     const collections = Array.from({ length: 9 }, (_, i) => ({ title: `Collection ${i + 1}` }));
-    for (let i = 0; i < collections.length; i++) fetchMock.mockResolvedValueOnce(collectionCreateResponse(String(i)));
     const req = mockActionRequest({ collections: JSON.stringify(collections), fileName: "c.csv" });
     const result = await action({ request: req });
 
@@ -91,10 +113,22 @@ describe("app.collections action", () => {
 
   it("retries on a 429 before creating the collection", async () => {
     fetchMock
+      .mockResolvedValueOnce(noExistingCollectionResponse)
       .mockResolvedValueOnce(jsonResponse({}, { status: 429, headers: { "Retry-After": "0" } }))
       .mockResolvedValueOnce(collectionCreateResponse("5"));
     const req = mockActionRequest({ collections: JSON.stringify([{ title: "Retried" }]), fileName: "c.csv" });
     const result = await action({ request: req });
     expect(result.successCount).toBe(1);
+  });
+
+  it("idempotency: skips creating a collection when one with the same title already exists", async () => {
+    fetchMock.mockResolvedValueOnce(existingCollectionResponse("999"));
+    const req = mockActionRequest({ collections: JSON.stringify([{ title: "Already There" }]), fileName: "c.csv" });
+    const result = await action({ request: req });
+
+    expect(result.successCount).toBe(1);
+    expect(result.results[0]).toMatchObject({ status: "success", collectionId: "999" });
+    expect(result.results[0].warning).toMatch(/already exists/i);
+    expect(fetchMock).toHaveBeenCalledTimes(1); // only the existence check — no collectionCreate call
   });
 });
