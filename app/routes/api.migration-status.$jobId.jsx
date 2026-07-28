@@ -5,6 +5,7 @@
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { isWorkerActive, runMigrationWorker } from "../lib/migration-worker.server";
+import { fetchJobLog, fetchJobLogSummary } from "../lib/transfer-log.server";
 
 export const loader = async ({ request, params }) => {
   await authenticate.admin(request);
@@ -40,6 +41,18 @@ export const loader = async ({ request, params }) => {
     ? Math.round((job.processedProducts / job.totalProducts) * 100)
     : 0;
 
+  // Phase 2: granular per-record log. `logSummary` is aggregated in the DB so
+  // it stays cheap to poll even for a 50k-record job; `log` returns a page of
+  // entries, filterable via ?action=failed&entityType=product&limit=&offset=.
+  const url = new URL(request.url);
+  const logSummary = await fetchJobLogSummary(prisma, job.id).catch(() => null);
+  const log = await fetchJobLog(prisma, job.id, {
+    action: url.searchParams.get("action") || undefined,
+    entityType: url.searchParams.get("entityType") || undefined,
+    limit: url.searchParams.get("limit") || 100,
+    offset: url.searchParams.get("offset") || 0,
+  }).catch(() => []);
+
   return Response.json({
     ok: true,
     jobId: job.id,
@@ -49,6 +62,8 @@ export const loader = async ({ request, params }) => {
     failedProducts: job.failedProducts,
     pct,
     errorLog: errorLog.slice(-50),
+    logSummary,
+    log,
     updatedAt: job.updatedAt,
   });
 };

@@ -103,3 +103,29 @@ model ProductMapping {
   @@unique([jobId, sourceProductId])
   @@index([jobId])
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 2 — Trust & Safety
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Granular per-record transfer log covering EVERY entity type, not just
+// products (ProductMapping only tracks products, and only as DONE|FAILED).
+// MigrationJob.errorLog stays as the small capped summary surfaced in the
+// polling API; this table is the full, queryable, per-record history.
+model TransferLogEntry {
+  id         String   @id @default(cuid())
+  jobId      String
+  shop       String
+  entityType String // product | collection | page | blog | article | menu | file | theme | metafield
+  action     String // created | updated | skipped | failed
+  sourceId   String?
+  destId     String?
+  title      String?
+  reason     String? // why it was skipped, or the failure message
+  detail     String? // JSON: payload snapshot / warnings, truncated
+  createdAt  DateTime @default(now())
+
+  @@index([jobId])
+  @@index([jobId, action])
+  @@index([jobId, entityType])
+}

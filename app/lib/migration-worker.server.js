@@ -7,6 +7,7 @@ import prisma from "../db.server.js";
 import { encrypt, decrypt } from "../utils/encryption.server.js";
 import { shopifyGraphql } from "./shopify-api.server.js";
 import { createProductWithVariants } from "./product-variants.server.js";
+import { createLogBuffer, ACTION, ENTITY } from "./transfer-log.server.js";
 
 const BATCH_SIZE = 250;     // products fetched per GQL page
 const CREATE_CONCURRENCY = 5; // parallel productCreate calls
@@ -199,7 +200,12 @@ async function findProductByHandle(targetShop, targetToken, handle, version) {
 }
 
 // Creates (or skips/overwrites based on conflictMode) a single product on the destination.
-// Returns { id, gid, metafieldErrors } of the destination product.
+// Returns { id, gid, action, metafieldErrors } of the destination product.
+//
+// `action` is "created" | "updated" | "skipped" and is load-bearing beyond
+// logging: rollback uses it to know which destination products this app
+// actually created, so an "skipped" product (one that already existed on the
+// destination and is the merchant's own data) is never deleted by an undo.
 async function transferOneProduct(src, ctx) {
   const { targetShop, targetToken, sourceShop, sourceToken, version, conflictMode } = ctx;
   const srcId = src.id?.split("/").pop();
@@ -210,7 +216,7 @@ async function transferOneProduct(src, ctx) {
   if (src.handle && conflictMode !== "create") {
     const existing = await findProductByHandle(targetShop, targetToken, src.handle, version);
     if (existing) {
-      if (conflictMode === "skip") return { id: existing.id.split("/").pop(), gid: existing.id, skipped: true };
+      if (conflictMode === "skip") return { id: existing.id.split("/").pop(), gid: existing.id, skipped: true, action: "skipped", reason: "A product with this handle already exists on the destination" };
       if (conflictMode === "overwrite") {
         const tags = Array.isArray(src.tags) ? src.tags : (typeof src.tags === "string" ? src.tags.split(",").map((t) => t.trim()).filter(Boolean) : []);
         const data = await shopifyGraphql(targetShop, targetToken, `#graphql
@@ -230,7 +236,7 @@ async function transferOneProduct(src, ctx) {
         if (errs.length) throw new Error(errs.map((e) => e.message).join("; "));
         const updated = data?.productUpdate?.product;
         if (!updated) throw new Error("productUpdate returned no product");
-        return { id: updated.id.split("/").pop(), gid: updated.id };
+        return { id: updated.id.split("/").pop(), gid: updated.id, action: "updated" };
       }
     }
   }
@@ -306,7 +312,7 @@ async function transferOneProduct(src, ctx) {
     metafieldErrors = mfResult.errors;
   }
 
-  return { id, gid, metafieldErrors };
+  return { id, gid, action: "created", metafieldErrors };
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -365,6 +371,11 @@ export async function runMigrationWorker(jobId) {
   if (activeWorkers.has(jobId)) return; // already running
   activeWorkers.set(jobId, { startedAt: Date.now(), running: true });
 
+  // Declared out here so the finally block can flush buffered log entries on
+  // every exit path — normal completion, page-fetch failure, or an uncaught
+  // throw — instead of losing whatever hadn't reached the flush threshold.
+  let logBuffer = null;
+
   try {
     const job = await prisma.migrationJob.findUnique({ where: { id: jobId } });
     if (!job) { activeWorkers.delete(jobId); return; }
@@ -394,6 +405,10 @@ export async function runMigrationWorker(jobId) {
     let processedDelta = 0;
     let failedDelta = 0;
     const errorLog = [];
+
+    // Granular per-record log (Phase 2). Buffered so a 50k-product job doesn't
+    // issue 50k INSERTs; best-effort so a logging failure can't abort the job.
+    logBuffer = createLogBuffer({ prisma, jobId, shop: job.shop });
 
     // Fetch already-done product IDs from ProductMapping to skip on resume
     const doneSet = new Set();
@@ -433,7 +448,7 @@ export async function runMigrationWorker(jobId) {
           if (doneSet.has(srcId)) return;
 
           try {
-            const { id: destId, gid: destGid, skipped, metafieldErrors } = await transferOneProduct(src, ctx);
+            const { id: destId, gid: destGid, skipped, action, reason, metafieldErrors } = await transferOneProduct(src, ctx);
             doneSet.add(srcId);
             await prisma.productMapping.upsert({
               where: { jobId_sourceProductId: { jobId, sourceProductId: srcId } },
@@ -442,11 +457,28 @@ export async function runMigrationWorker(jobId) {
             });
             processedDelta++;
             if (skipped) console.log(`[migration-worker] job=${jobId} skipped (conflict): ${src.title}`);
+            await logBuffer.add({
+              entityType: ENTITY.PRODUCT,
+              action: action || ACTION.CREATED,
+              sourceId: srcId,
+              destId,
+              title: src.title,
+              reason,
+            });
             // Metafield failures don't fail the product transfer, but must
             // still be retrievable afterward — not just a console.warn.
             for (const mfErr of metafieldErrors || []) {
               errorLog.push({ sourceId: srcId, title: src.title || "(no title)", destId, type: "metafield", error: mfErr.error, payload: mfErr.payload });
               console.warn(`[migration-worker] job=${jobId} metafield copy failed for source=${srcId} dest=${destId}: ${mfErr.error}`);
+              await logBuffer.add({
+                entityType: ENTITY.METAFIELD,
+                action: ACTION.FAILED,
+                sourceId: srcId,
+                destId,
+                title: src.title,
+                reason: mfErr.error,
+                detail: mfErr.payload,
+              });
             }
           } catch (err) {
             failedDelta++;
@@ -457,6 +489,13 @@ export async function runMigrationWorker(jobId) {
               where: { jobId_sourceProductId: { jobId, sourceProductId: srcId } },
               create: { jobId, sourceProductId: srcId, status: "FAILED", error: err.message },
               update: { status: "FAILED", error: err.message },
+            });
+            await logBuffer.add({
+              entityType: ENTITY.PRODUCT,
+              action: ACTION.FAILED,
+              sourceId: srcId,
+              title: src.title,
+              reason: err.message,
             });
           }
         }));
@@ -515,6 +554,10 @@ export async function runMigrationWorker(jobId) {
       });
     } catch { /* best-effort */ }
   } finally {
+    // Persist whatever per-record log entries hadn't hit the flush threshold.
+    // Best-effort: createLogBuffer.flush swallows its own errors, but guard
+    // anyway so nothing here can mask the real job outcome.
+    try { await logBuffer?.flush(); } catch { /* best-effort */ }
     activeWorkers.delete(jobId);
   }
 }

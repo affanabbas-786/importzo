@@ -1,13 +1,24 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { jsonResponse } from "./test-helpers.js";
 
-// ── Fake Prisma: enough of MigrationJob + ProductMapping to drive the
-//    worker and assert on final state, without touching a real DB. ──
+// ── Fake Prisma: enough of MigrationJob + ProductMapping + TransferLogEntry
+//    to drive the worker and assert on final state, without touching a real DB.
+//    TransferLogEntry must be modelled here: createLogBuffer deliberately
+//    swallows write failures so logging can never abort a transfer, which
+//    means a missing fake would let these tests pass while logging silently
+//    did nothing. ──
 function createFakePrisma(initialJob) {
   const jobs = new Map([[initialJob.id, { ...initialJob }]]);
   const mappings = [];
+  const logEntries = [];
 
   return {
+    transferLogEntry: {
+      createMany: vi.fn(async ({ data }) => {
+        logEntries.push(...data);
+        return { count: data.length };
+      }),
+    },
     migrationJob: {
       findUnique: vi.fn(async ({ where: { id } }) => jobs.get(id) || null),
       update: vi.fn(async ({ where: { id }, data }) => {
@@ -33,6 +44,7 @@ function createFakePrisma(initialJob) {
     },
     __getJob: (id) => jobs.get(id),
     __getMappings: () => mappings,
+    __getLogEntries: () => logEntries,
   };
 }
 
@@ -85,7 +97,7 @@ function productsPageResponse(nodes, hasNextPage = false, endCursor = null) {
 const emptyMediaResponse = jsonResponse({ data: { product: { media: { nodes: [] } } } });
 const emptyMetafieldsResponse = (resourceKey) => jsonResponse({ data: { [resourceKey]: { metafields: { edges: [] } } } });
 
-function makeFetch({ productPages, findProductByHandleResult = null, productCreateHandler, variantsBulkCreateHandler, metafieldsHandler, onSourceProductsQuery } = {}) {
+function makeFetch({ productPages, findProductByHandleResult = null, productCreateHandler, productUpdateHandler, variantsBulkCreateHandler, metafieldsHandler, onSourceProductsQuery } = {}) {
   let pageCallIndex = 0;
   return vi.fn(async (url, opts) => {
     const body = opts?.body ? JSON.parse(opts.body) : {};
@@ -109,6 +121,10 @@ function makeFetch({ productPages, findProductByHandleResult = null, productCrea
       if (productCreateHandler) return productCreateHandler(body);
       const id = Math.floor(Math.random() * 1e9);
       return jsonResponse({ data: { productCreate: { product: { id: `gid://shopify/Product/new-${id}` }, userErrors: [] } } });
+    }
+    if (query.includes("mutation ProductUpdate")) {
+      if (productUpdateHandler) return productUpdateHandler(body);
+      return jsonResponse({ data: { productUpdate: { product: { id: body.variables?.input?.id }, userErrors: [] } } });
     }
     if (query.includes("query ProductMedia")) return emptyMediaResponse;
     if (query.includes("query Metafields")) {
@@ -506,6 +522,136 @@ describe("runMigrationWorker", () => {
       await runMigrationWorker("job-1");
 
       expect(bulkVariables.variants[0].inventoryItem.requiresShipping).toBe(false);
+    });
+  });
+
+  // ── Phase 2: granular per-record transfer log ──
+  describe("detailed per-record transfer log", () => {
+    it("writes a 'created' log entry per successfully created product", async () => {
+      fakePrisma = createFakePrisma(baseJob());
+      global.fetch = makeFetch({
+        productPages: [{ nodes: [productNode(1), productNode(2)], hasNextPage: false }],
+      });
+
+      await runMigrationWorker("job-1");
+
+      const productEntries = fakePrisma.__getLogEntries().filter((e) => e.entityType === "product");
+      expect(productEntries).toHaveLength(2);
+      expect(productEntries.every((e) => e.action === "created")).toBe(true);
+      expect(productEntries.map((e) => e.sourceId).sort()).toEqual(["1", "2"]);
+      expect(productEntries[0]).toMatchObject({ jobId: "job-1", shop: DEST_SHOP });
+      expect(productEntries[0].destId).toBeTruthy();
+    });
+
+    it("records a skipped product as action 'skipped' with the reason, not as created", async () => {
+      fakePrisma = createFakePrisma(baseJob({ conflictMode: "skip" }));
+      global.fetch = makeFetch({
+        productPages: [{ nodes: [productNode(1, { handle: "existing-handle" })], hasNextPage: false }],
+        findProductByHandleResult: { id: "gid://shopify/Product/existing-999", handle: "existing-handle" },
+      });
+
+      await runMigrationWorker("job-1");
+
+      const entry = fakePrisma.__getLogEntries().find((e) => e.entityType === "product");
+      expect(entry.action).toBe("skipped");
+      expect(entry.destId).toBe("existing-999");
+      expect(entry.reason).toMatch(/already exists/i);
+    });
+
+    it("records an overwritten product as action 'updated'", async () => {
+      fakePrisma = createFakePrisma(baseJob({ conflictMode: "overwrite" }));
+      global.fetch = makeFetch({
+        productPages: [{ nodes: [productNode(1, { handle: "existing-handle" })], hasNextPage: false }],
+        findProductByHandleResult: { id: "gid://shopify/Product/existing-999", handle: "existing-handle" },
+      });
+
+      await runMigrationWorker("job-1");
+
+      const entry = fakePrisma.__getLogEntries().find((e) => e.entityType === "product");
+      expect(entry.action).toBe("updated");
+      expect(entry.destId).toBe("existing-999");
+    });
+
+    it("records a failed product as action 'failed' with the failure reason", async () => {
+      fakePrisma = createFakePrisma(baseJob());
+      global.fetch = makeFetch({
+        productPages: [{ nodes: [productNode(1)], hasNextPage: false }],
+        productCreateHandler: () => jsonResponse({
+          data: { productCreate: { product: null, userErrors: [{ field: ["title"], message: "Title can't be blank" }] } },
+        }),
+      });
+
+      await runMigrationWorker("job-1");
+
+      const entry = fakePrisma.__getLogEntries().find((e) => e.entityType === "product");
+      expect(entry.action).toBe("failed");
+      expect(entry.reason).toMatch(/Title can't be blank/);
+      expect(entry.destId).toBeNull();
+    });
+
+    it("logs a metafield rejection as its own failed entry alongside the successful product", async () => {
+      fakePrisma = createFakePrisma(baseJob());
+      global.fetch = makeFetch({
+        productPages: [{ nodes: [productNode(1)], hasNextPage: false }],
+        productCreateHandler: () => jsonResponse({ data: { productCreate: { product: { id: "gid://shopify/Product/new-1" }, userErrors: [] } } }),
+        metafieldsHandler: (query, resourceKey) => jsonResponse({
+          data: { [resourceKey]: { metafields: { edges: [{ node: { namespace: "custom", key: "material", value: "Cotton", type: "single_line_text_field" } }] } } },
+        }),
+      });
+      const originalFetch = global.fetch;
+      global.fetch = vi.fn(async (url, opts) => {
+        const body = JSON.parse(opts.body);
+        if (body.query.includes("mutation MetafieldsSet")) {
+          return jsonResponse({
+            data: { metafieldsSet: { metafields: [], userErrors: [{ field: ["value"], message: "Value does not match expected type", code: "INVALID" }] } },
+          });
+        }
+        return originalFetch(url, opts);
+      });
+
+      await runMigrationWorker("job-1");
+
+      const entries = fakePrisma.__getLogEntries();
+      // The product itself still succeeded...
+      expect(entries.find((e) => e.entityType === "product").action).toBe("created");
+      // ...and the metafield failure is its own separately queryable record.
+      const mfEntry = entries.find((e) => e.entityType === "metafield");
+      expect(mfEntry.action).toBe("failed");
+      expect(mfEntry.reason).toMatch(/Value does not match expected type/);
+      expect(mfEntry.destId).toBe("new-1");
+    });
+
+    it("flushes buffered entries even when the job fails mid-run", async () => {
+      fakePrisma = createFakePrisma(baseJob());
+      let pageCalls = 0;
+      global.fetch = vi.fn(async (url, opts) => {
+        const body = JSON.parse(opts.body);
+        const query = body.query || "";
+        if (query.includes("productsCount")) return jsonResponse({ data: { productsCount: { count: 1 } } });
+        if (query.includes("query SourceProducts")) {
+          pageCalls++;
+          // First page succeeds with one product; the second page fetch fails,
+          // which marks the job FAILED and returns early.
+          if (pageCalls === 1) {
+            return jsonResponse({ data: { products: { edges: [{ cursor: "c1", node: productNode(1) }], pageInfo: { hasNextPage: true, endCursor: "c1" } } } });
+          }
+          return jsonResponse({}, { status: 500 });
+        }
+        if (query.includes("query FindProduct")) return jsonResponse({ data: { products: { edges: [] } } });
+        if (query.includes("mutation ProductCreate")) return jsonResponse({ data: { productCreate: { product: { id: "gid://shopify/Product/new-1" }, userErrors: [] } } });
+        if (query.includes("query ProductMedia")) return jsonResponse({ data: { product: { media: { nodes: [] } } } });
+        if (query.includes("query Metafields")) return jsonResponse({ data: { product: { metafields: { edges: [] } } } });
+        throw new Error(`unexpected: ${query.slice(0, 60)}`);
+      });
+
+      await runMigrationWorker("job-1");
+
+      expect(fakePrisma.__getJob("job-1").status).toBe("FAILED");
+      // The one product that DID transfer before the failure must still be in
+      // the log — it hadn't reached the 50-entry flush threshold.
+      const entry = fakePrisma.__getLogEntries().find((e) => e.entityType === "product");
+      expect(entry).toBeDefined();
+      expect(entry.action).toBe("created");
     });
   });
 });
