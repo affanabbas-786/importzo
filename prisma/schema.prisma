@@ -87,6 +87,14 @@ model MigrationJob {
   lastCursor        String?  // GraphQL cursor for resume
   conflictMode      String   @default("skip") // skip | overwrite | create
   errorLog          String   @default("[]")   // JSON array of {sourceId,title,error}
+  // Phase 2: pre-transfer backup of the destination.
+  // backupPolicy: require | best-effort | skip. "require" fails the job before
+  // any write if the snapshot can't be taken, rather than silently running an
+  // irreversible transfer with no way back.
+  backupPolicy      String   @default("require")
+  backupId          String?
+  backupStatus      String? // mirrors StoreBackup.status for cheap display
+  rolledBackAt      DateTime?
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 }
@@ -107,6 +115,31 @@ model ProductMapping {
 // ─────────────────────────────────────────────────────────────────────────────
 // Phase 2 — Trust & Safety
 // ─────────────────────────────────────────────────────────────────────────────
+
+// Pre-transfer snapshot of the DESTINATION store, taken before any write, so
+// a transfer can be undone. Payload is JSON in `data`; `truncated` records
+// whether the store exceeded the snapshot cap, because a merchant must never
+// believe they have a complete backup when they don't.
+model StoreBackup {
+  id              String    @id @default(cuid())
+  shop            String // destination shop that was snapshotted
+  jobId           String? // the MigrationJob this backup was taken for
+  status          String    @default("PENDING") // PENDING | READY | FAILED | RESTORED | PARTIAL
+  productCount    Int       @default(0)
+  collectionCount Int       @default(0)
+  metafieldCount  Int       @default(0)
+  truncated       Boolean   @default(false)
+  data            String    @default("{}") // JSON snapshot payload
+  sizeBytes       Int       @default(0)
+  error           String?
+  createdAt       DateTime  @default(now())
+  expiresAt       DateTime
+  restoredAt      DateTime?
+
+  @@index([shop])
+  @@index([jobId])
+  @@index([shop, createdAt])
+}
 
 // Granular per-record transfer log covering EVERY entity type, not just
 // products (ProductMapping only tracks products, and only as DONE|FAILED).

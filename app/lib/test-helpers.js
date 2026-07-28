@@ -21,6 +21,8 @@ export function buildFormData(fields) {
   return fd;
 }
 
-export function mockActionRequest(fields, { url = "https://dest-shop.myshopify.com/app/test" } = {}) {
-  return { formData: async () => buildFormData(fields), url };
+// Action requests are POST in practice; routes that guard on request.method
+// need it present, so it defaults to POST rather than being undefined.
+export function mockActionRequest(fields, { url = "https://dest-shop.myshopify.com/app/test", method = "POST" } = {}) {
+  return { method, formData: async () => buildFormData(fields), url };
 }

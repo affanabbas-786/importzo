@@ -8,6 +8,7 @@ import { encrypt, decrypt } from "../utils/encryption.server.js";
 import { shopifyGraphql } from "./shopify-api.server.js";
 import { createProductWithVariants } from "./product-variants.server.js";
 import { createLogBuffer, ACTION, ENTITY } from "./transfer-log.server.js";
+import { createBackup } from "./backup.server.js";
 
 const BATCH_SIZE = 250;     // products fetched per GQL page
 const CREATE_CONCURRENCY = 5; // parallel productCreate calls
@@ -395,6 +396,49 @@ export async function runMigrationWorker(jobId) {
     await prisma.migrationJob.update({ where: { id: jobId }, data: { status: "RUNNING" } });
     console.log(`[migration-worker] job=${jobId} STARTED source=${job.sourceShop} dest=${job.shop} conflictMode=${job.conflictMode}`);
 
+    // Declared before the backup step so backup warnings land in the same log
+    // the rest of the job appends to.
+    const errorLog = [];
+
+    // ── Phase 2: pre-transfer backup of the DESTINATION, before any write ──
+    // Only taken once per job: a resumed job (process restart) must not
+    // re-snapshot, because by then the destination already contains records
+    // this transfer created — that snapshot would be useless as an "undo".
+    const backupPolicy = job.backupPolicy || "require";
+    if (backupPolicy !== "skip" && !job.backupId) {
+      const backupResult = await createBackup({
+        prisma, shopifyGraphql,
+        shop: job.shop, token: destToken, version: job.apiVersion, jobId,
+      });
+
+      await prisma.migrationJob.update({
+        where: { id: jobId },
+        data: { backupId: backupResult.backup?.id || null, backupStatus: backupResult.backup?.status || "FAILED" },
+      });
+
+      if (!backupResult.ok) {
+        // "require" is the default precisely because the alternative is
+        // running an irreversible transfer with no way back.
+        if (backupPolicy === "require") {
+          const message = `Pre-transfer backup failed, so the transfer was stopped before writing anything: ${backupResult.error}. Re-run with backupPolicy="skip" to proceed without a backup.`;
+          console.error(`[migration-worker] job=${jobId} ABORTED — ${message}`);
+          await prisma.migrationJob.update({
+            where: { id: jobId },
+            data: { status: "FAILED", errorLog: JSON.stringify([{ type: "backup", error: message }]) },
+          });
+          return;
+        }
+        console.warn(`[migration-worker] job=${jobId} proceeding WITHOUT a backup (policy=${backupPolicy}): ${backupResult.error}`);
+        errorLog.push({ type: "backup", error: `Proceeding without a backup: ${backupResult.error}` });
+      } else if (backupResult.truncated) {
+        // A partial backup is worse than no backup if the merchant assumes
+        // it's complete — say so in the job's own error log.
+        const message = `Destination store is larger than the snapshot cap, so the backup is PARTIAL — only the first ${backupResult.backup.productCount} products and ${backupResult.backup.collectionCount} collections can be restored.`;
+        console.warn(`[migration-worker] job=${jobId} ${message}`);
+        errorLog.push({ type: "backup", error: message });
+      }
+    }
+
     // Get total product count upfront for progress percentage
     if (!job.totalProducts) {
       const total = await getProductCount(job.sourceShop, sourceToken, job.apiVersion);
@@ -404,7 +448,6 @@ export async function runMigrationWorker(jobId) {
     let cursor = job.lastCursor || null;
     let processedDelta = 0;
     let failedDelta = 0;
-    const errorLog = [];
 
     // Granular per-record log (Phase 2). Buffered so a 50k-product job doesn't
     // issue 50k INSERTs; best-effort so a logging failure can't abort the job.

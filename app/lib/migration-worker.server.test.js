@@ -12,11 +12,25 @@ function createFakePrisma(initialJob) {
   const mappings = [];
   const logEntries = [];
 
+  const backups = [];
+
   return {
     transferLogEntry: {
       createMany: vi.fn(async ({ data }) => {
         logEntries.push(...data);
         return { count: data.length };
+      }),
+    },
+    storeBackup: {
+      create: vi.fn(async ({ data }) => {
+        const row = { id: `backup-${backups.length + 1}`, ...data };
+        backups.push(row);
+        return row;
+      }),
+      update: vi.fn(async ({ where: { id }, data }) => {
+        const row = backups.find((b) => b.id === id);
+        if (row) Object.assign(row, data);
+        return row;
       }),
     },
     migrationJob: {
@@ -45,6 +59,7 @@ function createFakePrisma(initialJob) {
     __getJob: (id) => jobs.get(id),
     __getMappings: () => mappings,
     __getLogEntries: () => logEntries,
+    __getBackups: () => backups,
   };
 }
 
@@ -97,11 +112,20 @@ function productsPageResponse(nodes, hasNextPage = false, endCursor = null) {
 const emptyMediaResponse = jsonResponse({ data: { product: { media: { nodes: [] } } } });
 const emptyMetafieldsResponse = (resourceKey) => jsonResponse({ data: { [resourceKey]: { metafields: { edges: [] } } } });
 
-function makeFetch({ productPages, findProductByHandleResult = null, productCreateHandler, productUpdateHandler, variantsBulkCreateHandler, metafieldsHandler, onSourceProductsQuery } = {}) {
+function makeFetch({ productPages, findProductByHandleResult = null, productCreateHandler, productUpdateHandler, variantsBulkCreateHandler, metafieldsHandler, onSourceProductsQuery, backupProducts = [] } = {}) {
   let pageCallIndex = 0;
   return vi.fn(async (url, opts) => {
     const body = opts?.body ? JSON.parse(opts.body) : {};
     const query = body.query || "";
+
+    // Phase 2: the pre-transfer backup snapshots the DESTINATION before any
+    // write. Default to an empty destination unless a test supplies one.
+    if (query.includes("query BackupProducts")) {
+      return jsonResponse({ data: { products: { edges: backupProducts.map((node, i) => ({ cursor: String(i), node })), pageInfo: { hasNextPage: false, endCursor: null } } } });
+    }
+    if (query.includes("query BackupCollections")) {
+      return jsonResponse({ data: { collections: { edges: [], pageInfo: { hasNextPage: false, endCursor: null } } } });
+    }
 
     if (query.includes("productsCount")) return jsonResponse({ data: { productsCount: { count: productPages.flat().length } } });
     if (query.includes("query SourceProducts")) {
@@ -374,6 +398,8 @@ describe("runMigrationWorker", () => {
     fakePrisma = createFakePrisma(baseJob());
     global.fetch = vi.fn(async (url, opts) => {
       const body = JSON.parse(opts.body);
+      if (body.query.includes("query BackupProducts")) return jsonResponse({ data: { products: { edges: [], pageInfo: { hasNextPage: false } } } });
+      if (body.query.includes("query BackupCollections")) return jsonResponse({ data: { collections: { edges: [], pageInfo: { hasNextPage: false } } } });
       if (body.query.includes("productsCount")) return jsonResponse({ data: { productsCount: { count: 0 } } });
       if (body.query.includes("query SourceProducts")) return jsonResponse({}, { status: 500 });
       throw new Error("unexpected call");
@@ -525,6 +551,152 @@ describe("runMigrationWorker", () => {
     });
   });
 
+  // ── Phase 2: pre-transfer backup of the destination ──
+  describe("pre-transfer backup", () => {
+    it("snapshots the destination before transferring and links the backup to the job", async () => {
+      fakePrisma = createFakePrisma(baseJob());
+      global.fetch = makeFetch({
+        productPages: [{ nodes: [productNode(1)], hasNextPage: false }],
+        backupProducts: [{
+          id: "gid://shopify/Product/dest-1", handle: "existing", title: "Pre-existing",
+          descriptionHtml: "", vendor: "", productType: "", tags: [], status: "ACTIVE",
+          metafields: { edges: [] },
+        }],
+      });
+
+      await runMigrationWorker("job-1");
+
+      const backups = fakePrisma.__getBackups();
+      expect(backups).toHaveLength(1);
+      expect(backups[0].status).toBe("READY");
+      expect(backups[0].productCount).toBe(1);
+      expect(backups[0].shop).toBe(DEST_SHOP); // the destination, not the source
+
+      const job = fakePrisma.__getJob("job-1");
+      expect(job.backupId).toBe(backups[0].id);
+      expect(job.backupStatus).toBe("READY");
+      expect(job.status).toBe("COMPLETED");
+    });
+
+    it("takes the backup BEFORE any product write", async () => {
+      fakePrisma = createFakePrisma(baseJob());
+      const callOrder = [];
+      const inner = makeFetch({ productPages: [{ nodes: [productNode(1)], hasNextPage: false }] });
+      global.fetch = vi.fn(async (url, opts) => {
+        const query = JSON.parse(opts.body).query || "";
+        if (query.includes("query BackupProducts")) callOrder.push("backup");
+        if (query.includes("mutation ProductCreate")) callOrder.push("write");
+        return inner(url, opts);
+      });
+
+      await runMigrationWorker("job-1");
+
+      expect(callOrder[0]).toBe("backup");
+      expect(callOrder).toContain("write");
+      expect(callOrder.indexOf("backup")).toBeLessThan(callOrder.indexOf("write"));
+    });
+
+    it('aborts the job without writing anything when the backup fails under the default "require" policy', async () => {
+      fakePrisma = createFakePrisma(baseJob());
+      let productCreateCalled = false;
+      global.fetch = vi.fn(async (url, opts) => {
+        const query = JSON.parse(opts.body).query || "";
+        if (query.includes("query BackupProducts")) return jsonResponse({}, { status: 403 });
+        if (query.includes("mutation ProductCreate")) { productCreateCalled = true; }
+        return jsonResponse({ data: {} });
+      });
+
+      await runMigrationWorker("job-1");
+
+      const job = fakePrisma.__getJob("job-1");
+      expect(job.status).toBe("FAILED");
+      expect(job.errorLog).toMatch(/Pre-transfer backup failed/);
+      expect(job.errorLog).toMatch(/backupPolicy/); // tells the operator how to override
+      expect(productCreateCalled).toBe(false); // nothing was written
+    });
+
+    it('proceeds with a warning when the backup fails under "best-effort"', async () => {
+      fakePrisma = createFakePrisma(baseJob({ backupPolicy: "best-effort" }));
+      const inner = makeFetch({ productPages: [{ nodes: [productNode(1)], hasNextPage: false }] });
+      global.fetch = vi.fn(async (url, opts) => {
+        const query = JSON.parse(opts.body).query || "";
+        if (query.includes("query BackupProducts")) return jsonResponse({}, { status: 403 });
+        return inner(url, opts);
+      });
+
+      await runMigrationWorker("job-1");
+
+      const job = fakePrisma.__getJob("job-1");
+      expect(job.status).toBe("COMPLETED");
+      expect(job.processedProducts).toBe(1);
+      expect(job.errorLog).toMatch(/Proceeding without a backup/);
+    });
+
+    it('skips the backup entirely under "skip"', async () => {
+      fakePrisma = createFakePrisma(baseJob({ backupPolicy: "skip" }));
+      let backupQueried = false;
+      const inner = makeFetch({ productPages: [{ nodes: [productNode(1)], hasNextPage: false }] });
+      global.fetch = vi.fn(async (url, opts) => {
+        const query = JSON.parse(opts.body).query || "";
+        if (query.includes("query BackupProducts")) backupQueried = true;
+        return inner(url, opts);
+      });
+
+      await runMigrationWorker("job-1");
+
+      expect(backupQueried).toBe(false);
+      expect(fakePrisma.__getBackups()).toHaveLength(0);
+      expect(fakePrisma.__getJob("job-1").status).toBe("COMPLETED");
+    });
+
+    it("does not re-snapshot on resume — the destination already holds this transfer's writes by then", async () => {
+      // Simulates a process restart: the job already recorded a backup.
+      fakePrisma = createFakePrisma(baseJob({ backupId: "backup-existing", backupStatus: "READY" }));
+      let backupQueried = false;
+      const inner = makeFetch({ productPages: [{ nodes: [productNode(1)], hasNextPage: false }] });
+      global.fetch = vi.fn(async (url, opts) => {
+        const query = JSON.parse(opts.body).query || "";
+        if (query.includes("query BackupProducts")) backupQueried = true;
+        return inner(url, opts);
+      });
+
+      await runMigrationWorker("job-1");
+
+      expect(backupQueried).toBe(false);
+      expect(fakePrisma.__getBackups()).toHaveLength(0);
+      expect(fakePrisma.__getJob("job-1").backupId).toBe("backup-existing"); // untouched
+    });
+
+    it("warns in the job log when the destination was too large to snapshot fully", async () => {
+      fakePrisma = createFakePrisma(baseJob());
+      // One page over the cap, with hasNextPage true so the paginator truncates.
+      const bigPage = Array.from({ length: 100 }, (_, i) => ({
+        id: `gid://shopify/Product/d${i}`, handle: `d-${i}`, title: `D${i}`,
+        descriptionHtml: "", vendor: "", productType: "", tags: [], status: "ACTIVE",
+        metafields: { edges: [] },
+      }));
+      const inner = makeFetch({ productPages: [{ nodes: [productNode(1)], hasNextPage: false }] });
+      let backupPageCalls = 0;
+      global.fetch = vi.fn(async (url, opts) => {
+        const query = JSON.parse(opts.body).query || "";
+        if (query.includes("query BackupProducts")) {
+          backupPageCalls++;
+          // Always claim another page — the cap is what must stop this.
+          return jsonResponse({ data: { products: { edges: bigPage.map((node, i) => ({ cursor: String(i), node })), pageInfo: { hasNextPage: true, endCursor: `c${backupPageCalls}` } } } });
+        }
+        if (query.includes("query BackupCollections")) return jsonResponse({ data: { collections: { edges: [], pageInfo: { hasNextPage: false } } } });
+        return inner(url, opts);
+      });
+
+      await runMigrationWorker("job-1");
+
+      const job = fakePrisma.__getJob("job-1");
+      expect(job.backupStatus).toBe("PARTIAL");
+      expect(job.errorLog).toMatch(/backup is PARTIAL/);
+      expect(job.status).toBe("COMPLETED"); // partial backup doesn't block the transfer
+    });
+  });
+
   // ── Phase 2: granular per-record transfer log ──
   describe("detailed per-record transfer log", () => {
     it("writes a 'created' log entry per successfully created product", async () => {
@@ -627,6 +799,8 @@ describe("runMigrationWorker", () => {
       global.fetch = vi.fn(async (url, opts) => {
         const body = JSON.parse(opts.body);
         const query = body.query || "";
+        if (query.includes("query BackupProducts")) return jsonResponse({ data: { products: { edges: [], pageInfo: { hasNextPage: false } } } });
+        if (query.includes("query BackupCollections")) return jsonResponse({ data: { collections: { edges: [], pageInfo: { hasNextPage: false } } } });
         if (query.includes("productsCount")) return jsonResponse({ data: { productsCount: { count: 1 } } });
         if (query.includes("query SourceProducts")) {
           pageCalls++;
