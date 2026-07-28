@@ -4,6 +4,7 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate, apiVersion } from "../shopify.server";
 import prisma from "../db.server";
+import { shopifyFetch } from "../lib/shopify-api.server";
 import { parseCSV } from "../lib/csv-parser";
 import { smartMapColumns, INVENTORY_ALIASES, confidenceLevel, confidenceColor } from "../lib/smart-mapper";
 import { FileSourcePicker, AISummary, generateMappingSummary, generateImportResultSummary } from "../components/ui";
@@ -44,7 +45,7 @@ export const action = async ({ request }) => {
   // Fetch locations via GraphQL
   const locMap = {};
   try {
-    const locRes = await fetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
+    const locRes = await shopifyFetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
       method: "POST",
       headers: authHeaders,
       body: JSON.stringify({ query: `{ locations(first: 50) { edges { node { id name } } } }` }),
@@ -71,7 +72,7 @@ export const action = async ({ request }) => {
     const item = items[i];
     try {
       // Look up variant by SKU using GraphQL
-      const gqlRes = await fetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
+      const gqlRes = await shopifyFetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
         method: "POST",
         headers: authHeaders,
         body: JSON.stringify({
@@ -117,7 +118,7 @@ export const action = async ({ request }) => {
       }
 
       // Set inventory level using GraphQL
-      const setRes = await fetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
+      const setRes = await shopifyFetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
         method: "POST",
         headers: authHeaders,
         body: JSON.stringify({

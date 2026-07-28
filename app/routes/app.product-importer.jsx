@@ -4,6 +4,7 @@ import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate, apiVersion } from "../shopify.server";
 import prisma from "../db.server";
+import { shopifyFetch } from "../lib/shopify-api.server";
 import { parseCSV } from "../lib/csv-parser";
 import { smartMapColumns, PRODUCT_ALIASES, confidenceLevel, confidenceColor } from "../lib/smart-mapper";
 import { FileSourcePicker, AISummary, generateMappingSummary, generateImportResultSummary } from "../components/ui";
@@ -82,7 +83,7 @@ export const action = async ({ request }) => {
   // Fetch default location for inventory quantity assignment
   let defaultLocationId = null;
   try {
-    const locRes = await fetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
+    const locRes = await shopifyFetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": accessToken },
       body: JSON.stringify({ query: `{ locations(first: 1) { edges { node { id } } } }` }),
@@ -206,7 +207,7 @@ export const action = async ({ request }) => {
       }
       const mediaInputs = (productData.images || []).map((img) => ({ originalSource: img.src, mediaContentType: "IMAGE" }));
 
-      const gqlRes = await fetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
+      const gqlRes = await shopifyFetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": accessToken },
         body: JSON.stringify({
@@ -241,7 +242,7 @@ export const action = async ({ request }) => {
       // Attach images via productCreateMedia (media param removed from productCreate in 2025-01+)
       if (mediaInputs.length > 0) {
         try {
-          const imgRes = await fetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
+          const imgRes = await shopifyFetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
             method: "POST",
             headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": accessToken },
             body: JSON.stringify({
@@ -292,7 +293,7 @@ export const action = async ({ request }) => {
 
           // Helper: call productCreateMedia
           const attachMedia = async (mediaInput) => {
-            const gqlRes = await fetch(
+            const gqlRes = await shopifyFetch(
               `https://${shopDomain}/admin/api/${version}/graphql.json`,
               {
                 method: "POST",

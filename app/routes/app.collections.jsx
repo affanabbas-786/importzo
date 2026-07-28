@@ -4,6 +4,7 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate, apiVersion } from "../shopify.server";
 import prisma from "../db.server";
+import { shopifyFetch } from "../lib/shopify-api.server";
 import { parseCSV } from "../lib/csv-parser";
 import { smartMapColumns, COLLECTION_ALIASES, confidenceLevel, confidenceColor } from "../lib/smart-mapper";
 import { FileSourcePicker, AISummary, generateMappingSummary, generateImportResultSummary } from "../components/ui";
@@ -56,7 +57,7 @@ export const action = async ({ request }) => {
     }`;
 
   async function gqlCollectionCreate(input) {
-    const res = await fetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
+    const res = await shopifyFetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": accessToken },
       body: JSON.stringify({ query: CREATE_COLLECTION, variables: { input } }),

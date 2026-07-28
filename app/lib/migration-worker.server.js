@@ -5,6 +5,7 @@
 
 import prisma from "../db.server.js";
 import { encrypt, decrypt } from "../utils/encryption.server.js";
+import { shopifyGraphql } from "./shopify-api.server.js";
 
 const BATCH_SIZE = 250;     // products fetched per GQL page
 const CREATE_CONCURRENCY = 5; // parallel productCreate calls
@@ -22,53 +23,9 @@ export function isWorkerActive(jobId) { return activeWorkers.has(jobId); }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function shopifyFetch(url, opts = {}) {
-  const MAX_RETRIES = 5;
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    const res = await fetch(url, opts);
-    if (res.status === 429) {
-      const retryAfter = parseFloat(res.headers.get("Retry-After") || "0");
-      const delay = Math.max(retryAfter * 1000, 1000 * Math.pow(2, attempt));
-      if (attempt < MAX_RETRIES) {
-        console.log(`[migration-worker] 429 — ${url.split("?")[0]} — attempt ${attempt + 1}/${MAX_RETRIES}, waiting ${delay}ms`);
-        await sleep(delay);
-        continue;
-      }
-    }
-    return res;
-  }
-  return fetch(url, opts);
-}
-
-// GraphQL with cost-extension throttle awareness.
-async function shopifyGraphql(shop, token, query, variables, version) {
-  const res = await shopifyFetch(`https://${shop}/admin/api/${version}/graphql.json`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": token },
-    body: JSON.stringify({ query, variables }),
-  });
-  const text = await res.text().catch(() => "");
-  let json;
-  try { json = JSON.parse(text); } catch { json = null; }
-
-  // Throttle: slow down based on remaining bucket depth before the next call.
-  const throttle = json?.extensions?.cost?.throttleStatus;
-  if (throttle) {
-    const { currentlyAvailable, restoreRate, requestedQueryCost } = throttle;
-    if (currentlyAvailable < (requestedQueryCost || 0)) {
-      const waitMs = Math.min(
-        ((requestedQueryCost - currentlyAvailable) / Math.max(restoreRate, 1)) * 1000 + 200,
-        8000,
-      );
-      console.log(`[migration-worker] throttle: waiting ${waitMs}ms (available=${currentlyAvailable}, rate=${restoreRate}/s)`);
-      await sleep(waitMs);
-    }
-  }
-
-  if (!res.ok) throw new Error(`GraphQL HTTP ${res.status}: ${text.slice(0, 300)}`);
-  if (json?.errors?.length) throw new Error(`GraphQL errors: ${JSON.stringify(json.errors).slice(0, 400)}`);
-  return json?.data || {};
-}
+// shopifyFetch/shopifyGraphql (429 backoff + cost-throttle awareness) now
+// live in shopify-api.server.js — shared with app.transfer.jsx and
+// app.export.jsx instead of three independently-drifting copies.
 
 function mediaTypeFromUrl(url = "") {
   const s = String(url).split("?")[0].toLowerCase();

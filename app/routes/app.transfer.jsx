@@ -17,6 +17,7 @@ import { loadPrefs } from "../lib/prefs";
 import { friendlyError, summarizeFailures } from "../lib/friendly-errors";
 import { notifyJobComplete } from "../lib/notify";
 import { saveThemeZip, deleteThemeZipLater } from "../lib/theme-zip.server";
+import { shopifyFetch as sharedShopifyFetch, shopifyGraphql as sharedShopifyGraphql } from "../lib/shopify-api.server";
 
 // ═══════════════════════════════════════════════════════════════════
 // Server
@@ -71,50 +72,13 @@ export const action = async ({ request }) => {
     return { url, token };
   }
 
-  // Helper: fetch with automatic 429 retry + exponential backoff
-  // Bug fix: MAX_RETRIES 3→5; add console.log on every retry
-  async function shopifyFetch(url, opts = {}) {
-    const MAX_RETRIES = 5;
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-      const res = await fetch(url, opts);
-      if (res.status === 429) {
-        const retryAfter = parseFloat(res.headers.get("Retry-After") || "0");
-        const delay = Math.max(retryAfter * 1000, 1000 * Math.pow(2, attempt));
-        if (attempt < MAX_RETRIES) {
-          console.log(`[importzo] 429 rate limit — ${url.split("?")[0]} — attempt ${attempt + 1}/${MAX_RETRIES}, waiting ${delay}ms`);
-          await new Promise((r) => setTimeout(r, delay));
-          continue;
-        }
-      }
-      return res;
-    }
-    return fetch(url, opts);
-  }
-
-
-
-  // Helper: GraphQL Admin API call with the same retry behavior used for REST.
+  // 429 backoff + GraphQL cost-throttle awareness now live in the shared
+  // shopify-api.server.js helper (also used by migration-worker.server.js and
+  // app.export.jsx). These local wrappers preserve the call signatures every
+  // intent handler below already uses (no version param — closed over here).
+  const shopifyFetch = sharedShopifyFetch;
   async function shopifyGraphql(shop, token, query, variables = {}) {
-    const res = await shopifyFetch(`https://${shop}/admin/api/${version}/graphql.json`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Shopify-Access-Token": token,
-      },
-      body: JSON.stringify({ query, variables }),
-    });
-    const text = await res.text().catch(() => "");
-    let json = null;
-    try { json = text ? JSON.parse(text) : null; } catch { json = null; }
-    if (!res.ok) {
-      console.error(`[importzo] GraphQL HTTP ${res.status} on ${shop}: ${text.slice(0, 400)}`);
-      throw new Error(`GraphQL HTTP ${res.status}: ${text.slice(0, 300)}`);
-    }
-    if (json?.errors?.length) {
-      console.error(`[importzo] GraphQL errors on ${shop}:`, JSON.stringify(json.errors).slice(0, 600));
-      throw new Error(`GraphQL errors: ${JSON.stringify(json.errors).slice(0, 400)}`);
-    }
-    return json?.data || {};
+    return sharedShopifyGraphql(shop, token, query, variables, version);
   }
 
   function mediaContentTypeFromUrl(url = "") {

@@ -3,6 +3,7 @@ import { useFetcher, useRouteError, Link } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate, apiVersion } from "../shopify.server";
+import { shopifyGraphql } from "../lib/shopify-api.server";
 import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
 import { ErrorBanner } from "../components/ui";
 
@@ -23,32 +24,16 @@ export const action = async ({ request }) => {
   const version = apiVersion || "2025-10";
   const authHeaders = { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" };
 
+  // 429 backoff now lives in the shared shopify-api.server.js helper (also
+  // used by migration-worker.server.js and app.transfer.jsx). `timeoutMs`
+  // preserves this route's original per-attempt 30s abort behavior.
   async function fetchAllGql(query, getPage) {
     const items = [];
     let after = null;
     let hasNextPage = true;
     while (hasNextPage) {
-      let res;
-      for (let attempt = 0; attempt < 4; attempt++) {
-        const ctrl = new AbortController();
-        const timeout = setTimeout(() => ctrl.abort(), 30000);
-        try {
-          res = await fetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
-            method: "POST", headers: authHeaders,
-            body: JSON.stringify({ query, variables: { after } }),
-            signal: ctrl.signal,
-          });
-        } finally { clearTimeout(timeout); }
-        if (res.status !== 429) break;
-        const wait = parseFloat(res.headers.get("Retry-After") || "2");
-        await new Promise((r) => setTimeout(r, Math.max(wait * 1000, 500 * Math.pow(2, attempt))));
-      }
-      if (!res.ok) throw new Error(`GraphQL HTTP ${res.status}`);
-      const json = await res.json();
-      if (json?.errors?.length) {
-        throw new Error(`GraphQL: ${json.errors.map((e) => e.message).join("; ").slice(0, 400)}`);
-      }
-      const page = getPage(json?.data);
+      const data = await shopifyGraphql(shopDomain, accessToken, query, { after }, version, { timeoutMs: 30000 });
+      const page = getPage(data);
       if (!page) throw new Error("GraphQL returned no data");
       items.push(...(page?.edges || []).map((e) => e.node));
       after = page?.edges?.length ? page.edges[page.edges.length - 1].cursor : null;
