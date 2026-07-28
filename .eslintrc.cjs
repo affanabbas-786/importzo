@@ -87,6 +87,8 @@ module.exports = {
         // Tests run under Node (vitest), so process/Buffer/etc. are defined.
         "**/*.test.{js,jsx,ts,tsx}",
         "test/**/*.{js,jsx,ts,tsx}",
+        // Operational scripts are Node CLIs.
+        "scripts/**/*.{js,mjs,cjs}",
       ],
       env: {
         node: true,

@@ -1,19 +1,206 @@
 # Importzo Hardening — Progress Log
 
-Tracks execution of `Importzo-PRD-Growth-Plan.md`. Currently: **Phase 1 (Core Hardening) — complete
-and deployed. Phase 2 (Trust & Safety) — complete, awaiting review.**
-Phase 3 (Security) and Phase 4 (Differentiation) have not been started, per instructions.
+Tracks execution of `Importzo-PRD-Growth-Plan.md`. Currently: **Phases 1 and 2 complete and deployed.
+Phase 3 (Security Hardening) — 5 of 6 items committed; item 1 implemented but UNCOMMITTED, awaiting
+your explicit review.** Phase 4 has not been started.
 
-Original work: five commits on `phase-1-hardening`, one per Phase 1 checklist item, each committed only
-after the full test suite passed. That branch was subsequently merged into `main` (fast-forward,
-outside this session) along with a separately-added PRD/growth-plan doc commit; all further work
-described below happened directly on `main`.
-
-**Test suite: 351 passing across 20 files** (was 133 at the end of Phase 1).
+**Test suite: 455 passing across 25 files** (391 at end of Phase 2's fixes, 133 at end of Phase 1).
 
 ---
 
-# PHASE 2 — Trust & Safety Features (complete, awaiting review)
+# PHASE 3 — Security Hardening
+
+Committed:
+
+| Commit | Item |
+|---|---|
+| `4b49d41` | 3.3 GDPR webhooks + 3.5 webhook HMAC verification |
+| `1aabaee` | 3.4 Rate limiting / abuse protection |
+| `24dc424` | 3.6 Dependency vulnerability scan |
+| `dd4cbe4` | 3.2 Scope minimization |
+
+**NOT committed — item 3.1 (token encryption at rest).** Implemented and fully tested, held per your
+instruction to stop before committing changes to token/session storage. Details in its own section
+below.
+
+## 🔴 Decisions needed
+
+**1. react-router 7.13.2 has an unauthenticated RCE advisory. Not fixed.**
+The vendored turbo-stream TYPE_ERROR deserialization issue (fixed in 7.14.2), plus open redirect,
+CSRF on PUT/PATCH/DELETE document requests, XSS, and DoS. Version 7.18.1 fixes all but one, sits
+inside the declared `^7.12.0` range, and satisfies the Shopify adapter's `^7.6.2` peer requirement —
+so it is not a breaking change on paper. I attempted it and **backed it out**: npm's resolver
+deadlocks on a stale `@react-router/fs-routes` peer pin and only a full `node_modules` +
+lockfile regeneration gets past it. Rewriting the entire dependency tree of a live app days after an
+outage, with no staging environment to verify against, was not a call I was willing to make
+unilaterally. Recommended path: on a branch, `rm -rf node_modules package-lock.json`, pin the
+react-router family to `^7.18.1`, `npm install`, then build + test + **deploy to staging first**.
+
+**2. Token encryption is now fail-closed — verify your production key before deploying.**
+The uncommitted item 3.1 makes `encrypt()` throw rather than silently write plaintext. If
+`ENCRYPTION_KEY` is unset **or shorter than 32 characters** in production, the app will start failing
+on token writes immediately after deploy. Check it before this ships. (The 32-char minimum already
+caught a too-short key in our own test fixture.)
+
+**3. Scope change triggers merchant re-authorization.**
+`dd4cbe4` removes `read_orders`. Shopify will prompt existing merchants to approve the updated
+(shorter) permission set on next load. Normal for a scope change, but merchant-visible — deploy
+deliberately.
+
+**4. `read_customers` vs the published privacy policy — your call.**
+The PRD asked to audit scopes "against the privacy policy already published". `app/routes/privacy.jsx`
+says the app does "not collect personal information about your customers (names, emails, addresses,
+payment data)". That is literally true — the customer CSV export streams to the merchant's browser and
+is never persisted, which I verified and pinned with a test. But the app does **read** that data, and
+`read_customers` is Shopify "protected customer data" requiring separate approval. Two questions for
+you: should the policy say "access" rather than only "collect", and is protected-customer-data
+approval in place? Both are decisions about published legal copy, so I left them alone.
+
+## 3.3 — GDPR compliance webhooks (`4b49d41`)
+
+**Serious finding: erasure was incomplete.** `shop/redact` deleted 3 of the app's 9 tables. It left
+behind:
+
+| Table | What survived a legally-mandated erasure |
+|---|---|
+| `MigrationJob` | encrypted source **and** destination access tokens |
+| `ScheduledSync` | encrypted tokens, and the schedule stayed enabled |
+| `StoreBackup` | a full snapshot of the shop's product catalog |
+| `TransferSession`, `ProductMapping`, `TransferLogEntry` | transfer history |
+
+Four of those six are Phase 2 tables I added, and I did not extend `shop/redact` when adding them.
+That is the gap that caused this, and it is the kind of thing that recurs, so the fix is structural:
+`app/lib/shop-data.server.js` is now the single source of truth, and **a test reads
+`prisma/schema.prisma` directly and fails if any declared model is neither wired into erasure nor
+explicitly exempted with a reason.** Adding a model without handling erasure now breaks the build.
+
+Deletion is children-before-parents (`ProductMapping`/`TransferLogEntry` have no `shop` column and
+hang off `MigrationJob` by `jobId`), per-model best-effort so a missing table can't abort the rest, and
+every failure is logged loudly rather than silently under-deleting.
+
+`app/uninstalled` also now disables the shop's `ScheduledSync` rows — the offline token is revoked at
+uninstall, so an enabled schedule would keep firing against a dead credential. Uninstall is still not
+erasure; `shop/redact` does that 48h later, and a test pins the distinction.
+
+## 3.5 — Webhook HMAC verification (`4b49d41`)
+
+All five webhook routes already delegated to `authenticate.webhook()`, which performs the signature
+verification. That was correct and is **unchanged** — but it was untested. Now, for every route: a
+rejected signature performs no destructive work and the 401 propagates rather than being swallowed
+into a 200.
+
+`app/uninstalled` deliberately tolerates one post-verification failure (the SDK's token refresh
+against an already-revoked token). A test pins that this tolerance does **not** extend to genuine
+401/400/405 auth failures — that distinction is the whole safety of the fallback.
+
+## 3.4 — Rate limiting (`1aabaee`)
+
+Two controls, because they stop different things: a rate limit stops a client hammering an endpoint;
+a concurrency cap stops a few simultaneous but very expensive operations. Three full-store backups
+started three seconds apart are only 3 requests but will saturate the box.
+
+Everything is keyed **per shop**, which is the "one shop can't starve others" requirement, pinned by
+tests on both dimensions. Backup/restore/rollback are capped at 1 concurrent per shop; preview at 2.
+`withPolicy()` releases in a `finally`, so a throwing handler can't wedge a shop out of its own
+endpoint — tested, as is double-release being a no-op.
+
+`api.migration-job` is handled differently on purpose: the worker is fire-and-forget and outlives the
+request, so an in-process slot released at response time would cap nothing. It gets the rate limit
+plus a **DB count of PENDING/RUNNING jobs** as the real concurrency control.
+
+**Known limitation:** counters are in-process, so with multiple PM2 workers the effective limit is
+per-worker. Redis/DB-backed counters would be exact but are real infrastructure; this still stops the
+runaway-loop and thundering-herd cases the item exists for.
+
+## 3.6 — Dependency scan (`24dc424`)
+
+`npm audit`: 43 vulns (1 critical, 36 high, 5 moderate, 1 low) → 38 (0 critical, 38 high, 0 moderate,
+0 low). Applied `npm audit fix` only — semver-compatible, **not** `--force`, and `package.json` is
+unchanged (lockfile-only). Notably bumped vite 6.4.1 → 6.4.3 (path traversal, arbitrary file read via
+dev-server websocket, `server.fs.deny` bypass).
+
+The high count rising 36 → 38 is not a regression: resolving the tree surfaced advisories previously
+masked behind the ones just fixed. Every remaining high is either the react-router cluster (decision
+#1 above) or dev-only toolchain majors (`@typescript-eslint/*`, `eslint`, `@shopify/api-codegen-preset`)
+which don't ship to production and can't be reached by a request.
+
+## 3.2 — Scope minimization (`dd4cbe4`)
+
+Audited all 16 declared scopes against real API usage. **Removed `read_orders`** — there is no
+`orders`, `draftOrders`, `ordersCount` or `fulfillmentOrder` query anywhere in the codebase. It was
+requested at install and never used once.
+
+The other 15 each trace to a concrete call site, documented inline in `shopify.app.toml`.
+`test/scopes.test.js` pins the audited set: it fails if `read_orders` returns, if any order-API call
+appears without the scope being re-added, or if the declared list drifts. It also verifies that scopes
+the code demonstrably needs are still declared, so a future over-eager minimization can't silently
+break a feature.
+
+## 3.1 — Token encryption at rest ⚠️ IMPLEMENTED, NOT COMMITTED
+
+Held for your explicit review per instruction. Everything below is written, tested (28 tests) and
+passing, sitting uncommitted in the working tree:
+
+- `app/utils/encryption.server.js` (rewritten)
+- `app/utils/encryption.server.test.js` (new)
+- `scripts/reencrypt-tokens.mjs` (new)
+- `test/routes/api.scheduled-sync.test.js` (fixture key lengthened)
+- `.eslintrc.cjs` (Node env for `scripts/`)
+
+**Four problems fixed:**
+
+1. **Fail-open → fail-closed.** With `ENCRYPTION_KEY` unset, `encrypt()` logged a warning and
+   returned the plaintext, which was then written to the database. Every OAuth token in
+   `SourceStore`, `TransferSession`, `MigrationJob` and `ScheduledSync` would sit in the clear while
+   the code read as though it were encrypting. It now throws. A test asserts explicitly that the
+   plaintext can no longer be returned.
+2. **Unauthenticated cipher → AES-256-GCM.** AES-256-CBC gave confidentiality but no integrity;
+   ciphertext could be altered undetected. A test flips one ciphertext character and asserts GCM's
+   auth tag rejects it — CBC would have decrypted it to garbage silently.
+3. **No key validation.** Any non-empty string was accepted, including `"x"`. Now requires ≥32 chars
+   and rejects entropy-free placeholders. Errors never echo the key.
+4. **Errors swallowed.** `decrypt()` returned the raw input on failure, so a wrong key silently
+   produced "tokens" that were really ciphertext, surfacing later as a baffling Shopify auth error.
+   It now throws with a message naming the likely cause.
+
+**Backward compatibility is preserved.** Storage is versioned (`v2:iv:tag:cipher`), and both legacy
+forms — AES-CBC, and plaintext written while the fail-open path was live — remain **readable**, so
+existing rows keep working. Nothing new is ever written in a legacy format. `scripts/reencrypt-tokens.mjs`
+upgrades rows in place (`--dry-run` first; safe to re-run; leaves undecryptable values untouched
+rather than destroying any chance of recovery).
+
+**Why this needs your sign-off before it ships:**
+- It changes behavior on every token write path in the app.
+- If production's `ENCRYPTION_KEY` is missing or under 32 chars, **token writes will start failing
+  immediately on deploy**. That is the intended fail-closed behavior, but it must be verified first.
+- If the production key ever *changed*, existing rows encrypted under the old key will now throw
+  instead of silently returning ciphertext. Affected stores would need to reconnect. Loud failure is
+  correct, but you should know before rather than after.
+
+Suggested order: confirm `ENCRYPTION_KEY` is set and ≥32 chars → back up the DB → deploy → run
+`node scripts/reencrypt-tokens.mjs --dry-run` → review → run for real.
+
+## Not done — the PRD's 7th Phase 3 item
+
+Your instruction listed six items; `Importzo-PRD-Growth-Plan.md` line 50 has a seventh:
+
+> Audit logging — who triggered what transfer, when, from which IP
+
+I did **not** implement it, since it wasn't in your list and I didn't want to silently expand scope.
+Worth noting it's now cheap: `TransferLogEntry` (Phase 2.4) already carries the per-record history, so
+this is mostly adding actor/IP columns and stamping them at the route layer. Say the word and it's a
+short piece of work.
+
+---
+
+Historical note: Phase 1 was five commits on `phase-1-hardening`, one per checklist item, each
+committed only after the full suite passed. That branch was later merged into `main` (fast-forward,
+outside this session) along with a separately-added PRD doc commit; everything after happened directly
+on `main`.
+
+---
+
+# PHASE 2 — Trust & Safety Features (complete, deployed)
 
 Five commits, one per checklist item, each landed only after the full suite passed:
 
@@ -495,15 +682,18 @@ old code.
 
 # Next step
 
-**Phase 2 is complete and awaiting your review.** Stopping here per instructions — Phase 3 (Security
-Hardening) has not been started.
+**Phase 3 is done except item 3.1, which is implemented but deliberately uncommitted awaiting your
+explicit review** (it changes token storage). Stopping here per instructions — Phase 4 has not been
+started.
 
-Before Phase 3, I need decisions on the three items flagged at the top of the Phase 2 section:
-1. Whether `backupPolicy` should default to `"require"` (aborts a transfer whose backup fails) or
-   `"best-effort"`.
-2. Setting `SCHEDULER_SECRET` + adding the cron, without which recurring sync stays dormant.
-3. Whether the 5000-product backup ceiling is acceptable for now, or whether snapshots should move to
-   file/object storage first.
+Blocking on you, in priority order:
 
-None of the Phase 2 work touched billing, OAuth, or webhook signature verification, so nothing hit the
-PRD's human-review gate mid-phase.
+1. **react-router RCE** — decision #1 at the top of the Phase 3 section. Highest-severity open issue.
+2. **Review + commit item 3.1** (token encryption). Confirm production `ENCRYPTION_KEY` is set and
+   ≥32 chars first, or the fail-closed behavior will break token writes on deploy.
+3. **Deploy timing for the scope change** (`dd4cbe4`) — it triggers merchant re-authorization.
+4. `read_customers` vs privacy-policy wording — decision #4.
+5. Whether you want the PRD's 7th Phase 3 item (audit logging), which your list omitted.
+
+Still open from Phase 2 (unchanged): `backupPolicy` default, `SCHEDULER_SECRET` + cron, and the
+5000-product backup ceiling.
