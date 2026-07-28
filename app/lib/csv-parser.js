@@ -1,7 +1,17 @@
 // ═══════════════════════════════════════════════════════════════════
 // Shared CSV Parser — robust: BOM, auto-delimiter, whitespace trim, skip empty
+//
+// parseCSVRows() is a generator: it yields each row as soon as it's
+// complete instead of building the full 2D array up front. For very
+// large files (50k+ rows), a caller that consumes rows one at a time
+// (e.g. a for-of loop that processes-and-discards) never holds more
+// than one row in memory at a time, and can `break` early without the
+// remainder of the file ever being scanned.
+//
+// parseCSV() keeps the original eager array-returning signature for
+// existing callers, implemented as a thin wrapper over the generator.
 // ═══════════════════════════════════════════════════════════════════
-export function parseCSV(text) {
+export function* parseCSVRows(text) {
   if (text.charCodeAt(0) === 0xfeff) {
     text = text.slice(1);
   }
@@ -21,7 +31,6 @@ export function parseCSV(text) {
     delimiter = ";";
   }
 
-  const rows = [];
   let fields = [];
   let current = "";
   let inQuotes = false;
@@ -42,7 +51,7 @@ export function parseCSV(text) {
       fields.push(current.trim());
       current = "";
       if (fields.some((f) => f !== "")) {
-        rows.push(fields);
+        yield fields;
       }
       fields = [];
     } else {
@@ -52,8 +61,11 @@ export function parseCSV(text) {
   if (current || fields.length > 0) {
     fields.push(current.trim());
     if (fields.some((f) => f !== "")) {
-      rows.push(fields);
+      yield fields;
     }
   }
-  return rows;
+}
+
+export function parseCSV(text) {
+  return [...parseCSVRows(text)];
 }

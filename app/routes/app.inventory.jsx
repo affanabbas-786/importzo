@@ -26,6 +26,63 @@ export const loader = async ({ request }) => {
   return null;
 };
 
+// Batches up to this many SKUs into a single `productVariants(query: ...)`
+// lookup instead of one GraphQL round trip per row — the dominant scaling
+// bottleneck for large (50k+ row) inventory files.
+const SKU_LOOKUP_BATCH_SIZE = 25;
+// Per-batch, how many inventorySetQuantities writes run concurrently.
+// Each write stays 1:1 with a row so per-row success/failure reporting is
+// unaffected — this only shortens wall-clock time.
+const WRITE_CONCURRENCY = 5;
+
+export function buildSkuSearchQuery(skus) {
+  return skus.map((s) => `sku:"${String(s).replace(/"/g, '\\"')}"`).join(" OR ");
+}
+
+async function lookupSingleVariant(shopDomain, version, authHeaders, sku) {
+  const gqlRes = await shopifyFetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
+    method: "POST",
+    headers: authHeaders,
+    body: JSON.stringify({
+      query: `{
+        productVariants(first: 1, query: "sku:${String(sku).replace(/"/g, '\\"')}") {
+          edges { node { id sku inventoryItem { id } } }
+        }
+      }`,
+    }),
+  });
+  if (!gqlRes.ok) throw new Error(`HTTP ${gqlRes.status} looking up SKU`);
+  const gqlData = await gqlRes.json();
+  if (gqlData?.errors?.length) throw new Error(gqlData.errors.map((e) => e.message).join("; "));
+  return gqlData?.data?.productVariants?.edges?.[0]?.node || null;
+}
+
+// Looks up multiple SKUs in one GraphQL call. Returns a Map<sku, variant>
+// for whichever SKUs matched; missing SKUs simply won't have an entry.
+async function lookupVariantsBySku(shopDomain, version, authHeaders, skus) {
+  const query = buildSkuSearchQuery(skus);
+  const gqlRes = await shopifyFetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
+    method: "POST",
+    headers: authHeaders,
+    body: JSON.stringify({
+      query: `query LookupSkus($q: String!) {
+        productVariants(first: ${skus.length}, query: $q) {
+          edges { node { id sku inventoryItem { id } } }
+        }
+      }`,
+      variables: { q: query },
+    }),
+  });
+  if (!gqlRes.ok) throw new Error(`HTTP ${gqlRes.status} looking up SKUs`);
+  const gqlData = await gqlRes.json();
+  if (gqlData?.errors?.length) throw new Error(gqlData.errors.map((e) => e.message).join("; "));
+  const map = new Map();
+  for (const edge of gqlData?.data?.productVariants?.edges || []) {
+    if (edge?.node?.sku) map.set(edge.node.sku, edge.node);
+  }
+  return map;
+}
+
 export const action = async ({ request }) => {
   const { session } = await authenticate.admin(request);
   const formData = await request.formData();
@@ -68,36 +125,12 @@ export const action = async ({ request }) => {
   const results = [];
   let updatedCount = 0, notFoundCount = 0, errorCount = 0;
 
-  for (let i = 0; i < items.length; i++) {
-    const item = items[i];
+  async function processRow(item, row, variant) {
     try {
-      // Look up variant by SKU using GraphQL
-      const gqlRes = await shopifyFetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
-        method: "POST",
-        headers: authHeaders,
-        body: JSON.stringify({
-          query: `{
-            productVariants(first: 1, query: "sku:${item.sku.replace(/"/g, '\\"')}") {
-              edges {
-                node {
-                  id
-                  sku
-                  inventoryItem { id }
-                }
-              }
-            }
-          }`,
-        }),
-      });
-      if (!gqlRes.ok) throw new Error(`HTTP ${gqlRes.status} looking up SKU`);
-      const gqlData = await gqlRes.json();
-      if (gqlData?.errors?.length) throw new Error(gqlData.errors.map((e) => e.message).join("; "));
-      const variant = gqlData?.data?.productVariants?.edges?.[0]?.node;
-
       if (!variant) {
-        results.push({ row: i + 1, sku: item.sku, status: "not_found", error: "SKU not found in store" });
+        results.push({ row, sku: item.sku, status: "not_found", error: "SKU not found in store" });
         notFoundCount++;
-        continue;
+        return;
       }
 
       const inventoryItemId = variant.inventoryItem.id;
@@ -150,13 +183,50 @@ export const action = async ({ request }) => {
         throw new Error(userErrors.map((e) => e.message).join(", "));
       }
 
-      results.push({ row: i + 1, sku: item.sku, status: "updated", quantity: qty });
+      results.push({ row, sku: item.sku, status: "updated", quantity: qty });
       updatedCount++;
     } catch (error) {
-      results.push({ row: i + 1, sku: item.sku, status: "error", error: error.message });
+      results.push({ row, sku: item.sku, status: "error", error: error.message });
       errorCount++;
     }
   }
+
+  for (let i = 0; i < items.length; i += SKU_LOOKUP_BATCH_SIZE) {
+    const batch = items.slice(i, i + SKU_LOOKUP_BATCH_SIZE);
+    const skus = batch.map((it) => it.sku).filter(Boolean);
+
+    let variantMap = new Map();
+    let batchLookupFailed = false;
+    try {
+      if (skus.length) variantMap = await lookupVariantsBySku(shopDomain, version, authHeaders, skus);
+    } catch (err) {
+      // Fall back to per-SKU lookups for this batch rather than failing every row.
+      console.warn(`[importzo] inventory: batch SKU lookup failed, falling back to per-item lookups:`, err?.message);
+      batchLookupFailed = true;
+    }
+
+    for (let j = 0; j < batch.length; j += WRITE_CONCURRENCY) {
+      const slice = batch.slice(j, j + WRITE_CONCURRENCY);
+      await Promise.all(slice.map(async (item, idx) => {
+        const row = i + j + idx + 1;
+        let variant = variantMap.get(item.sku) || null;
+        if (!variant && batchLookupFailed) {
+          try {
+            variant = await lookupSingleVariant(shopDomain, version, authHeaders, item.sku);
+          } catch (err) {
+            results.push({ row, sku: item.sku, status: "error", error: err.message });
+            errorCount++;
+            return;
+          }
+        }
+        await processRow(item, row, variant);
+      }));
+    }
+  }
+
+  // Concurrent writes within a batch can settle out of order; restore the
+  // original row order so the results table still reads top-to-bottom.
+  results.sort((a, b) => a.row - b.row);
 
   const status = errorCount === 0 && notFoundCount === 0 ? "completed" : updatedCount === 0 ? "failed" : "completed_with_errors";
 

@@ -92,8 +92,11 @@ export const action = async ({ request }) => {
     defaultLocationId = locData?.data?.locations?.edges?.[0]?.node?.id || null;
   } catch { /* non-fatal */ }
 
-  for (let i = 0; i < products.length; i++) {
-    const product = products[i];
+  // Bounded concurrency (mirrors migration-worker.server.js's CREATE_CONCURRENCY)
+  // instead of one fully sequential await-per-product loop — meaningfully
+  // shortens wall-clock time for large CSV imports without unbounded parallelism.
+  const CONCURRENCY = 5;
+  async function processProduct(product, i) {
     try {
       const productData = {
         title: product.title || "Untitled Product",
@@ -381,23 +384,30 @@ export const action = async ({ request }) => {
         (warnings.length > 0 ? " (" + warnings.join("; ") + ")" : "") +
         videoNote;
 
-      results.push({
+      return {
         row: i + 1,
         title: product.title,
         status: "success",
         productId: numericId,
         variantCount: productData.variants?.length || 1,
         videoNote: warningNote,
-      });
-      successCount++;
+      };
     } catch (error) {
-      results.push({
+      return {
         row: i + 1,
         title: product.title,
         status: "error",
         error: error.message,
-      });
-      errorCount++;
+      };
+    }
+  }
+
+  for (let i = 0; i < products.length; i += CONCURRENCY) {
+    const slice = products.slice(i, i + CONCURRENCY);
+    const sliceResults = await Promise.all(slice.map((product, idx) => processProduct(product, i + idx)));
+    for (const r of sliceResults) {
+      results.push(r);
+      if (r.status === "success") successCount++; else errorCount++;
     }
   }
 

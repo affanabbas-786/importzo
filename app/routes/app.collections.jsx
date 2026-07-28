@@ -73,8 +73,10 @@ export const action = async ({ request }) => {
   const results = [];
   let successCount = 0, errorCount = 0;
 
-  for (let i = 0; i < collections.length; i++) {
-    const collection = collections[i];
+  // Bounded concurrency (mirrors migration-worker.server.js's CREATE_CONCURRENCY)
+  // instead of one fully sequential await-per-collection loop.
+  const CONCURRENCY = 5;
+  async function processCollection(collection, i) {
     const isSmartType = (collection.collection_type || "").toLowerCase() === "smart";
 
     try {
@@ -113,8 +115,7 @@ export const action = async ({ request }) => {
         };
 
         const col = await gqlCollectionCreate(input);
-        results.push({ row: i + 1, title: collection.title, status: "success", collectionId: col.id.split("/").pop(), type: "smart" });
-        successCount++;
+        return { row: i + 1, title: collection.title, status: "success", collectionId: col.id.split("/").pop(), type: "smart" };
       } else {
         // Custom (manual) collection
         const hasImage = collection.image_url && /^https?:\/\//i.test(collection.image_url.trim());
@@ -128,18 +129,23 @@ export const action = async ({ request }) => {
             // Retry without image
             delete input.image;
             col = await gqlCollectionCreate(input);
-            results.push({ row: i + 1, title: collection.title, status: "success", collectionId: col.id.split("/").pop(), type: "custom", warning: "Collection imported without image - URL not accessible" });
-            successCount++;
-            continue;
+            return { row: i + 1, title: collection.title, status: "success", collectionId: col.id.split("/").pop(), type: "custom", warning: "Collection imported without image - URL not accessible" };
           }
           throw imgErr;
         }
-        results.push({ row: i + 1, title: collection.title, status: "success", collectionId: col.id.split("/").pop(), type: "custom" });
-        successCount++;
+        return { row: i + 1, title: collection.title, status: "success", collectionId: col.id.split("/").pop(), type: "custom" };
       }
     } catch (error) {
-      results.push({ row: i + 1, title: collection.title || "Unknown", status: "error", error: error.message });
-      errorCount++;
+      return { row: i + 1, title: collection.title || "Unknown", status: "error", error: error.message };
+    }
+  }
+
+  for (let i = 0; i < collections.length; i += CONCURRENCY) {
+    const slice = collections.slice(i, i + CONCURRENCY);
+    const sliceResults = await Promise.all(slice.map((collection, idx) => processCollection(collection, i + idx)));
+    for (const r of sliceResults) {
+      results.push(r);
+      if (r.status === "success") successCount++; else errorCount++;
     }
   }
 

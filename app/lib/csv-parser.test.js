@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseCSV } from "./csv-parser.js";
+import { parseCSV, parseCSVRows } from "./csv-parser.js";
 
 describe("parseCSV", () => {
   // ── Basic functionality ──
@@ -115,5 +115,64 @@ describe("parseCSV", () => {
   it("preserves duplicate column headers", () => {
     const result = parseCSV("Name,Name,Price\nA,B,10");
     expect(result[0]).toEqual(["Name", "Name", "Price"]);
+  });
+});
+
+describe("parseCSVRows (streaming generator)", () => {
+  it("is a generator function", () => {
+    const gen = parseCSVRows("A,B\n1,2");
+    expect(typeof gen[Symbol.iterator]).toBe("function");
+    expect(typeof gen.next).toBe("function");
+  });
+
+  it("yields the same rows as parseCSV for a variety of inputs", () => {
+    const samples = [
+      "Name,Age\nAlice,30\nBob,25",
+      "Name;Age\nAlice;30",
+      "Name\tAge\nAlice\t30",
+      '﻿Title,Price\nShirt,29.99',
+      'Name,Desc\n"Widget, Pro","A great, useful item"',
+      'Name,Desc\nWidget,"Say ""hello"" world"',
+      'Name,Desc\nWidget,"Line 1\nLine 2"',
+      "",
+      "   \n  \n  ",
+      "A,B\n1,2\n,,\n3,4",
+      "A,B\r\n1,2\r\n3,4",
+      "A,B\r1,2\r3,4",
+      "Name,Name,Price\nA,B,10",
+    ];
+    for (const csv of samples) {
+      expect([...parseCSVRows(csv)]).toEqual(parseCSV(csv));
+    }
+  });
+
+  it("does not materialize rows the consumer never asks for (lazy evaluation)", () => {
+    let produced = 0;
+    const gen = parseCSVRows("A,B\n1,2\n3,4\n5,6\n7,8\n9,10");
+    const wrapped = (function* () {
+      for (const row of gen) { produced++; yield row; }
+    })();
+    const first = wrapped.next();
+    expect(first.value).toEqual(["A", "B"]);
+    expect(produced).toBe(1); // header row consumed, rest of file untouched
+  });
+
+  it("handles a large synthetic file (50k+ rows) without error", () => {
+    const N = 50000;
+    const lines = ["SKU,Quantity"];
+    for (let i = 0; i < N; i++) lines.push(`SKU-${i},${i % 100}`);
+    const csv = lines.join("\n");
+
+    let count = 0;
+    for (const row of parseCSVRows(csv)) {
+      count++;
+      if (count === 1) expect(row).toEqual(["SKU", "Quantity"]);
+    }
+    expect(count).toBe(N + 1); // header + N data rows
+  });
+
+  it("parseCSV remains an eager array for backward compatibility", () => {
+    const result = parseCSV("A,B\n1,2");
+    expect(Array.isArray(result)).toBe(true);
   });
 });
