@@ -123,6 +123,34 @@ model ProductMapping {
 // Phase 2 — Trust & Safety
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Recurring sync configuration. Tokens are AES-encrypted at rest, same as
+// MigrationJob's. consecutiveFailures exists so a schedule that can no longer
+// authenticate (offline tokens expire — see expiringOfflineAccessTokens in
+// shopify.server.js) disables itself instead of retrying forever.
+model ScheduledSync {
+  id                 String    @id @default(cuid())
+  shop               String // destination shop
+  sourceShop         String
+  sourceToken        String // AES-encrypted
+  destToken          String // AES-encrypted
+  frequency          String    @default("daily") // hourly | daily | weekly
+  hourUtc            Int       @default(3)
+  dayOfWeek          Int? // 0-6 (Sun-Sat), weekly only
+  conflictMode       String    @default("skip")
+  enabled            Boolean   @default(true)
+  nextRunAt          DateTime
+  lastRunAt          DateTime?
+  lastJobId          String?
+  lastError          String?
+  consecutiveFailures Int      @default(0)
+  disabledReason     String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  @@index([enabled, nextRunAt])
+  @@index([shop])
+}
+
 // Pre-transfer snapshot of the DESTINATION store, taken before any write, so
 // a transfer can be undone. Payload is JSON in `data`; `truncated` records
 // whether the store exceeded the snapshot cap, because a merchant must never
