@@ -12,6 +12,7 @@ import { authenticate, apiVersion } from "../shopify.server";
 import prisma from "../db.server";
 import { shopifyGraphql } from "../lib/shopify-api.server";
 import { createBackup, restoreBackup } from "../lib/backup.server";
+import { withPolicy } from "../lib/rate-limit.server";
 
 const LIST_LIMIT = 50;
 
@@ -47,21 +48,25 @@ export const action = async ({ request }) => {
   const version = apiVersion || "2025-10";
 
   if (intent === "create") {
-    const result = await createBackup({
-      prisma, shopifyGraphql,
-      shop: session.shop, token: session.accessToken, version,
-      jobId: formData.get("jobId") || null,
-    });
-    if (!result.ok) {
-      return Response.json({ ok: false, error: result.error, backupId: result.backup?.id || null }, { status: 502 });
-    }
-    return Response.json({
-      ok: true,
-      backupId: result.backup.id,
-      status: result.backup.status,
-      truncated: result.truncated,
-      productCount: result.backup.productCount,
-      collectionCount: result.backup.collectionCount,
+    // Snapshots the entire destination catalog — capped at one at a time
+    // per shop so a click-happy merchant can't saturate the shared VPS.
+    return withPolicy({ policyName: "backup", shop: session.shop }, async () => {
+      const result = await createBackup({
+        prisma, shopifyGraphql,
+        shop: session.shop, token: session.accessToken, version,
+        jobId: formData.get("jobId") || null,
+      });
+      if (!result.ok) {
+        return Response.json({ ok: false, error: result.error, backupId: result.backup?.id || null }, { status: 502 });
+      }
+      return Response.json({
+        ok: true,
+        backupId: result.backup.id,
+        status: result.backup.status,
+        truncated: result.truncated,
+        productCount: result.backup.productCount,
+        collectionCount: result.backup.collectionCount,
+      });
     });
   }
 
@@ -76,20 +81,23 @@ export const action = async ({ request }) => {
       return Response.json({ ok: false, error: "Backup not found" }, { status: 404 });
     }
 
-    const result = await restoreBackup({
-      prisma, shopifyGraphql, backup,
-      token: session.accessToken, version,
-    });
+    // Writes back over every product in the snapshot — one at a time.
+    return withPolicy({ policyName: "restore", shop: session.shop }, async () => {
+      const result = await restoreBackup({
+        prisma, shopifyGraphql, backup,
+        token: session.accessToken, version,
+      });
 
-    return Response.json({
-      ok: result.ok,
-      error: result.error || null,
-      restored: result.restored,
-      failed: result.failed,
-      skipped: result.skipped,
-      partial: !!result.partial,
-      errors: (result.errors || []).slice(0, 50),
-    }, { status: result.ok || result.restored > 0 ? 200 : 400 });
+      return Response.json({
+        ok: result.ok,
+        error: result.error || null,
+        restored: result.restored,
+        failed: result.failed,
+        skipped: result.skipped,
+        partial: !!result.partial,
+        errors: (result.errors || []).slice(0, 50),
+      }, { status: result.ok || result.restored > 0 ? 200 : 400 });
+    });
   }
 
   return Response.json({ ok: false, error: "Unknown intent" }, { status: 400 });

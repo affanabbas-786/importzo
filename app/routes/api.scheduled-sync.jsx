@@ -14,6 +14,7 @@ import prisma from "../db.server";
 import { encrypt } from "../utils/encryption.server";
 import { getSavedSourceStore } from "../lib/safe-db";
 import { computeNextRun, isValidFrequency, FREQUENCY } from "../lib/scheduler.server";
+import { enforcePolicy } from "../lib/rate-limit.server";
 
 // Never select the token columns — see note above.
 const SAFE_FIELDS = {
@@ -39,6 +40,14 @@ export const action = async ({ request }) => {
   }
 
   const { session } = await authenticate.admin(request);
+
+  // Cheap CRUD, but still rate-limited so it can't be used as a write loop.
+  // Released immediately: these are short DB operations with no meaningful
+  // concurrency cost.
+  const gate = enforcePolicy({ policyName: "scheduleAdmin", shop: session.shop });
+  if (!gate.ok) return gate.response;
+  gate.release();
+
   const formData = await request.formData();
   const intent = formData.get("intent");
 

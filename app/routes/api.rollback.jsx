@@ -15,6 +15,7 @@ import prisma from "../db.server";
 import { shopifyGraphql } from "../lib/shopify-api.server";
 import { getRollbackPlan, rollbackJob, DEFAULT_ROLLBACK_WINDOW_HOURS } from "../lib/rollback.server";
 import { createLogBuffer } from "../lib/transfer-log.server";
+import { withPolicy } from "../lib/rate-limit.server";
 
 export const loader = async ({ request }) => {
   const { session } = await authenticate.admin(request);
@@ -70,27 +71,30 @@ export const action = async ({ request }) => {
   const jobId = (formData.get("jobId") || "").trim();
   if (!jobId) return Response.json({ ok: false, error: "Missing jobId" }, { status: 400 });
 
-  const logBuffer = createLogBuffer({ prisma, jobId, shop: session.shop });
+  // Deletes products — never run two rollbacks for one shop concurrently.
+  return withPolicy({ policyName: "rollback", shop: session.shop }, async () => {
+    const logBuffer = createLogBuffer({ prisma, jobId, shop: session.shop });
 
-  const result = await rollbackJob({
-    prisma, shopifyGraphql, jobId,
-    token: session.accessToken,
-    version: apiVersion || "2025-10",
-    shop: session.shop,
-    logBuffer,
-  });
+    const result = await rollbackJob({
+      prisma, shopifyGraphql, jobId,
+      token: session.accessToken,
+      version: apiVersion || "2025-10",
+      shop: session.shop,
+      logBuffer,
+    });
 
-  // Blockers mean nothing was attempted — that's a client-side precondition
-  // failure, distinct from a rollback that ran and partially failed.
-  if (result.blockers?.length) {
-    return Response.json({ ok: false, blockers: result.blockers, deleted: 0, failed: 0, preserved: 0 }, { status: 409 });
-  }
+    // Blockers mean nothing was attempted — that's a client-side precondition
+    // failure, distinct from a rollback that ran and partially failed.
+    if (result.blockers?.length) {
+      return Response.json({ ok: false, blockers: result.blockers, deleted: 0, failed: 0, preserved: 0 }, { status: 409 });
+    }
 
-  return Response.json({
-    ok: result.ok,
-    deleted: result.deleted,
-    failed: result.failed,
-    preserved: result.preserved,
-    errors: (result.errors || []).slice(0, 50),
+    return Response.json({
+      ok: result.ok,
+      deleted: result.deleted,
+      failed: result.failed,
+      preserved: result.preserved,
+      errors: (result.errors || []).slice(0, 50),
+    });
   });
 };

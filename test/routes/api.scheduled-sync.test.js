@@ -53,6 +53,7 @@ vi.mock("../../app/lib/safe-db", () => ({
 }));
 
 import { loader, action } from "../../app/routes/api.scheduled-sync.jsx";
+import { __resetRateLimitState } from "../../app/lib/rate-limit.server.js";
 // Lives in lib, not the route: a route module may only export
 // loader/action/headers/middleware, or React Router bundles the rest — and
 // everything it imports — into the client build.
@@ -88,6 +89,7 @@ describe("api.scheduled-sync", () => {
   let originalEncryptionKey;
 
   beforeEach(() => {
+    __resetRateLimitState();
     db.schedules = [];
     db.jobs = [];
     savedSourceStore.value = null;

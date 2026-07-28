@@ -7,6 +7,7 @@ import { encrypt, decrypt } from "../utils/encryption.server";
 import prisma from "../db.server";
 import { runMigrationWorker } from "../lib/migration-worker.server";
 import { getSavedSourceStore } from "../lib/safe-db";
+import { enforcePolicy, POLICIES } from "../lib/rate-limit.server";
 
 export const action = async ({ request }) => {
   if (request.method !== "POST") {
@@ -14,6 +15,15 @@ export const action = async ({ request }) => {
   }
 
   const { session } = await authenticate.admin(request);
+
+  // Rate limit job creation. Note the concurrency cap is enforced against
+  // the DB below rather than an in-process slot: the worker is
+  // fire-and-forget, so it outlives this request — releasing a slot when the
+  // response returns would cap nothing.
+  const gate = enforcePolicy({ policyName: "migrationJob", shop: session.shop });
+  if (!gate.ok) return gate.response;
+  gate.release();
+
   const formData = await request.formData();
 
   const targetShop = session.shop;
@@ -52,6 +62,22 @@ export const action = async ({ request }) => {
     return Response.json({ ok: false, error: "Missing source store credentials" }, { status: 400 });
   }
   if (!sourceShop.includes(".")) sourceShop = sourceShop + ".myshopify.com";
+
+  // Real concurrency control for background work: refuse to queue another
+  // migration while this shop already has one in flight. Without this, a
+  // merchant could start N simultaneous full-catalog migrations and starve
+  // every other shop on the box — the exact scenario this item is for.
+  const inFlight = await prisma.migrationJob.count({
+    where: { shop: targetShop, status: { in: ["PENDING", "RUNNING"] } },
+  });
+  if (inFlight >= POLICIES.migrationJob.maxConcurrent) {
+    return Response.json({
+      ok: false,
+      error: `This store already has ${inFlight} migration(s) in progress. Wait for them to finish before starting another.`,
+      inFlight,
+      maxConcurrent: POLICIES.migrationJob.maxConcurrent,
+    }, { status: 429, headers: { "Retry-After": "60", "Cache-Control": "no-store" } });
+  }
 
   const job = await prisma.migrationJob.create({
     data: {

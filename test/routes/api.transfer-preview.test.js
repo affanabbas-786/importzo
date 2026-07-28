@@ -16,6 +16,7 @@ vi.mock("../../app/lib/safe-db", () => ({
 }));
 
 import { action } from "../../app/routes/api.transfer-preview.jsx";
+import { __resetRateLimitState } from "../../app/lib/rate-limit.server.js";
 
 const SOURCE_SHOP = "source-shop.myshopify.com";
 const DEST_SHOP = "dest-shop.myshopify.com";
@@ -56,6 +57,7 @@ function makeFetch({ sourceProducts = [], destProducts = [] } = {}) {
 
 describe("api.transfer-preview", () => {
   beforeEach(() => {
+    __resetRateLimitState();
     savedSourceStore.value = null;
     global.fetch = vi.fn();
   });

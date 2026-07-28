@@ -14,6 +14,7 @@ import { decrypt } from "../utils/encryption.server";
 import { shopifyGraphql } from "../lib/shopify-api.server";
 import { getSavedSourceStore } from "../lib/safe-db";
 import { computeTransferDiff } from "../lib/transfer-diff.server";
+import { withPolicy } from "../lib/rate-limit.server";
 
 // Preview only needs matching + comparison fields — not descriptions,
 // variants or media.
@@ -90,29 +91,33 @@ export const action = async ({ request }) => {
   }
   if (!sourceShop.includes(".")) sourceShop = `${sourceShop}.myshopify.com`;
 
-  try {
-    const { products, truncated: sourceTruncated } = await fetchSourceProductsForPreview(sourceShop, sourceToken, version);
+  // Reads both stores in full. Non-mutating, but expensive enough that a
+  // loop of previews could starve other shops on a shared box.
+  return withPolicy({ policyName: "preview", shop: session.shop }, async () => {
+    try {
+      const { products, truncated: sourceTruncated } = await fetchSourceProductsForPreview(sourceShop, sourceToken, version);
 
-    const diff = await computeTransferDiff({
-      shopifyGraphql,
-      destShop: session.shop,
-      destToken: session.accessToken,
-      version,
-      sourceProducts: products,
-      conflictMode,
-    });
+      const diff = await computeTransferDiff({
+        shopifyGraphql,
+        destShop: session.shop,
+        destToken: session.accessToken,
+        version,
+        sourceProducts: products,
+        conflictMode,
+      });
 
-    return Response.json({
-      ok: true,
-      sourceShop,
-      destShop: session.shop,
-      conflictMode,
-      sourceProductCount: products.length,
-      sourceTruncated,
-      ...diff,
-    });
-  } catch (err) {
-    console.error("[api/transfer-preview] failed:", err?.message);
-    return Response.json({ ok: false, error: err?.message || String(err) }, { status: 502 });
-  }
+      return Response.json({
+        ok: true,
+        sourceShop,
+        destShop: session.shop,
+        conflictMode,
+        sourceProductCount: products.length,
+        sourceTruncated,
+        ...diff,
+      });
+    } catch (err) {
+      console.error("[api/transfer-preview] failed:", err?.message);
+      return Response.json({ ok: false, error: err?.message || String(err) }, { status: 502 });
+    }
+  });
 };

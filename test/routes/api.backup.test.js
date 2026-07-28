@@ -36,6 +36,9 @@ vi.mock("../../app/db.server", () => ({
 }));
 
 import { loader, action } from "../../app/routes/api.backup.jsx";
+// The route uses the real limiter (module-level state), so it must be reset
+// between tests or counts leak across cases.
+import { __resetRateLimitState, POLICIES } from "../../app/lib/rate-limit.server.js";
 
 const SNAPSHOT = {
   version: 1,
@@ -73,6 +76,7 @@ describe("api.backup", () => {
   beforeEach(() => {
     db.backups = [];
     global.fetch = vi.fn();
+    __resetRateLimitState();
   });
 
   afterEach(() => {
@@ -185,6 +189,54 @@ describe("api.backup", () => {
       expect(body.ok).toBe(false);
       expect(body.error).toMatch(/expired/i);
       expect(global.fetch).not.toHaveBeenCalled();
+    });
+  });
+
+  // Phase 3: proves the limiter is actually wired into this route, not just
+  // unit-tested in isolation.
+  describe("rate limiting", () => {
+    function okSnapshotFetch() {
+      return vi.fn(async (url, opts) => {
+        const query = JSON.parse(opts.body).query || "";
+        if (query.includes("BackupProducts")) {
+          return jsonResponse({ data: { products: { edges: [], pageInfo: { hasNextPage: false } } } });
+        }
+        return jsonResponse({ data: { collections: { edges: [], pageInfo: { hasNextPage: false } } } });
+      });
+    }
+
+    it("429s once the hourly backup limit is exhausted", async () => {
+      global.fetch = okSnapshotFetch();
+      for (let i = 0; i < POLICIES.backup.limit; i++) {
+        const res = await action({ request: mockActionRequest({ intent: "create" }) });
+        expect(res.status).toBe(200);
+      }
+
+      const blocked = await action({ request: mockActionRequest({ intent: "create" }) });
+      expect(blocked.status).toBe(429);
+      expect(blocked.headers.get("Retry-After")).toBeTruthy();
+      expect((await blocked.json()).error).toMatch(/rate limit/i);
+    });
+
+    it("releases the concurrency slot after a request, so sequential calls still work", async () => {
+      global.fetch = okSnapshotFetch();
+      const first = await action({ request: mockActionRequest({ intent: "create" }) });
+      const second = await action({ request: mockActionRequest({ intent: "create" }) });
+
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+    });
+
+    it("releases the slot even when the snapshot fails, so a failure can't wedge the shop", async () => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      global.fetch = vi.fn(async () => jsonResponse({}, { status: 403 }));
+      const failed = await action({ request: mockActionRequest({ intent: "create" }) });
+      expect(failed.status).toBe(502);
+
+      // A subsequent request must not be blocked by a leaked slot.
+      global.fetch = okSnapshotFetch();
+      const next = await action({ request: mockActionRequest({ intent: "create" }) });
+      expect(next.status).toBe(200);
     });
   });
 

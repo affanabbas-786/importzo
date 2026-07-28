@@ -25,6 +25,7 @@ vi.mock("../../app/db.server", () => ({
 }));
 
 import { loader, action } from "../../app/routes/api.rollback.jsx";
+import { __resetRateLimitState } from "../../app/lib/rate-limit.server.js";
 
 function seedJob(overrides = {}) {
   db.job = {
@@ -51,6 +52,7 @@ function seedMapping(sourceProductId, action, overrides = {}) {
 
 describe("api.rollback", () => {
   beforeEach(() => {
+    __resetRateLimitState();
     db.job = null;
     db.mappings = [];
     db.logEntries = [];
