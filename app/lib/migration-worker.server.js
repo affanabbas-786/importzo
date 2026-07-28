@@ -114,7 +114,12 @@ async function uploadNonImageMedia(targetShop, targetToken, productGid, media, v
 }
 
 async function copyMetafields(sourceShop, sourceToken, targetShop, targetToken, sourceGid, targetGid, version) {
-  const resourceType = (sourceGid.split("/")[4] || "Product").toLowerCase();
+  // Derive resource type from GID (e.g. gid://shopify/Product/123 → "product").
+  // Bug fix: index 3 is the type segment; index 4 is the numeric ID
+  // ("gid:","","shopify","Product","123") — the off-by-one meant this built
+  // an invalid query field (the numeric ID itself), so metafield copying
+  // silently failed on every product and was swallowed by the catch below.
+  const resourceType = (sourceGid.split("/")[3] || "Product").toLowerCase();
   const query = `#graphql
     query Metafields($id: ID!) {
       ${resourceType}(id: $id) {

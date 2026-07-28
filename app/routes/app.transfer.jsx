@@ -432,8 +432,12 @@ export const action = async ({ request }) => {
     const warnings = [];
     let copied = 0;
     try {
-      // Derive resource type from GID (e.g. gid://shopify/Product/123 → "product")
-      const resourceType = (sourceOwnerGid.split("/")[4] || "Product").toLowerCase();
+      // Derive resource type from GID (e.g. gid://shopify/Product/123 → "product").
+      // Bug fix: index 3 is the type segment; index 4 is the numeric ID
+      // ("gid:","","shopify","Product","123") — the off-by-one meant this
+      // built an invalid query field (the numeric ID itself), so every
+      // metafield copy silently failed and was swallowed by the catch below.
+      const resourceType = (sourceOwnerGid.split("/")[3] || "Product").toLowerCase();
       const query = `#graphql
         query Metafields($id: ID!) {
           ${resourceType}(id: $id) {
