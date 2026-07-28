@@ -66,15 +66,15 @@ function baseJob(overrides = {}) {
   };
 }
 
-function productNode(id, { handle = `p-${id}`, title = `Product ${id}` } = {}) {
+function productNode(id, { handle = `p-${id}`, title = `Product ${id}`, isGiftCard = false, variants = { edges: [] } } = {}) {
   return {
     id: `gid://shopify/Product/${id}`,
     title, handle,
     descriptionHtml: "", vendor: "", productType: "", tags: [], status: "ACTIVE", publishedAt: "2024-01-01",
-    giftCard: false,
+    isGiftCard,
     options: [],
     images: { edges: [] },
-    variants: { edges: [] },
+    variants,
   };
 }
 
@@ -85,7 +85,7 @@ function productsPageResponse(nodes, hasNextPage = false, endCursor = null) {
 const emptyMediaResponse = jsonResponse({ data: { product: { media: { nodes: [] } } } });
 const emptyMetafieldsResponse = (resourceKey) => jsonResponse({ data: { [resourceKey]: { metafields: { edges: [] } } } });
 
-function makeFetch({ productPages, findProductByHandleResult = null, productCreateHandler, metafieldsHandler } = {}) {
+function makeFetch({ productPages, findProductByHandleResult = null, productCreateHandler, metafieldsHandler, onSourceProductsQuery } = {}) {
   let pageCallIndex = 0;
   return vi.fn(async (url, opts) => {
     const body = opts?.body ? JSON.parse(opts.body) : {};
@@ -93,6 +93,7 @@ function makeFetch({ productPages, findProductByHandleResult = null, productCrea
 
     if (query.includes("productsCount")) return jsonResponse({ data: { productsCount: { count: productPages.flat().length } } });
     if (query.includes("query SourceProducts")) {
+      onSourceProductsQuery?.(query);
       const page = productPages[pageCallIndex] || { nodes: [], hasNextPage: false };
       pageCallIndex++;
       return productsPageResponse(page.nodes, page.hasNextPage, page.endCursor || null);
@@ -270,5 +271,82 @@ describe("runMigrationWorker", () => {
     const mappings = fakePrisma.__getMappings();
     expect(mappings[0].destProductId).toBe("existing-999");
     expect(mappings[0].status).toBe("DONE");
+  });
+
+  // Regression coverage for a production bug: the source-product query used
+  // to request Product.giftCard and ProductVariant.fulfillmentService, neither
+  // of which exists on the pinned API version (2025-10) — verified directly
+  // against shopify.dev's GraphQL reference. A single invalid field makes the
+  // *entire* query fail to parse, so every page fetch failed and the whole
+  // migration job aborted before transferring anything.
+  describe("SourceProducts query field validity (regression for the giftCard/fulfillmentService bug)", () => {
+    it("only requests fields that are valid on the pinned API version", async () => {
+      fakePrisma = createFakePrisma(baseJob());
+      let queryText = null;
+      global.fetch = makeFetch({
+        productPages: [{ nodes: [productNode(1)], hasNextPage: false }],
+        onSourceProductsQuery: (query) => { queryText = query; },
+      });
+
+      await runMigrationWorker("job-1");
+
+      expect(queryText).not.toBeNull();
+      // Product has no "giftCard" field (only ProductInput does, for mutations) — isGiftCard is correct.
+      expect(queryText).toMatch(/\bisGiftCard\b/);
+      expect(queryText).not.toMatch(/\bgiftCard\b/);
+      // ProductVariant.fulfillmentService was removed in API version 2022-10.
+      expect(queryText).not.toMatch(/\bfulfillmentService\b/);
+      // ProductVariant.requiresShipping moved onto InventoryItem — it must be
+      // nested inside the same line/block as inventoryItem, not a sibling of
+      // inventoryPolicy (where it used to incorrectly live).
+      const inventoryItemLine = queryText.split("\n").find((l) => l.includes("inventoryItem {"));
+      const inventoryPolicyLine = queryText.split("\n").find((l) => l.trim().startsWith("inventoryPolicy"));
+      expect(inventoryItemLine).toContain("requiresShipping");
+      expect(inventoryPolicyLine).not.toContain("requiresShipping");
+    });
+
+    it("refuses to transfer a gift card product, reading the corrected isGiftCard field", async () => {
+      fakePrisma = createFakePrisma(baseJob());
+      global.fetch = makeFetch({
+        productPages: [{ nodes: [productNode(1, { isGiftCard: true })], hasNextPage: false }],
+      });
+
+      await runMigrationWorker("job-1");
+
+      const job = fakePrisma.__getJob("job-1");
+      expect(job.failedProducts).toBe(1);
+      const errorLog = JSON.parse(job.errorLog);
+      expect(errorLog[0].error).toMatch(/Gift card products cannot be transferred/);
+    });
+
+    it("reads requiresShipping from the InventoryItem sub-selection into the destination variant input", async () => {
+      fakePrisma = createFakePrisma(baseJob());
+      let createdInput = null;
+      global.fetch = makeFetch({
+        productPages: [{
+          nodes: [productNode(1, {
+            variants: {
+              edges: [{
+                node: {
+                  title: "Default", sku: "SKU-1", price: "10.00", taxable: true,
+                  inventoryItem: { measurement: { weight: { value: 1, unit: "KILOGRAMS" } }, requiresShipping: false },
+                  inventoryPolicy: "DENY",
+                  selectedOptions: [],
+                },
+              }],
+            },
+          })],
+          hasNextPage: false,
+        }],
+        productCreateHandler: (body) => {
+          createdInput = body.variables.input;
+          return jsonResponse({ data: { productCreate: { product: { id: "gid://shopify/Product/new-1" }, userErrors: [] } } });
+        },
+      });
+
+      await runMigrationWorker("job-1");
+
+      expect(createdInput.variants[0].requiresShipping).toBe(false);
+    });
   });
 });

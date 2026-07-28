@@ -176,7 +176,7 @@ async function transferOneProduct(src, ctx) {
   const { targetShop, targetToken, sourceShop, sourceToken, version, conflictMode } = ctx;
   const srcId = src.id?.split("/").pop();
 
-  if (src.giftCard || src.gift_card) throw new Error("Gift card products cannot be transferred");
+  if (src.isGiftCard || src.giftCard || src.gift_card) throw new Error("Gift card products cannot be transferred");
 
   // Conflict detection
   if (src.handle && conflictMode !== "create") {
@@ -243,7 +243,9 @@ async function transferOneProduct(src, ctx) {
       if (ip) gv.inventoryPolicy = ip.toUpperCase();
       const fs = v.fulfillmentService || v.fulfillment_service;
       if (fs) gv.fulfillmentService = fs === "gift_card" ? "MANUAL" : fs.toUpperCase();
-      if (v.requiresShipping !== undefined) gv.requiresShipping = v.requiresShipping;
+      // requiresShipping now comes from InventoryItem, not the variant itself (see PRODUCT_QUERY).
+      const rs = v.inventoryItem?.requiresShipping ?? v.requiresShipping;
+      if (rs !== undefined) gv.requiresShipping = rs;
       else if (v.requires_shipping !== undefined) gv.requiresShipping = v.requires_shipping !== false;
       if (v.taxable !== undefined) gv.taxable = v.taxable;
       return gv;
@@ -290,19 +292,26 @@ async function transferOneProduct(src, ctx) {
 // Source product pagination
 // ────────────────────────────────────────────────────────────────────────────
 
+// Field-validity note (verified against the pinned API version, 2025-10, via
+// shopify.dev's GraphQL reference): Product has no "giftCard" field — the
+// correct name is "isGiftCard". ProductVariant.fulfillmentService was removed
+// in 2022-10 with no query-side replacement. ProductVariant.requiresShipping
+// moved onto InventoryItem. Any one invalid field makes the *entire* query
+// fail to parse, so this wasn't a partial-data problem — every single page
+// fetch failed and the whole migration job aborted immediately.
 const PRODUCT_QUERY = `#graphql
   query SourceProducts($after: String) {
     products(first: ${BATCH_SIZE}, after: $after) {
       edges { cursor node {
         id title handle
         descriptionHtml vendor productType tags status publishedAt
-        giftCard
+        isGiftCard
         options { name }
         images(first: 250) { edges { node { url altText } } }
         variants(first: 100) { edges { node {
           title sku price compareAtPrice barcode taxable
-          inventoryItem { measurement { weight { value unit } } }
-          inventoryPolicy fulfillmentService requiresShipping
+          inventoryItem { measurement { weight { value unit } } requiresShipping }
+          inventoryPolicy
           selectedOptions { name value }
         } } }
       } }
