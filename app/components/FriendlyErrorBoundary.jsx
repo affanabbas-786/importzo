@@ -12,6 +12,7 @@
 // everything else.
 // ═══════════════════════════════════════════════════════════════════
 
+import PropTypes from "prop-types";
 import { isRouteErrorResponse, Link } from "react-router";
 
 const P = "#17320A";
@@ -31,11 +32,16 @@ function toMessage(error) {
 
 // Shopify's boundary.error() renders a div with dangerouslySetInnerHTML
 // for auth/redirect responses — we replicate it here to stay client-safe.
-function isShopifyAuthResponse(error) {
+// Only treat it as an auth HTML response when the data is a non-empty string
+// that looks like HTML (starts with "<"), so we never render JSON or plain
+// error messages as innerHTML.
+function isShopifyAuthHtmlResponse(error) {
   if (!error) return false;
-  if (isRouteErrorResponse(error)) return true;
-  const name = error?.constructor?.name;
-  return name === "ErrorResponse" || name === "ErrorResponseImpl";
+  const isRouteErr = isRouteErrorResponse(error);
+  const isErrResponse = error?.constructor?.name === "ErrorResponse" || error?.constructor?.name === "ErrorResponseImpl";
+  if (!isRouteErr && !isErrResponse) return false;
+  const data = error?.data;
+  return typeof data === "string" && data.trimStart().startsWith("<");
 }
 
 export function FriendlyErrorBoundary({
@@ -44,10 +50,23 @@ export function FriendlyErrorBoundary({
   message = "Please try again. If the problem continues, contact support and we'll help you get back on track.",
   error,
 }) {
-  // Auth / redirect responses from Shopify must be rendered verbatim so
-  // their App Bridge redirect script runs in the embedded iframe.
-  if (isShopifyAuthResponse(error) && typeof error?.data === "string") {
-    return <div dangerouslySetInnerHTML={{ __html: error.data || "Handling response" }} />;
+  // Auth / redirect responses from Shopify (e.g. the bounce-page App Bridge
+  // HTML) must be rendered verbatim so the embedded redirect script runs.
+  // We only do this when the data is a non-empty HTML string to avoid
+  // rendering JSON error objects or plain text as HTML.
+  // Render HTML auth bounce pages verbatim so App Bridge redirect script runs.
+  // Fall back to a non-empty placeholder so Shopify's empty-body redirect
+  // responses still render *something* rather than leaving the iframe blank.
+  if (isShopifyAuthHtmlResponse(error)) {
+    return <div dangerouslySetInnerHTML={{ __html: error.data || "" }} />;
+  }
+  // Non-HTML Shopify route error (e.g. empty redirect body) — render the
+  // bounce div so the iframe isn't white while Shopify completes the redirect.
+  const isShopifyErr = isRouteErrorResponse(error) ||
+    error?.constructor?.name === "ErrorResponse" ||
+    error?.constructor?.name === "ErrorResponseImpl";
+  if (isShopifyErr) {
+    return <div dangerouslySetInnerHTML={{ __html: error?.data || "" }} />;
   }
 
   const detail = toMessage(error);
@@ -108,3 +127,10 @@ export function FriendlyErrorBoundary({
     </div>
   );
 }
+
+FriendlyErrorBoundary.propTypes = {
+  heading: PropTypes.string,
+  title: PropTypes.string,
+  message: PropTypes.string,
+  error: PropTypes.oneOfType([PropTypes.object, PropTypes.string]),
+};

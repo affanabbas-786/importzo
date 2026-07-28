@@ -30,8 +30,8 @@ export default function PrivacyPolicy() {
         {/* Intro */}
         <section className="px-6 py-5">
           <p className="text-sm text-[#202223] leading-relaxed">
-            Dazzle Tech LLC ("<strong>we</strong>", "<strong>us</strong>", "<strong>our</strong>") operates
-            the Importzo Shopify application ("<strong>the App</strong>"). This Privacy Policy explains
+            Dazzle Tech LLC (&quot;<strong>we</strong>&quot;, &quot;<strong>us</strong>&quot;, &quot;<strong>our</strong>&quot;) operates
+            the Importzo Shopify application (&quot;<strong>the App</strong>&quot;). This Privacy Policy explains
             what information we collect when you install and use the App, how we use it, and your rights
             regarding that information.
           </p>
@@ -75,7 +75,7 @@ export default function PrivacyPolicy() {
             <li className="flex gap-2"><span className="text-[#6d7175] select-none">·</span><span>Displaying your activity history within the App dashboard</span></li>
           </ul>
           <p className="mt-3 text-sm text-[#202223] leading-relaxed">
-            We do <strong>not</strong> use your data for advertising, profiling, or any purpose unrelated to the App's core functionality.
+            We do <strong>not</strong> use your data for advertising, profiling, or any purpose unrelated to the App&apos;s core functionality.
           </p>
         </section>
 
@@ -97,7 +97,7 @@ export default function PrivacyPolicy() {
             Your shop data (domain, access token, activity history) is retained for as long as the App is installed. When you uninstall the App, Shopify sends us a mandatory <code className="bg-[#f6f6f7] px-1 rounded text-xs">app/uninstalled</code> webhook. Upon receiving this webhook, all data associated with your shop is permanently deleted from our database within 48 hours.
           </p>
           <p className="mt-2 text-sm text-[#202223] leading-relaxed">
-            We also process Shopify's GDPR mandatory webhooks:
+            We also process Shopify&apos;s GDPR mandatory webhooks:
           </p>
           <ul className="mt-2 space-y-1 text-sm text-[#202223] leading-relaxed list-none">
             <li className="flex gap-2"><span className="text-[#6d7175] select-none">·</span><span><code className="bg-[#f6f6f7] px-1 rounded text-xs">customers/data_request</code> — we confirm we hold no personal customer data.</span></li>

@@ -71,3 +71,35 @@ model TransferSession {
   expiresAt    DateTime
   createdAt    DateTime @default(now())
 }
+
+// Tracks async background product-transfer jobs so they survive HTTP timeouts.
+model MigrationJob {
+  id                String   @id @default(cuid())
+  shop              String   // destination shop domain
+  sourceShop        String
+  sourceToken       String   // AES-encrypted
+  destToken         String   // AES-encrypted
+  apiVersion        String   @default("2025-10")
+  status            String   @default("PENDING") // PENDING | RUNNING | COMPLETED | FAILED
+  totalProducts     Int      @default(0)
+  processedProducts Int      @default(0)
+  failedProducts    Int      @default(0)
+  lastCursor        String?  // GraphQL cursor for resume
+  conflictMode      String   @default("skip") // skip | overwrite | create
+  errorLog          String   @default("[]")   // JSON array of {sourceId,title,error}
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+// Idempotency map: prevents re-creating products that already succeeded on resume.
+model ProductMapping {
+  id              String  @id @default(cuid())
+  jobId           String
+  sourceProductId String
+  destProductId   String?
+  status          String  // DONE | FAILED
+  error           String?
+
+  @@unique([jobId, sourceProductId])
+  @@index([jobId])
+}

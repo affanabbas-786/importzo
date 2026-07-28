@@ -33,18 +33,36 @@ export const action = async ({ request }) => {
   const version = apiVersion || "2025-10";
   const authHeaders = { "Content-Type": "application/json", "X-Shopify-Access-Token": accessToken };
 
-  const items = JSON.parse(formData.get("items") || "[]");
+  let items;
+  try {
+    items = JSON.parse(formData.get("items") || "[]");
+  } catch {
+    return { results: [], updatedCount: 0, notFoundCount: 0, errorCount: 1, status: "failed", error: "Invalid inventory data" };
+  }
   const fileName = formData.get("fileName") || "inventory.csv";
 
-  // Fetch locations
+  // Fetch locations via GraphQL
   const locMap = {};
-  const locRes = await fetch(`https://${shopDomain}/admin/api/${version}/locations.json`, {
-    headers: { "X-Shopify-Access-Token": accessToken },
-  });
-  const locData = await locRes.json();
-  (locData.locations || []).forEach((loc) => {
-    locMap[loc.name.toLowerCase()] = `gid://shopify/Location/${loc.id}`;
-  });
+  try {
+    const locRes = await fetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({ query: `{ locations(first: 50) { edges { node { id name } } } }` }),
+    });
+    if (!locRes.ok) {
+      console.error(`[importzo] inventory: locations fetch HTTP ${locRes.status}`);
+    } else {
+      const locData = await locRes.json();
+      if (locData?.errors?.length) {
+        console.error(`[importzo] inventory: locations GraphQL errors:`, JSON.stringify(locData.errors));
+      }
+      (locData?.data?.locations?.edges || []).forEach(({ node }) => {
+        locMap[node.name.toLowerCase()] = node.id;
+      });
+    }
+  } catch (locErr) {
+    console.error(`[importzo] inventory: locations fetch failed:`, locErr?.message);
+  }
 
   const results = [];
   let updatedCount = 0, notFoundCount = 0, errorCount = 0;
@@ -70,7 +88,9 @@ export const action = async ({ request }) => {
           }`,
         }),
       });
+      if (!gqlRes.ok) throw new Error(`HTTP ${gqlRes.status} looking up SKU`);
       const gqlData = await gqlRes.json();
+      if (gqlData?.errors?.length) throw new Error(gqlData.errors.map((e) => e.message).join("; "));
       const variant = gqlData?.data?.productVariants?.edges?.[0]?.node;
 
       if (!variant) {
@@ -121,7 +141,9 @@ export const action = async ({ request }) => {
         }),
       });
 
+      if (!setRes.ok) throw new Error(`HTTP ${setRes.status} setting inventory`);
       const setData = await setRes.json();
+      if (setData?.errors?.length) throw new Error(setData.errors.map((e) => e.message).join("; "));
       const userErrors = setData?.data?.inventorySetQuantities?.userErrors;
       if (userErrors && userErrors.length > 0) {
         throw new Error(userErrors.map((e) => e.message).join(", "));
@@ -285,8 +307,11 @@ export default function InventoryUpdatePage() {
             <div className="bg-white rounded-xl border border-gray-200 p-6 sm:p-8 shadow-sm">
               <h2 className="text-lg font-semibold text-gray-900 mb-6">Upload inventory CSV</h2>
               <div
+                role="button"
+                tabIndex={0}
                 className={`border-2 border-dashed rounded-xl p-8 sm:p-12 text-center cursor-pointer transition-all ${dragOver ? "border-green-800 bg-green-50/50" : "border-gray-300 hover:border-gray-400 hover:bg-gray-50/50"}`}
                 onDragOver={(e) => { e.preventDefault(); setDragOver(true); }} onDragLeave={() => setDragOver(false)} onDrop={handleDrop} onClick={() => fileInputRef.current?.click()}
+                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInputRef.current?.click(); } }}
               >
                 <div className="flex flex-col items-center gap-4">
                   <div style={{ width: 64, height: 64, borderRadius: "50%" }} className={`flex items-center justify-center ${dragOver ? "bg-green-100" : "bg-gray-100"}`}>

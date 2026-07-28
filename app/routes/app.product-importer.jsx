@@ -79,6 +79,18 @@ export const action = async ({ request }) => {
   const accessToken = session.accessToken;
   const version = apiVersion || "2025-10";
 
+  // Fetch default location for inventory quantity assignment
+  let defaultLocationId = null;
+  try {
+    const locRes = await fetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": accessToken },
+      body: JSON.stringify({ query: `{ locations(first: 1) { edges { node { id } } } }` }),
+    });
+    const locData = await locRes.json();
+    defaultLocationId = locData?.data?.locations?.edges?.[0]?.node?.id || null;
+  } catch { /* non-fatal */ }
+
   for (let i = 0; i < products.length; i++) {
     const product = products[i];
     try {
@@ -165,32 +177,93 @@ export const action = async ({ request }) => {
         }
       }
 
-      const response = await fetch(
-        `https://${shopDomain}/admin/api/${version}/products.json`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Shopify-Access-Token": accessToken,
-          },
-          body: JSON.stringify({ product: productData }),
-        },
-      );
-
-      if (!response.ok) {
-        const errorBody = await response.json().catch(() => ({}));
-        const errorMsg = errorBody.errors
-          ? typeof errorBody.errors === "string"
-            ? errorBody.errors
-            : JSON.stringify(errorBody.errors)
-          : `HTTP ${response.status}`;
-        throw new Error(errorMsg);
+      // Build GraphQL ProductInput from productData
+      const gqlInput = { title: productData.title };
+      if (productData.body_html !== undefined) gqlInput.descriptionHtml = productData.body_html;
+      if (productData.vendor) gqlInput.vendor = productData.vendor;
+      if (productData.product_type) gqlInput.productType = productData.product_type;
+      if (productData.tags) gqlInput.tags = typeof productData.tags === "string" ? productData.tags.split(",").map((t) => t.trim()).filter(Boolean) : productData.tags;
+      if (productData.handle) gqlInput.handle = productData.handle;
+      if (productData.published !== undefined) gqlInput.status = productData.published ? "ACTIVE" : "DRAFT";
+      if (productData.options?.length > 0) gqlInput.options = productData.options.map((o) => o.name);
+      if (productData.variants?.length > 0) {
+        gqlInput.variants = productData.variants.map((v) => {
+          const gv = {};
+          const opts = [v.option1, v.option2, v.option3].filter(Boolean);
+          if (opts.length) gv.options = opts;
+          if (v.price !== undefined) gv.price = v.price;
+          if (v.sku) gv.sku = v.sku;
+          if (v.barcode) gv.barcode = v.barcode;
+          if (v.weight !== undefined) gv.weight = v.weight;
+          if (v.weight_unit) gv.weightUnit = v.weight_unit.toUpperCase();
+          if (v.inventory_policy) gv.inventoryPolicy = v.inventory_policy.toUpperCase();
+          if (v.fulfillment_service) gv.fulfillmentService = v.fulfillment_service === "gift_card" ? "MANUAL" : v.fulfillment_service.toUpperCase();
+          if (v.inventory_quantity !== undefined && defaultLocationId) {
+            gv.inventoryQuantities = [{ availableQuantity: v.inventory_quantity, locationId: defaultLocationId }];
+          }
+          return gv;
+        });
       }
+      const mediaInputs = (productData.images || []).map((img) => ({ originalSource: img.src, mediaContentType: "IMAGE" }));
 
-      const data = await response.json();
+      const gqlRes = await fetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": accessToken },
+        body: JSON.stringify({
+          query: `mutation ProductCreate($input: ProductInput!) {
+            productCreate(input: $input) {
+              product { id }
+              userErrors { field message }
+            }
+          }`,
+          variables: { input: gqlInput },
+        }),
+      });
+      if (!gqlRes.ok) throw new Error(`HTTP ${gqlRes.status}`);
+      const gqlData = await gqlRes.json();
+      if (gqlData.errors?.length) {
+        console.error(`[importzo] productCreate GraphQL errors for "${product.title}":`, JSON.stringify(gqlData.errors));
+        throw new Error(gqlData.errors.map((e) => e.message).join("; "));
+      }
+      const userErrors = gqlData?.data?.productCreate?.userErrors || [];
+      if (userErrors.length) {
+        console.error(`[importzo] productCreate userErrors for "${product.title}":`, JSON.stringify(userErrors));
+        throw new Error(userErrors.map((e) => e.message).join("; "));
+      }
+      const created = gqlData?.data?.productCreate?.product;
+      if (!created?.id) {
+        console.error(`[importzo] productCreate returned no product for "${product.title}". Response:`, JSON.stringify(gqlData));
+        throw new Error("Product creation failed: API returned no product data");
+      }
+      const productGid = created.id;
+      const numericId = created.id.split("/").pop();
+
+      // Attach images via productCreateMedia (media param removed from productCreate in 2025-01+)
+      if (mediaInputs.length > 0) {
+        try {
+          const imgRes = await fetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": accessToken },
+            body: JSON.stringify({
+              query: `mutation productCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
+                productCreateMedia(productId: $productId, media: $media) {
+                  media { ... on MediaImage { id } }
+                  mediaUserErrors { field message }
+                }
+              }`,
+              variables: { productId: productGid, media: mediaInputs },
+            }),
+          });
+          const imgData = await imgRes.json();
+          const imgErrors = imgData?.data?.productCreateMedia?.mediaUserErrors || [];
+          if (imgErrors.length) {
+            warnings.push(`Image issues: ${imgErrors.map((e) => e.message).join("; ")}`);
+          }
+        } catch { /* non-fatal — product was created, images failed */ }
+      }
       let videoNote = "";
 
-      // Attach videos via GraphQL productCreateMedia (after REST product creation)
+      // Attach videos via GraphQL productCreateMedia
       if (product.videos && product.videos.length > 0) {
         const validVideos = product.videos.filter(
           (url) => url && url.trim() && /^https?:\/\//i.test(url.trim()),
@@ -216,7 +289,6 @@ export const action = async ({ request }) => {
           }
 
           const videoNotes = [];
-          const productGid = `gid://shopify/Product/${data.product.id}`;
 
           // Helper: call productCreateMedia
           const attachMedia = async (mediaInput) => {
@@ -312,7 +384,7 @@ export const action = async ({ request }) => {
         row: i + 1,
         title: product.title,
         status: "success",
-        productId: data.product.id,
+        productId: numericId,
         variantCount: productData.variants?.length || 1,
         videoNote: warningNote,
       });
@@ -707,7 +779,6 @@ export default function ImportPage() {
 
   // ── Theme helpers ──
   const primary = "#17320A";
-  const secondary = "#2E6316";
 
   return (
     <s-page
@@ -829,6 +900,8 @@ export default function ImportPage() {
                 Upload your CSV file
               </h2>
               <div
+                role="button"
+                tabIndex={0}
                 className={`border-2 border-dashed rounded-xl p-8 sm:p-12 text-center cursor-pointer transition-all duration-200 ${
                   dragOver
                     ? "border-green-800 bg-green-50/50"
@@ -841,6 +914,7 @@ export default function ImportPage() {
                 onDragLeave={() => setDragOver(false)}
                 onDrop={handleDrop}
                 onClick={() => fileInputRef.current?.click()}
+                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInputRef.current?.click(); } }}
               >
                 <div className="flex flex-col items-center gap-4">
                   <div

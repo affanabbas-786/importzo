@@ -183,26 +183,27 @@ export const action = async ({ request }) => {
       let productCount = 0, collectionCount = 0, themeCount = 0, themes = [];
 
       try {
-        const shopRes = await fetch(
-          `https://${sourceShop}/admin/api/${version}/shop.json`,
-          { headers: { "X-Shopify-Access-Token": sourceToken } }
-        );
-        if (!shopRes.ok) {
-          throw new Error(`Could not verify source store (HTTP ${shopRes.status}). The source store owner may need to reinstall Importzo.`);
+        // GraphQL: shop info + counts in one request
+        const gqlRes = await fetch(`https://${sourceShop}/admin/api/${version}/graphql.json`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": sourceToken },
+          body: JSON.stringify({ query: `{ shop { name email plan { displayName } } productsCount { count } collectionsCount { count } }` }),
+        });
+        if (gqlRes.status === 401 || gqlRes.status === 403) {
+          throw new Error("Could not verify source store: invalid token. The source store owner may need to reinstall Importzo.");
         }
-        const shopData = await shopRes.json();
-        shopName = shopData.shop?.name || sourceShop;
-        shopEmail = shopData.shop?.email || "";
-        shopPlan = shopData.shop?.plan_display_name || "";
+        if (!gqlRes.ok) {
+          throw new Error(`Could not verify source store (HTTP ${gqlRes.status}). The source store owner may need to reinstall Importzo.`);
+        }
+        const gqlData = await gqlRes.json();
+        shopName = gqlData?.data?.shop?.name || sourceShop;
+        shopEmail = gqlData?.data?.shop?.email || "";
+        shopPlan = gqlData?.data?.shop?.plan?.displayName || "";
+        productCount = gqlData?.data?.productsCount?.count || 0;
+        collectionCount = gqlData?.data?.collectionsCount?.count || 0;
 
-        const [pc, cc1, cc2, tc] = await Promise.all([
-          fetch(`https://${sourceShop}/admin/api/${version}/products/count.json`, { headers: { "X-Shopify-Access-Token": sourceToken } }),
-          fetch(`https://${sourceShop}/admin/api/${version}/custom_collections/count.json`, { headers: { "X-Shopify-Access-Token": sourceToken } }),
-          fetch(`https://${sourceShop}/admin/api/${version}/smart_collections/count.json`, { headers: { "X-Shopify-Access-Token": sourceToken } }),
-          fetch(`https://${sourceShop}/admin/api/${version}/themes.json`, { headers: { "X-Shopify-Access-Token": sourceToken } }),
-        ]);
-        productCount = pc.ok ? (await pc.json()).count : 0;
-        collectionCount = (cc1.ok ? (await cc1.json()).count : 0) + (cc2.ok ? (await cc2.json()).count : 0);
+        // Themes: REST (Theme API exempt from GraphQL migration)
+        const tc = await fetch(`https://${sourceShop}/admin/api/${version}/themes.json`, { headers: { "X-Shopify-Access-Token": sourceToken } });
         if (tc.ok) { const td = await tc.json(); themes = td.themes || []; themeCount = themes.length; }
       } catch (err) {
         return { intent, ok: false, error: err.message };
@@ -282,7 +283,7 @@ export const action = async ({ request }) => {
   return { intent, ok: false, error: "Unknown intent" };
 };
 
-// This route is action-only — accessed via useFetcher from collection-transfer
+// This route is action-only — accessed via useFetcher from app.transfer
 export const loader = async ({ request }) => {
   await authenticate.admin(request);
   return {};

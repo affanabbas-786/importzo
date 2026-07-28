@@ -1,0 +1,96 @@
+# Importzo — Shopify Store Migration App
+
+> Importzo is a free Shopify app that transfers products, themes, pages, blogs, navigation menus, metafields, collections, media, inventory, and customer data between Shopify stores — directly, without CSV files.
+
+## What Importzo Does
+
+Importzo is a store-to-store migration tool for Shopify merchants. It connects two Shopify stores via a one-time session code and copies all store data using the Shopify Admin API. No spreadsheets, no manual downloads, no developer needed.
+
+## Core Features
+
+- **Products & Variants**: All SKUs, prices, compare-at prices, images, tags, options, and product types
+- **Themes & Assets**: Complete Liquid themes including templates, assets, and JSON configuration
+- **Pages & Blogs**: All online store pages and blog articles with SEO metadata and images
+- **Navigation Menus**: Header, footer, and custom menus with nested items
+- **Metafields**: Custom data and metafield definitions for all resource types
+- **Collections**: Smart and manual collections with rules, sort orders, and assignments
+- **Media & Files**: All images, videos, and documents in the Shopify Files library
+- **Customers**: Names, emails, phone numbers, and addresses
+- **Inventory**: Stock quantities synced by location
+
+## How It Works
+
+1. Install Importzo on both the source and destination Shopify stores (free, from the Shopify App Store)
+2. On the source store, generate a one-time session code from the Transfer Store feature
+3. On the destination store, enter the session code to pair the stores
+4. Select which modules to transfer and click Start — Importzo runs the transfer in the background
+
+## Key Differentiators vs CSV-Based Tools (Matrixify, etc.)
+
+- No CSV files required at any step
+- Transfers themes and navigation menus (impossible with CSV tools)
+- Direct API-to-API connection — no data reformatting or loss
+- Free plan available — no credit card required
+- 2-minute setup vs hours of CSV column mapping
+- Runs in the background — close the browser during transfer
+
+## Technical Details
+
+- Built on Remix (React Router 7) with Shopify App Bridge 4.x
+- Uses Shopify Admin GraphQL API (API version October 2025)
+- Embedded Shopify app — runs inside the Shopify Admin
+- Session authentication via App Bridge session tokens
+- Background job processing for large stores (50,000+ products supported)
+- AES-256-CBC encryption for source store credentials stored in database
+- GDPR-compliant: customers/data_request, customers/redact, and shop/redact webhooks implemented
+
+## Pricing
+
+- Free plan: available immediately after install, no credit card required
+- Paid plans: available for larger stores and additional features
+
+## Links
+
+- Shopify App Store: https://apps.shopify.com/importzo
+- Landing page: https://importzo.dazzletech.co
+- Support: support@dazzletech.co
+- Developer: Dazzle Tech LLC — https://dazzletech.co
+
+## Common Use Cases
+
+- Cloning a Shopify store for a new market or region
+- Migrating from a development store to a production store
+- Backing up a store by transferring all data to a second store
+- Duplicating a store for a wholesale or B2B variant
+- Moving from one Shopify plan to another (new store required)
+- White-labeling — setting up identical stores for multiple clients
+
+## Supported Shopify Scopes
+
+read_products, write_products, read_orders, read_inventory, write_inventory, read_themes, write_themes, read_files, write_files, read_content, write_content, read_online_store_pages, read_legal_policies, read_online_store_navigation, write_online_store_navigation, read_customers
+
+## FAQ Summary
+
+**Q: Does Importzo transfer themes?**
+A: Yes. Complete Liquid themes with all assets and configuration.
+
+**Q: Does it require CSV files?**
+A: No. It works entirely via the Shopify Admin API.
+
+**Q: Is there a free plan?**
+A: Yes. Free plan available with no credit card required.
+
+**Q: How long does migration take?**
+A: 2-minute setup. Transfer time: minutes for small stores, hours for 50k+ product stores.
+
+**Q: Can it transfer metafields?**
+A: Yes. Metafields and metafield definitions for all resource types.
+
+**Q: What's different from Matrixify?**
+A: No CSV, themes supported, navigation menus supported, free plan, 2-minute setup.
+
+**Q: How do I copy products between Shopify stores?**
+A: Install Importzo on both stores → generate session code on source → enter code on destination → select Products → Start.
+
+**Q: Does it transfer blog posts and pages?**
+A: Yes. All blog channels, articles, and pages with full content and SEO metadata.

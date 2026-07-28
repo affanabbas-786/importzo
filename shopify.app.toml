@@ -4,11 +4,9 @@ client_id = "70b047c7b1057f7a8ca94c044f6568ae"
 name = "importzo"
 application_url = "https://importzo.dazzletech.co"
 embedded = true
-privacy_policy_url = "https://importzo.dazzletech.co/privacy"
 
 [build]
-automatically_update_urls_on_dev = true
-include_config_on_deploy = true
+automatically_update_urls_on_dev = false
 
 [webhooks]
 api_version = "2026-04"
@@ -22,44 +20,21 @@ api_version = "2026-04"
   uri = "/webhooks/app/scopes_update"
 
   [[webhooks.subscriptions]]
-  topics = [ "customers/data_request" ]
+  compliance_topics = [ "customers/data_request" ]
   uri = "/webhooks/customers/data_request"
 
   [[webhooks.subscriptions]]
-  topics = [ "customers/redact" ]
+  compliance_topics = [ "customers/redact" ]
   uri = "/webhooks/customers/redact"
 
   [[webhooks.subscriptions]]
-  topics = [ "shop/redact" ]
+  compliance_topics = [ "shop/redact" ]
   uri = "/webhooks/shop/redact"
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "read_products,write_products,read_customers,write_customers,read_orders,write_orders,read_inventory,write_inventory,read_collections,write_collections,read_themes,write_themes,read_price_rules,write_price_rules,read_draft_orders,write_draft_orders"
+# Note: read_collections/write_collections merged into read_products/write_products in 2025-01+
+scopes = "read_products,write_products,read_orders,read_inventory,write_inventory,read_themes,write_themes,read_files,write_files,read_content,write_content,read_online_store_pages,read_legal_policies,read_online_store_navigation,write_online_store_navigation,read_customers"
 
 [auth]
 redirect_urls = [ "https://importzo.dazzletech.co/auth/callback" ]
-
-[product.metafields.app.demo_info]
-type = "single_line_text_field"
-name = "Demo Source Info"
-description = "Tracks products created by the Shopify app template for development"
-
-  [product.metafields.app.demo_info.access]
-  admin = "merchant_read_write"
-
-[metaobjects.app.example]
-name = "Example"
-description = "An example metaobject definition created by this template"
-
-  [metaobjects.app.example.access]
-  admin = "merchant_read_write"
-
-[metaobjects.app.example.fields.title]
-name = "Title"
-type = "single_line_text_field"
-required = true
-
-[metaobjects.app.example.fields.description]
-name = "Description"
-type = "multi_line_text_field"

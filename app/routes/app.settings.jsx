@@ -1,3 +1,4 @@
+import PropTypes from "prop-types";
 import { useEffect, useState } from "react";
 import { useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
@@ -5,7 +6,7 @@ import { authenticate } from "../shopify.server";
 import { BRAND } from "../lib/constants";
 import { SUPPORT_EMAIL, mailtoLink, openLiveChat } from "../lib/support";
 import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
-import { DEFAULT_PREFS, loadPrefs, savePrefs, resetPrefs } from "../lib/prefs";
+import { DEFAULT_PREFS, loadPrefs, savePrefs, resetPrefs, canPersist } from "../lib/prefs";
 
 export const loader = async ({ request }) => {
   await authenticate.admin(request);
@@ -44,6 +45,16 @@ function SupportAction({ icon, title, description, actionLabel, href, onClick, e
   );
 }
 
+SupportAction.propTypes = {
+  icon: PropTypes.node,
+  title: PropTypes.string,
+  description: PropTypes.string,
+  actionLabel: PropTypes.string,
+  href: PropTypes.string,
+  onClick: PropTypes.func,
+  external: PropTypes.bool,
+};
+
 function Toggle({ checked, onChange, disabled }) {
   return (
     <button
@@ -63,12 +74,22 @@ function Toggle({ checked, onChange, disabled }) {
   );
 }
 
+Toggle.propTypes = {
+  checked: PropTypes.bool,
+  onChange: PropTypes.func,
+  disabled: PropTypes.bool,
+};
+
 export default function SettingsPage() {
   const [prefs, setPrefs] = useState(DEFAULT_PREFS);
   const [savedFlash, setSavedFlash] = useState(false);
+  const [storageAvailable, setStorageAvailable] = useState(true);
 
-  // Hydrate from localStorage after mount (SSR-safe)
-  useEffect(() => { setPrefs(loadPrefs()); }, []);
+  // Hydrate from localStorage after mount (SSR-safe); detect storage availability
+  useEffect(() => {
+    setStorageAvailable(canPersist());
+    setPrefs(loadPrefs());
+  }, []);
 
   function update(patch) {
     const next = { ...prefs, ...patch };
@@ -170,7 +191,7 @@ export default function SettingsPage() {
             <Toggle checked={!!prefs.autoDownloadErrorReports} onChange={(v) => update({ autoDownloadErrorReports: v })} />
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 flex-wrap">
             <button
               type="button"
               onClick={handleReset}
@@ -178,9 +199,15 @@ export default function SettingsPage() {
             >
               Reset to defaults
             </button>
-            <p className="text-[11px] text-gray-400">
-              Preferences are stored in your browser for this store.
-            </p>
+            {storageAvailable ? (
+              <p className="text-[11px] text-gray-400">
+                Preferences are stored in your browser for this store.
+              </p>
+            ) : (
+              <p className="text-[11px] text-amber-600 font-medium">
+                Browser storage is blocked (incognito or iframe restrictions) — preferences will reset on reload.
+              </p>
+            )}
           </div>
         </section>
 
@@ -300,11 +327,21 @@ export default function SettingsPage() {
                 <a href={mailtoLink()} className="font-semibold" style={{ color: S }}>{SUPPORT_EMAIL}</a>
               </p>
             </div>
-            <span className="text-[10px] font-semibold uppercase tracking-wider px-2 py-1 rounded-full" style={{ background: "rgba(46,99,22,0.1)", color: S }}>
-              Powered by dazzletech.co
-            </span>
           </div>
         </section>
+
+        {/* ── Attribution ── */}
+        <div className="pt-2 border-t border-gray-100 flex items-center justify-center gap-1.5">
+          <svg className="w-3 h-3" style={{ color: S }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456z" />
+          </svg>
+          <p className="text-[11px] text-gray-400">
+            Importzo is built by{" "}
+            <a href="https://dazzletech.co" target="_blank" rel="noopener noreferrer" className="font-semibold hover:underline" style={{ color: S }}>
+              dazzletech.co
+            </a>
+          </p>
+        </div>
       </div>
     </s-page>
   );

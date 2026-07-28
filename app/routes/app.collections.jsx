@@ -43,6 +43,32 @@ export const action = async ({ request }) => {
   const accessToken = session.accessToken;
   const version = apiVersion || "2025-10";
 
+  const SORT_ORDER_MAP = { manual: "MANUAL", "best-selling": "BEST_SELLING", "alpha-asc": "ALPHA_ASC", "alpha-desc": "ALPHA_DESC", "price-desc": "PRICE_DESC", "price-asc": "PRICE_ASC", created: "CREATED", "created-desc": "CREATED_DESC" };
+  const RULE_COLUMN_MAP = { tag: "TAG", title: "TITLE", type: "TYPE", vendor: "VENDOR", variant_title: "VARIANT_TITLE", variant_price: "VARIANT_PRICE", variant_compare_at_price: "VARIANT_COMPARE_AT_PRICE", variant_weight: "VARIANT_WEIGHT", variant_inventory: "VARIANT_INVENTORY" };
+  const RULE_RELATION_MAP = { equals: "EQUALS", not_equals: "NOT_EQUALS", greater_than: "GREATER_THAN", less_than: "LESS_THAN", starts_with: "STARTS_WITH", ends_with: "ENDS_WITH", contains: "CONTAINS", not_contains: "NOT_CONTAINS" };
+
+  const CREATE_COLLECTION = `#graphql
+    mutation CollectionCreate($input: CollectionInput!) {
+      collectionCreate(input: $input) {
+        collection { id }
+        userErrors { field message }
+      }
+    }`;
+
+  async function gqlCollectionCreate(input) {
+    const res = await fetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": accessToken },
+      body: JSON.stringify({ query: CREATE_COLLECTION, variables: { input } }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const json = await res.json();
+    if (json?.errors?.length) throw new Error(json.errors.map((e) => e.message).join("; "));
+    const errors = json?.data?.collectionCreate?.userErrors || [];
+    if (errors.length) throw new Error(errors.map((e) => e.message).join("; "));
+    return json?.data?.collectionCreate?.collection;
+  }
+
   const results = [];
   let successCount = 0, errorCount = 0;
 
@@ -51,93 +77,64 @@ export const action = async ({ request }) => {
     const isSmartType = (collection.collection_type || "").toLowerCase() === "smart";
 
     try {
-      if (isSmartType) {
-        // Smart collection
-        const smartData = { title: collection.title || "Untitled Collection" };
-        if (collection.body_html) smartData.body_html = collection.body_html;
-        if (collection.published !== undefined && collection.published !== "") {
-          smartData.published = ["true", "yes", "1"].includes(collection.published.toLowerCase());
-        }
-        if (collection.sort_order) smartData.sort_order = collection.sort_order;
+      const isPublished = collection.published !== undefined && collection.published !== ""
+        ? ["true", "yes", "1"].includes(String(collection.published).toLowerCase())
+        : true;
 
+      const input = {
+        title: collection.title || "Untitled Collection",
+        published: isPublished,
+      };
+      if (collection.body_html) input.descriptionHtml = collection.body_html;
+      if (collection.sort_order) input.sortOrder = SORT_ORDER_MAP[collection.sort_order] || "MANUAL";
+
+      if (isSmartType) {
         // Parse rules: format "column:relation:condition" separated by |
-        const rules = [];
+        const rawRules = [];
         if (collection.rules_column) {
           collection.rules_column.split("|").forEach((r) => {
             const parts = r.trim().split(":");
             if (parts.length >= 3) {
-              rules.push({ column: parts[0].trim(), relation: parts[1].trim(), condition: parts.slice(2).join(":").trim() });
+              rawRules.push({ column: parts[0].trim(), relation: parts[1].trim(), condition: parts.slice(2).join(":").trim() });
             }
           });
         }
-        if (rules.length === 0) {
-          rules.push({ column: "tag", relation: "equals", condition: collection.title || "imported" });
+        if (rawRules.length === 0) {
+          rawRules.push({ column: "tag", relation: "equals", condition: collection.title || "imported" });
         }
-        smartData.rules = rules;
+        input.ruleSet = {
+          appliedDisjunctively: false,
+          rules: rawRules.map((r) => ({
+            column: RULE_COLUMN_MAP[r.column?.toLowerCase()] || r.column?.toUpperCase() || "TAG",
+            relation: RULE_RELATION_MAP[r.relation?.toLowerCase()] || r.relation?.toUpperCase() || "EQUALS",
+            condition: r.condition,
+          })),
+        };
 
-        const response = await fetch(
-          `https://${shopDomain}/admin/api/${version}/smart_collections.json`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": accessToken },
-            body: JSON.stringify({ smart_collection: smartData }),
-          }
-        );
-        if (!response.ok) {
-          const err = await response.json().catch(() => ({}));
-          throw new Error(err.errors ? (typeof err.errors === "string" ? err.errors : JSON.stringify(err.errors)) : `HTTP ${response.status}`);
-        }
-        const data = await response.json();
-        results.push({ row: i + 1, title: collection.title, status: "success", collectionId: data.smart_collection.id, type: "smart" });
+        const col = await gqlCollectionCreate(input);
+        results.push({ row: i + 1, title: collection.title, status: "success", collectionId: col.id.split("/").pop(), type: "smart" });
         successCount++;
       } else {
         // Custom (manual) collection
-        const customData = { title: collection.title || "Untitled Collection" };
-        if (collection.body_html) customData.body_html = collection.body_html;
-        if (collection.published !== undefined && collection.published !== "") {
-          customData.published = ["true", "yes", "1"].includes(collection.published.toLowerCase());
-        }
-        if (collection.sort_order) customData.sort_order = collection.sort_order;
         const hasImage = collection.image_url && /^https?:\/\//i.test(collection.image_url.trim());
-        if (hasImage) {
-          customData.image = { src: collection.image_url.trim() };
-        }
+        if (hasImage) input.image = { src: collection.image_url.trim() };
 
-        let response = await fetch(
-          `https://${shopDomain}/admin/api/${version}/custom_collections.json`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": accessToken },
-            body: JSON.stringify({ custom_collection: customData }),
+        let col;
+        try {
+          col = await gqlCollectionCreate(input);
+        } catch (imgErr) {
+          if (hasImage) {
+            // Retry without image
+            delete input.image;
+            col = await gqlCollectionCreate(input);
+            results.push({ row: i + 1, title: collection.title, status: "success", collectionId: col.id.split("/").pop(), type: "custom", warning: "Collection imported without image - URL not accessible" });
+            successCount++;
+            continue;
           }
-        );
-
-        // If failed and had an image, retry without image
-        if (!response.ok && hasImage) {
-          delete customData.image;
-          response = await fetch(
-            `https://${shopDomain}/admin/api/${version}/custom_collections.json`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": accessToken },
-              body: JSON.stringify({ custom_collection: customData }),
-            }
-          );
-          if (!response.ok) {
-            const err = await response.json().catch(() => ({}));
-            throw new Error(err.errors ? (typeof err.errors === "string" ? err.errors : JSON.stringify(err.errors)) : `HTTP ${response.status}`);
-          }
-          const data = await response.json();
-          results.push({ row: i + 1, title: collection.title, status: "success", collectionId: data.custom_collection.id, type: "custom", warning: "Collection imported without image - URL not accessible" });
-          successCount++;
-        } else if (!response.ok) {
-          const err = await response.json().catch(() => ({}));
-          throw new Error(err.errors ? (typeof err.errors === "string" ? err.errors : JSON.stringify(err.errors)) : `HTTP ${response.status}`);
-        } else {
-          const data = await response.json();
-          results.push({ row: i + 1, title: collection.title, status: "success", collectionId: data.custom_collection.id, type: "custom" });
-          successCount++;
+          throw imgErr;
         }
+        results.push({ row: i + 1, title: collection.title, status: "success", collectionId: col.id.split("/").pop(), type: "custom" });
+        successCount++;
       }
     } catch (error) {
       results.push({ row: i + 1, title: collection.title || "Unknown", status: "error", error: error.message });
@@ -244,7 +241,6 @@ export default function CollectionsImportPage() {
   const hasTitleMapped = Object.values(mapping).includes("title");
   const collections = step >= STEP_PREVIEW ? getCollections() : [];
   const primary = "#17320A";
-  const secondary = "#2E6316";
 
   return (
     <s-page heading="Collection Importer" subtitle={["Upload", "Map", "Preview", "Importing", "Results"][step]} backAction={JSON.stringify({ content: "Dashboard", url: "/app" })}>
@@ -283,8 +279,11 @@ export default function CollectionsImportPage() {
             <div className="bg-white rounded-xl border border-gray-200 p-6 sm:p-8 shadow-sm">
               <h2 className="text-lg font-semibold text-gray-900 mb-6">Upload your collections CSV file</h2>
               <div
+                role="button"
+                tabIndex={0}
                 className={`border-2 border-dashed rounded-xl p-8 sm:p-12 text-center cursor-pointer transition-all ${dragOver ? "border-green-800 bg-green-50/50" : "border-gray-300 hover:border-gray-400 hover:bg-gray-50/50"}`}
                 onDragOver={(e) => { e.preventDefault(); setDragOver(true); }} onDragLeave={() => setDragOver(false)} onDrop={handleDrop} onClick={() => fileInputRef.current?.click()}
+                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInputRef.current?.click(); } }}
               >
                 <div className="flex flex-col items-center gap-4">
                   <div style={{ width: 64, height: 64, borderRadius: "50%" }} className={`flex items-center justify-center ${dragOver ? "bg-green-100" : "bg-gray-100"}`}>

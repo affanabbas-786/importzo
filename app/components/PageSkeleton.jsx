@@ -4,6 +4,8 @@
 // Prevents broken layout flashes and makes the app feel intentional.
 // ═══════════════════════════════════════════════════════════════════
 
+import PropTypes from "prop-types";
+
 const PRIMARY = "#17320A";
 const FONT = "'ImportzoFont', sans-serif";
 
@@ -130,3 +132,10 @@ export function FormSkeleton({ label = "Loading" }) {
     </div>
   );
 }
+
+Shimmer.propTypes = { className: PropTypes.string, style: PropTypes.object };
+SkeletonHeader.propTypes = { label: PropTypes.string };
+CardShimmer.propTypes = { height: PropTypes.number };
+HubSkeleton.propTypes = { label: PropTypes.string };
+TableSkeleton.propTypes = { label: PropTypes.string, rows: PropTypes.number };
+FormSkeleton.propTypes = { label: PropTypes.string };

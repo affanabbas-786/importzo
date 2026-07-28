@@ -66,7 +66,7 @@ export default function ImportHub() {
             { href: "/app/collections", label: "Import Collections", desc: "Create custom and smart collections from CSV", icon: "M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" },
             { href: "/app/inventory", label: "Update Inventory", desc: "Update stock quantities by SKU and location", icon: "M3.75 12h16.5m-16.5 3.75h16.5M3.75 19.5h16.5M5.625 4.5h12.75a1.875 1.875 0 010 3.75H5.625a1.875 1.875 0 010-3.75z" },
           ].map((item) => (
-            <a key={item.label} href={item.href} className="group bg-white rounded-xl border border-gray-200 p-5 shadow-sm hover:shadow-md transition-all duration-200 hover:-translate-y-0.5">
+            <Link key={item.label} to={item.href} className="group bg-white rounded-xl border border-gray-200 p-5 shadow-sm hover:shadow-md transition-all duration-200 hover:-translate-y-0.5">
               <div className="w-9 h-9 rounded-lg flex items-center justify-center mb-3" style={{ background: "rgba(23,50,10,0.08)", color: S }}>
                 <svg className="w-4.5 h-4.5" style={{ width: 18, height: 18 }} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
                   <path strokeLinecap="round" strokeLinejoin="round" d={item.icon} />
@@ -77,7 +77,7 @@ export default function ImportHub() {
               <span className="mt-3 inline-flex items-center gap-1 text-xs font-semibold group-hover:gap-1.5 transition-all" style={{ color: S }}>
                 Start <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}><path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" /></svg>
               </span>
-            </a>
+            </Link>
           ))}
         </div>
 
@@ -91,7 +91,7 @@ export default function ImportHub() {
               <p className="text-sm font-medium text-gray-700">Pages, Blog Posts, Files and Metafields</p>
               <p className="text-xs text-gray-500 mt-1 leading-relaxed">
                 These content types aren&apos;t available via CSV import yet. If you need to move them between stores
-                today, use <Link to="/app/collection-transfer" className="font-semibold hover:underline" style={{ color: S }}>Transfer Store</Link> with a direct
+                today, use <Link to="/app/transfer" className="font-semibold hover:underline" style={{ color: S }}>Transfer Store</Link> with a direct
                 store-to-store connection, or manage them in the Shopify admin. We&apos;ll enable CSV import for these
                 once a stable field mapping is finalized.
               </p>

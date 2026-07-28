@@ -7,6 +7,17 @@ import {
 import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prisma";
 import prisma from "./db.server";
 
+// Validate required environment variables on startup
+const missingVars = ["SHOPIFY_API_KEY", "SHOPIFY_API_SECRET", "SHOPIFY_APP_URL"].filter(
+  (v) => !process.env[v] // eslint-disable-line no-undef
+);
+if (missingVars.length > 0) {
+  console.error(`[importzo] FATAL: Missing required env vars: ${missingVars.join(", ")}. App will not function correctly.`);
+}
+if (!process.env.ENCRYPTION_KEY) { // eslint-disable-line no-undef
+  console.warn("[importzo] WARNING: ENCRYPTION_KEY is not set. Source store tokens will be stored unencrypted in the database.");
+}
+
 const shopify = shopifyApp({
   apiKey: process.env.SHOPIFY_API_KEY,
   apiSecretKey: process.env.SHOPIFY_API_SECRET || "",
@@ -18,9 +29,13 @@ const shopify = shopifyApp({
   distribution: AppDistribution.AppStore,
   hooks: {
     afterAuth: async ({ session }) => {
+      console.log(`[importzo] afterAuth: shop=${session.shop} isOnline=${session.isOnline} scope=${session.scope}`);
       shopify.registerWebhooks({ session });
     },
   },
+  // expiringOfflineAccessTokens must match the Shopify Partners Dashboard setting.
+  // Token exchange passes this as `expiring:` to Shopify's API; a mismatch causes
+  // a non-JWT API error that bubbles up as an empty-body 500 → "Handling response".
   future: {
     expiringOfflineAccessTokens: true,
   },

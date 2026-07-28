@@ -58,3 +58,14 @@ export function resetPrefs() {
     window.localStorage.removeItem(KEY);
   } catch { /* ignore */ }
 }
+
+export function canPersist() {
+  if (typeof window === "undefined") return false;
+  try {
+    window.localStorage.setItem("__importzo_chk__", "1");
+    window.localStorage.removeItem("__importzo_chk__");
+    return true;
+  } catch {
+    return false;
+  }
+}

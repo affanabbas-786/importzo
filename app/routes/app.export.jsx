@@ -23,31 +23,36 @@ export const action = async ({ request }) => {
   const version = apiVersion || "2025-10";
   const authHeaders = { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" };
 
-  async function fetchAll(resource, fields) {
+  async function fetchAllGql(query, getPage) {
     const items = [];
-    let url = `https://${shopDomain}/admin/api/${version}/${resource}.json?limit=250${fields ? `&fields=${fields}` : ""}`;
-    while (url) {
+    let after = null;
+    let hasNextPage = true;
+    while (hasNextPage) {
       let res;
       for (let attempt = 0; attempt < 4; attempt++) {
-        // 30s per-page timeout — prevents infinite hang on slow/stalled connections
-        const pageCtrl = new AbortController();
-        const pageTimeout = setTimeout(() => pageCtrl.abort(), 30000);
+        const ctrl = new AbortController();
+        const timeout = setTimeout(() => ctrl.abort(), 30000);
         try {
-          res = await fetch(url, { headers: { "X-Shopify-Access-Token": accessToken }, signal: pageCtrl.signal });
-        } finally {
-          clearTimeout(pageTimeout);
-        }
+          res = await fetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
+            method: "POST", headers: authHeaders,
+            body: JSON.stringify({ query, variables: { after } }),
+            signal: ctrl.signal,
+          });
+        } finally { clearTimeout(timeout); }
         if (res.status !== 429) break;
-        const retryAfter = parseFloat(res.headers.get("Retry-After") || "2");
-        await new Promise((r) => setTimeout(r, Math.max(retryAfter * 1000, 500 * Math.pow(2, attempt))));
+        const wait = parseFloat(res.headers.get("Retry-After") || "2");
+        await new Promise((r) => setTimeout(r, Math.max(wait * 1000, 500 * Math.pow(2, attempt))));
       }
-      if (!res.ok) throw new Error(`Failed to fetch ${resource}: HTTP ${res.status}`);
-      const data = await res.json();
-      const key = Object.keys(data).find((k) => Array.isArray(data[k]));
-      if (key) items.push(...data[key]);
-      const link = res.headers.get("Link") || "";
-      const next = link.match(/<([^>]+)>;\s*rel="next"/);
-      url = next ? next[1] : null;
+      if (!res.ok) throw new Error(`GraphQL HTTP ${res.status}`);
+      const json = await res.json();
+      if (json?.errors?.length) {
+        throw new Error(`GraphQL: ${json.errors.map((e) => e.message).join("; ").slice(0, 400)}`);
+      }
+      const page = getPage(json?.data);
+      if (!page) throw new Error("GraphQL returned no data");
+      items.push(...(page?.edges || []).map((e) => e.node));
+      after = page?.edges?.length ? page.edges[page.edges.length - 1].cursor : null;
+      hasNextPage = !!page?.pageInfo?.hasNextPage;
     }
     return items;
   }
@@ -67,45 +72,60 @@ export const action = async ({ request }) => {
   try {
     // ── Counts ──
     if (intent === "counts") {
-      const [pr, cc, sc, cu] = await Promise.all([
-        fetch(`https://${shopDomain}/admin/api/${version}/products/count.json`, { headers: authHeaders }),
-        fetch(`https://${shopDomain}/admin/api/${version}/custom_collections/count.json`, { headers: authHeaders }),
-        fetch(`https://${shopDomain}/admin/api/${version}/smart_collections/count.json`, { headers: authHeaders }),
-        fetch(`https://${shopDomain}/admin/api/${version}/customers/count.json`, { headers: authHeaders }),
-      ]);
-      const products = pr.ok ? (await pr.json()).count : 0;
-      const collections = (cc.ok ? (await cc.json()).count : 0) + (sc.ok ? (await sc.json()).count : 0);
-      const customers = cu.ok ? (await cu.json()).count : 0;
-      return Response.json({ intent: "counts", ok: true, products, collections, customers });
+      const res = await fetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
+        method: "POST", headers: authHeaders,
+        body: JSON.stringify({ query: `{ productsCount { count } collectionsCount { count } customersCount { count } }` }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const { data } = await res.json();
+      return Response.json({ intent: "counts", ok: true, products: data?.productsCount?.count || 0, collections: data?.collectionsCount?.count || 0, customers: data?.customersCount?.count || 0 });
     }
 
     // ── Export Products ──
     if (intent === "export-products") {
-      const products = await fetchAll("products", "id,title,handle,body_html,vendor,product_type,tags,published_at,variants,images,options");
+      const PRODUCT_QUERY = `query ExportProducts($after: String) {
+        products(first: 250, after: $after) {
+          edges { cursor node {
+            handle title descriptionHtml vendor productType tags status
+            options { name }
+            images(first: 250) { edges { node { url } } }
+            variants(first: 100) { edges { node {
+              sku price compareAtPrice barcode inventoryQuantity
+              inventoryItem { measurement { weight { value unit } } }
+              selectedOptions { name value }
+            } } }
+          } }
+          pageInfo { hasNextPage }
+        }
+      }`;
+      const products = await fetchAllGql(PRODUCT_QUERY, (d) => d?.products);
       const rows = [];
       for (const p of products) {
-        const variants = p.variants || [{}];
-        const images = (p.images || []).map((img) => img.src);
-        for (let vi = 0; vi < variants.length; vi++) {
-          const v = variants[vi];
+        const variants = (p.variants?.edges || []).map((e) => e.node);
+        const images = (p.images?.edges || []).map((e) => e.node?.url).filter(Boolean);
+        const opts = p.options || [];
+        for (let vi = 0; vi < Math.max(variants.length, 1); vi++) {
+          const v = variants[vi] || {};
+          const sel = v.selectedOptions || [];
+          const w = v.inventoryItem?.measurement?.weight;
           rows.push({
             Handle: p.handle || "", Title: vi === 0 ? (p.title || "") : "",
-            "Body (HTML)": vi === 0 ? (p.body_html || "") : "",
+            "Body (HTML)": vi === 0 ? (p.descriptionHtml || "") : "",
             Vendor: vi === 0 ? (p.vendor || "") : "",
-            "Product Type": vi === 0 ? (p.product_type || "") : "",
-            Tags: vi === 0 ? (p.tags || "") : "",
-            Published: p.published_at ? "TRUE" : "FALSE",
-            "Option1 Name": v.option1 ? (p.options?.[0]?.name || "Title") : "",
-            "Option1 Value": v.option1 || "",
-            "Option2 Name": v.option2 ? (p.options?.[1]?.name || "") : "",
-            "Option2 Value": v.option2 || "",
-            "Option3 Name": v.option3 ? (p.options?.[2]?.name || "") : "",
-            "Option3 Value": v.option3 || "",
+            "Product Type": vi === 0 ? (p.productType || "") : "",
+            Tags: vi === 0 ? (p.tags || []).join(", ") : "",
+            Published: p.status === "ACTIVE" ? "TRUE" : "FALSE",
+            "Option1 Name": sel[0] ? (opts[0]?.name || "Title") : "",
+            "Option1 Value": sel[0]?.value || "",
+            "Option2 Name": sel[1] ? (opts[1]?.name || "") : "",
+            "Option2 Value": sel[1]?.value || "",
+            "Option3 Name": sel[2] ? (opts[2]?.name || "") : "",
+            "Option3 Value": sel[2]?.value || "",
             "Variant SKU": v.sku || "", "Variant Price": v.price || "",
-            "Variant Compare At Price": v.compare_at_price || "",
+            "Variant Compare At Price": v.compareAtPrice || "",
             "Variant Barcode": v.barcode || "",
-            "Variant Inventory Qty": v.inventory_quantity ?? "",
-            "Variant Weight": v.weight || "", "Variant Weight Unit": v.weight_unit || "",
+            "Variant Inventory Qty": v.inventoryQuantity ?? "",
+            "Variant Weight": w?.value ?? "", "Variant Weight Unit": w?.unit || "",
             "Image Src": vi === 0 && images[0] ? images[0] : (images[vi] || ""),
           });
         }
@@ -116,29 +136,48 @@ export const action = async ({ request }) => {
 
     // ── Export Collections ──
     if (intent === "export-collections") {
-      const custom = await fetchAll("custom_collections", "id,title,handle,body_html,published_at,sort_order,image");
-      const smart = await fetchAll("smart_collections", "id,title,handle,body_html,published_at,sort_order,image");
-      const all = [...custom.map((c) => ({ ...c, _type: "Custom" })), ...smart.map((c) => ({ ...c, _type: "Smart" }))];
-      const rows = all.map((c) => ({
-        Title: c.title || "", Handle: c.handle || "", "Body HTML": c.body_html || "",
-        Type: c._type, Published: c.published_at ? "TRUE" : "FALSE",
-        "Sort Order": c.sort_order || "", "Image Src": c.image?.src || "",
+      const COLLECTION_QUERY = `query ExportCollections($after: String) {
+        collections(first: 250, after: $after) {
+          edges { cursor node {
+            handle title descriptionHtml sortOrder
+            ruleSet { rules { column relation condition } }
+            image { url }
+          } }
+          pageInfo { hasNextPage }
+        }
+      }`;
+      const collections = await fetchAllGql(COLLECTION_QUERY, (d) => d?.collections);
+      const rows = collections.map((c) => ({
+        Title: c.title || "", Handle: c.handle || "", "Body HTML": c.descriptionHtml || "",
+        Type: c.ruleSet ? "Smart" : "Custom",
+        Published: "TRUE",
+        "Sort Order": c.sortOrder || "", "Image Src": c.image?.url || "",
       }));
       const csvH = ["Title", "Handle", "Body HTML", "Type", "Published", "Sort Order", "Image Src"];
-      return Response.json({ intent: "export-collections", ok: true, csv: toCsv(csvH, rows), filename: `collections_${new Date().toISOString().slice(0, 10)}.csv`, count: all.length });
+      return Response.json({ intent: "export-collections", ok: true, csv: toCsv(csvH, rows), filename: `collections_${new Date().toISOString().slice(0, 10)}.csv`, count: collections.length });
     }
 
     // ── Export Inventory ──
     if (intent === "export-inventory") {
-      const products = await fetchAll("products", "id,title,variants");
+      const INVENTORY_QUERY = `query ExportInventory($after: String) {
+        products(first: 250, after: $after) {
+          edges { cursor node {
+            title
+            variants(first: 100) { edges { node { sku price barcode inventoryQuantity title } } }
+          } }
+          pageInfo { hasNextPage }
+        }
+      }`;
+      const products = await fetchAllGql(INVENTORY_QUERY, (d) => d?.products);
       const rows = [];
       for (const p of products) {
-        for (const v of (p.variants || [])) {
+        for (const e of (p.variants?.edges || [])) {
+          const v = e.node;
           if (v.sku) {
             rows.push({
               SKU: v.sku, "Product Title": p.title || "",
               "Variant Title": v.title || "Default Title",
-              "Inventory Quantity": v.inventory_quantity ?? 0,
+              "Inventory Quantity": v.inventoryQuantity ?? 0,
               Price: v.price || "", Barcode: v.barcode || "",
             });
           }
@@ -150,16 +189,40 @@ export const action = async ({ request }) => {
 
     // ── Export Customers ──
     if (intent === "export-customers") {
-      const customers = await fetchAll("customers", "id,first_name,last_name,email,phone,accepts_marketing,orders_count,total_spent,tags,note,state");
+      const CUSTOMER_QUERY = `query ExportCustomers($after: String) {
+        customers(first: 250, after: $after) {
+          edges { cursor node {
+            firstName lastName email phone
+            emailMarketingConsent { marketingState }
+            numberOfOrders amountSpent { amount }
+            tags note state
+          } }
+          pageInfo { hasNextPage }
+        }
+      }`;
+      let customers;
+      try {
+        customers = await fetchAllGql(CUSTOMER_QUERY, (d) => d?.customers);
+      } catch (err) {
+        const msg = String(err.message || "").toLowerCase();
+        if (msg.includes("access denied") || msg.includes("access_denied") || msg.includes("merchant approval") || msg.includes("not approved") || msg.includes("scope") || msg.includes("read_customers") || msg.includes("protected customer")) {
+          return Response.json({
+            intent: "export-customers",
+            ok: false,
+            error: "Customers export requires read_customers permission. Please grant the app access to customer data (Shopify protected customer data approval may also be required).",
+          }, { status: 403 });
+        }
+        throw err;
+      }
       const rows = customers.map((c) => ({
-        "First Name": c.first_name || "",
-        "Last Name": c.last_name || "",
+        "First Name": c.firstName || "",
+        "Last Name": c.lastName || "",
         "Email": c.email || "",
         "Phone": c.phone || "",
-        "Accepts Marketing": c.accepts_marketing ? "yes" : "no",
-        "Orders Count": c.orders_count ?? 0,
-        "Total Spent": c.total_spent || "0.00",
-        "Tags": c.tags || "",
+        "Accepts Marketing": c.emailMarketingConsent?.marketingState === "SUBSCRIBED" ? "yes" : "no",
+        "Orders Count": c.numberOfOrders ?? 0,
+        "Total Spent": c.amountSpent?.amount || "0.00",
+        "Tags": (c.tags || []).join(", "),
         "Note": c.note || "",
         "State": c.state || "",
       }));
@@ -265,15 +328,14 @@ export default function ExportPage() {
     return () => clearInterval(id);
   }, [step]);
 
-  // Safety valve: if fetcher stays busy for >150s in export mode, unblock UI
+  // Safety valve: if fetcher stays busy for >150s in export mode, unblock UI.
+  // The cleanup function clears this timeout if step changes before it fires.
   useEffect(() => {
     if (step !== STEP_EXPORTING) return;
     const safetyId = setTimeout(() => {
-      if (step === STEP_EXPORTING) {
-        setError("Export is taking longer than expected. Please try again or export in smaller batches.");
-        setCurrentExport(null);
-        setStep(STEP_RESULTS);
-      }
+      setError("Export is taking longer than expected. Please try again or export in smaller batches.");
+      setCurrentExport(null);
+      setStep(STEP_RESULTS);
     }, 150000);
     return () => clearTimeout(safetyId);
   }, [step]);
@@ -365,7 +427,6 @@ export default function ExportPage() {
   }, [fetcher.state, fetcher.data, fetcher.error, step, shopify, fetcher]);
 
   // ── Computed ──
-  const moduleKeys = exportMode === "full" ? Object.keys(EXPORT_MODULES) : (exportMode ? [exportMode] : []);
   const totalExported = Object.values(exportResults).reduce((s, r) => s + (r.ok ? (r.count || 0) : 0), 0);
   const totalFiles = Object.values(exportResults).filter((r) => r.ok).length;
   const totalErrors = Object.values(exportResults).filter((r) => !r.ok).length;
@@ -467,7 +528,7 @@ export default function ExportPage() {
                   <p className="text-sm font-medium text-gray-700">Pages, Blog Posts, Files and Metafields</p>
                   <p className="text-xs text-gray-500 mt-1 leading-relaxed">
                     CSV export for these content types isn&apos;t available yet. To migrate them between stores today,
-                    use <Link to="/app/collection-transfer" className="font-semibold hover:underline" style={{ color: S }}>Transfer Store</Link>, or use Shopify&apos;s admin
+                    use <Link to="/app/transfer" className="font-semibold hover:underline" style={{ color: S }}>Transfer Store</Link>, or use Shopify&apos;s admin
                     bulk actions. They&apos;ll appear here once we finalize a reliable field schema.
                   </p>
                 </div>

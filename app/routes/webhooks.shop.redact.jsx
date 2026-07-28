@@ -1,5 +1,7 @@
 import { authenticate } from "../shopify.server";
 
+export const loader = () => new Response(null, { status: 200 });
+
 export const action = async ({ request }) => {
   const { shop, topic } = await authenticate.webhook(request);
 
@@ -13,11 +15,11 @@ export const action = async ({ request }) => {
 
   try {
     await db.importJob.deleteMany({ where: { shop } });
-  } catch (_) {}
+  } catch (_) { /* table may not exist on older deployments */ }
 
   try {
     await db.sourceStore.deleteMany({ where: { shop } });
-  } catch (_) {}
+  } catch (_) { /* table may not exist on older deployments */ }
 
   console.log(`Shop redact complete for ${shop}`);
 

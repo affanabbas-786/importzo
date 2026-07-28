@@ -1,0 +1,522 @@
+// Background product-migration worker.
+// Runs as a fire-and-forget Promise inside the Node.js process — fully decoupled
+// from the HTTP request that created the MigrationJob. On process restart PM2
+// brings the app back; the status endpoint auto-resumes any RUNNING job.
+
+import prisma from "../db.server.js";
+import { encrypt, decrypt } from "../utils/encryption.server.js";
+
+const BATCH_SIZE = 250;     // products fetched per GQL page
+const CREATE_CONCURRENCY = 5; // parallel productCreate calls
+const CHECKPOINT_EVERY = 50; // write progress to DB every N products
+
+// ── Module-level registry — tracks running workers so status endpoint can
+//    detect and restart them if the process was killed mid-job ────────────────
+/** @type {Map<string, { startedAt: number, running: boolean }>} */
+const activeWorkers = new Map();
+export function isWorkerActive(jobId) { return activeWorkers.has(jobId); }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Utilities
+// ────────────────────────────────────────────────────────────────────────────
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function shopifyFetch(url, opts = {}) {
+  const MAX_RETRIES = 5;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const res = await fetch(url, opts);
+    if (res.status === 429) {
+      const retryAfter = parseFloat(res.headers.get("Retry-After") || "0");
+      const delay = Math.max(retryAfter * 1000, 1000 * Math.pow(2, attempt));
+      if (attempt < MAX_RETRIES) {
+        console.log(`[migration-worker] 429 — ${url.split("?")[0]} — attempt ${attempt + 1}/${MAX_RETRIES}, waiting ${delay}ms`);
+        await sleep(delay);
+        continue;
+      }
+    }
+    return res;
+  }
+  return fetch(url, opts);
+}
+
+// GraphQL with cost-extension throttle awareness.
+async function shopifyGraphql(shop, token, query, variables, version) {
+  const res = await shopifyFetch(`https://${shop}/admin/api/${version}/graphql.json`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": token },
+    body: JSON.stringify({ query, variables }),
+  });
+  const text = await res.text().catch(() => "");
+  let json;
+  try { json = JSON.parse(text); } catch { json = null; }
+
+  // Throttle: slow down based on remaining bucket depth before the next call.
+  const throttle = json?.extensions?.cost?.throttleStatus;
+  if (throttle) {
+    const { currentlyAvailable, restoreRate, requestedQueryCost } = throttle;
+    if (currentlyAvailable < (requestedQueryCost || 0)) {
+      const waitMs = Math.min(
+        ((requestedQueryCost - currentlyAvailable) / Math.max(restoreRate, 1)) * 1000 + 200,
+        8000,
+      );
+      console.log(`[migration-worker] throttle: waiting ${waitMs}ms (available=${currentlyAvailable}, rate=${restoreRate}/s)`);
+      await sleep(waitMs);
+    }
+  }
+
+  if (!res.ok) throw new Error(`GraphQL HTTP ${res.status}: ${text.slice(0, 300)}`);
+  if (json?.errors?.length) throw new Error(`GraphQL errors: ${JSON.stringify(json.errors).slice(0, 400)}`);
+  return json?.data || {};
+}
+
+function mediaTypeFromUrl(url = "") {
+  const s = String(url).split("?")[0].toLowerCase();
+  if (/\.(png|jpe?g|gif|webp|svg|bmp|avif)$/.test(s)) return "IMAGE";
+  if (/\.(mp4|mov|m4v|webm)$/.test(s)) return "VIDEO";
+  if (/\.(glb|usdz)$/.test(s)) return "MODEL_3D";
+  return "FILE";
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Product helpers (mirror of app.transfer.jsx, kept in sync manually)
+// ────────────────────────────────────────────────────────────────────────────
+
+async function uploadImages(targetShop, targetToken, productGid, images, version) {
+  const valid = (images || []).filter((i) => i.src && /^https?:\/\//i.test(i.src)).slice(0, 250);
+  if (!valid.length) return;
+  const mutation = `#graphql
+    mutation productCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
+      productCreateMedia(productId: $productId, media: $media) {
+        media { id }
+        mediaUserErrors { field message }
+      }
+    }`;
+  for (let i = 0; i < valid.length; i += 20) {
+    const batch = valid.slice(i, i + 20).map((img) => ({
+      originalSource: img.src, mediaContentType: "IMAGE", alt: img.alt || undefined,
+    }));
+    try {
+      await shopifyGraphql(targetShop, targetToken, mutation, { productId: productGid, media: batch }, version);
+    } catch (err) {
+      console.warn(`[migration-worker] image batch failed for ${productGid}:`, err.message);
+    }
+    if (i + 20 < valid.length) await sleep(400);
+  }
+}
+
+async function fetchSourceNonImageMedia(sourceShop, sourceToken, productId, version) {
+  const query = `#graphql
+    query ProductMedia($id: ID!) {
+      product(id: $id) {
+        media(first: 100) {
+          nodes {
+            mediaContentType alt
+            ... on Video { sources { url mimeType } }
+            ... on ExternalVideo { originUrl }
+            ... on Model3d { sources { url mimeType } }
+          }
+        }
+      }
+    }`;
+  try {
+    const data = await shopifyGraphql(sourceShop, sourceToken, query, { id: `gid://shopify/Product/${productId}` }, version);
+    return (data?.product?.media?.nodes || [])
+      .filter((m) => m.mediaContentType && m.mediaContentType !== "IMAGE")
+      .map((m) => {
+        if (m.mediaContentType === "EXTERNAL_VIDEO" && m.originUrl)
+          return { mediaContentType: "EXTERNAL_VIDEO", originalSource: m.originUrl, alt: m.alt || "" };
+        const src = (m.sources || []).find((s) => s.url && /^https?:\/\//i.test(s.url));
+        if (!src) return null;
+        return { mediaContentType: m.mediaContentType, originalSource: src.url, alt: m.alt || "" };
+      })
+      .filter(Boolean);
+  } catch (err) {
+    console.warn(`[migration-worker] non-image media fetch failed for ${productId}:`, err.message);
+    return [];
+  }
+}
+
+async function uploadNonImageMedia(targetShop, targetToken, productGid, media, version) {
+  if (!media.length) return;
+  const mutation = `#graphql
+    mutation productCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
+      productCreateMedia(productId: $productId, media: $media) {
+        media { id }
+        mediaUserErrors { field message }
+      }
+    }`;
+  for (let i = 0; i < media.length; i += 20) {
+    try {
+      await shopifyGraphql(targetShop, targetToken, mutation, { productId: productGid, media: media.slice(i, i + 20) }, version);
+    } catch (err) {
+      console.warn(`[migration-worker] non-image media upload failed for ${productGid}:`, err.message);
+    }
+    if (i + 20 < media.length) await sleep(500);
+  }
+}
+
+async function copyMetafields(sourceShop, sourceToken, targetShop, targetToken, sourceGid, targetGid, version) {
+  const resourceType = (sourceGid.split("/")[4] || "Product").toLowerCase();
+  const query = `#graphql
+    query Metafields($id: ID!) {
+      ${resourceType}(id: $id) {
+        metafields(first: 250) { edges { node { namespace key value type } } }
+      }
+    }`;
+  try {
+    const data = await shopifyGraphql(sourceShop, sourceToken, query, { id: sourceGid }, version);
+    const mfs = (data?.[resourceType]?.metafields?.edges || []).map((e) => e.node);
+    if (!mfs.length) return;
+    const mutation = `#graphql
+      mutation MetafieldsSet($metafields: [MetafieldsSetInput!]!) {
+        metafieldsSet(metafields: $metafields) {
+          metafields { namespace key }
+          userErrors { field message code }
+        }
+      }`;
+    for (let i = 0; i < mfs.length; i += 25) {
+      const batch = mfs.slice(i, i + 25)
+        .filter((mf) => mf?.namespace && mf?.key && mf.value !== undefined)
+        .map((mf) => ({
+          ownerId: targetGid,
+          namespace: mf.namespace,
+          key: mf.key,
+          value: typeof mf.value === "string" ? mf.value : JSON.stringify(mf.value),
+          type: mf.type,
+        }));
+      if (!batch.length) continue;
+      try {
+        await shopifyGraphql(targetShop, targetToken, mutation, { metafields: batch }, version);
+      } catch (err) {
+        console.warn(`[migration-worker] metafields batch failed:`, err.message);
+      }
+    }
+  } catch (err) {
+    console.warn(`[migration-worker] copyMetafields failed:`, err.message);
+  }
+}
+
+async function findProductByHandle(targetShop, targetToken, handle, version) {
+  if (!handle) return null;
+  try {
+    const data = await shopifyGraphql(targetShop, targetToken, `#graphql
+      query FindProduct($query: String!) {
+        products(first: 1, query: $query) { edges { node { id handle } } }
+      }`, { query: `handle:${handle}` }, version);
+    return data?.products?.edges?.[0]?.node || null;
+  } catch { return null; }
+}
+
+// Creates (or skips/overwrites based on conflictMode) a single product on the destination.
+// Returns { id, gid } of the destination product.
+async function transferOneProduct(src, ctx) {
+  const { targetShop, targetToken, sourceShop, sourceToken, version, conflictMode } = ctx;
+  const srcId = src.id?.split("/").pop();
+
+  if (src.giftCard || src.gift_card) throw new Error("Gift card products cannot be transferred");
+
+  // Conflict detection
+  if (src.handle && conflictMode !== "create") {
+    const existing = await findProductByHandle(targetShop, targetToken, src.handle, version);
+    if (existing) {
+      if (conflictMode === "skip") return { id: existing.id.split("/").pop(), gid: existing.id, skipped: true };
+      if (conflictMode === "overwrite") {
+        const tags = Array.isArray(src.tags) ? src.tags : (typeof src.tags === "string" ? src.tags.split(",").map((t) => t.trim()).filter(Boolean) : []);
+        const data = await shopifyGraphql(targetShop, targetToken, `#graphql
+          mutation ProductUpdate($input: ProductInput!) {
+            productUpdate(input: $input) { product { id } userErrors { field message } }
+          }`, {
+          input: {
+            id: existing.id,
+            title: src.title || "Untitled",
+            descriptionHtml: src.descriptionHtml || src.body_html || "",
+            vendor: src.vendor || "",
+            productType: src.productType || src.product_type || "",
+            tags,
+          },
+        }, version);
+        const errs = data?.productUpdate?.userErrors || [];
+        if (errs.length) throw new Error(errs.map((e) => e.message).join("; "));
+        const updated = data?.productUpdate?.product;
+        if (!updated) throw new Error("productUpdate returned no product");
+        return { id: updated.id.split("/").pop(), gid: updated.id };
+      }
+    }
+  }
+
+  const tags = Array.isArray(src.tags) ? src.tags : (typeof src.tags === "string" ? src.tags.split(",").map((t) => t.trim()).filter(Boolean) : []);
+  const srcOptions = src.options || [];
+  const variants = src.variants?.edges ? src.variants.edges.map((e) => e.node) : (src.variants || []);
+
+  const gqlInput = {
+    title: src.title || "Untitled",
+    descriptionHtml: src.descriptionHtml || src.body_html || "",
+    vendor: src.vendor || "",
+    productType: src.productType || src.product_type || "",
+    tags,
+    handle: src.handle || "",
+    status: (src.status === "ACTIVE" || !!src.publishedAt || !!src.published_at) ? "ACTIVE" : "DRAFT",
+  };
+  if (srcOptions.length > 0) gqlInput.options = srcOptions.map((o) => typeof o === "string" ? o : o.name);
+  if (variants.length > 0) {
+    gqlInput.variants = variants.map((v) => {
+      const gv = {};
+      const sel = v.selectedOptions;
+      if (sel?.length) gv.options = sel.map((s) => s.value).filter(Boolean);
+      else {
+        const opts = [v.option1, v.option2, v.option3].filter(Boolean);
+        if (opts.length) gv.options = opts;
+      }
+      if (v.price) gv.price = v.price;
+      if (v.compareAtPrice || v.compare_at_price) gv.compareAtPrice = v.compareAtPrice || v.compare_at_price;
+      if (v.sku) gv.sku = v.sku;
+      if (v.barcode) gv.barcode = v.barcode;
+      const wt = v.inventoryItem?.measurement?.weight;
+      const wVal = wt?.value ?? v.weight;
+      if (wVal !== undefined && wVal !== null && wVal !== "") gv.weight = wVal;
+      const wu = wt?.unit || v.weightUnit || v.weight_unit;
+      if (wu) gv.weightUnit = String(wu).toUpperCase();
+      const ip = v.inventoryPolicy || v.inventory_policy;
+      if (ip) gv.inventoryPolicy = ip.toUpperCase();
+      const fs = v.fulfillmentService || v.fulfillment_service;
+      if (fs) gv.fulfillmentService = fs === "gift_card" ? "MANUAL" : fs.toUpperCase();
+      if (v.requiresShipping !== undefined) gv.requiresShipping = v.requiresShipping;
+      else if (v.requires_shipping !== undefined) gv.requiresShipping = v.requires_shipping !== false;
+      if (v.taxable !== undefined) gv.taxable = v.taxable;
+      return gv;
+    });
+  }
+
+  const data = await shopifyGraphql(targetShop, targetToken, `#graphql
+    mutation ProductCreate($input: ProductInput!) {
+      productCreate(input: $input) {
+        product { id }
+        userErrors { field message }
+      }
+    }`, { input: gqlInput }, version);
+  const errs = data?.productCreate?.userErrors || [];
+  if (errs.length) throw new Error(errs.map((e) => e.message).join("; "));
+  const created = data?.productCreate?.product;
+  if (!created?.id) throw new Error("productCreate returned no product ID");
+
+  const gid = created.id;
+  const id = gid.split("/").pop();
+
+  // Images
+  const images = src.images?.edges ? src.images.edges.map((e) => ({ src: e.node?.url, alt: e.node?.altText })).filter((i) => i.src) : (src.images || []);
+  await uploadImages(targetShop, targetToken, gid, images, version);
+
+  // Non-image media (video, 3D)
+  if (srcId) {
+    const media = await fetchSourceNonImageMedia(sourceShop, sourceToken, srcId, version);
+    await uploadNonImageMedia(targetShop, targetToken, gid, media, version);
+  }
+
+  // Metafields
+  if (srcId) {
+    await copyMetafields(
+      sourceShop, sourceToken, targetShop, targetToken,
+      `gid://shopify/Product/${srcId}`, gid, version,
+    );
+  }
+
+  return { id, gid };
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Source product pagination
+// ────────────────────────────────────────────────────────────────────────────
+
+const PRODUCT_QUERY = `#graphql
+  query SourceProducts($after: String) {
+    products(first: ${BATCH_SIZE}, after: $after) {
+      edges { cursor node {
+        id title handle
+        descriptionHtml vendor productType tags status publishedAt
+        giftCard
+        options { name }
+        images(first: 250) { edges { node { url altText } } }
+        variants(first: 100) { edges { node {
+          title sku price compareAtPrice barcode taxable
+          inventoryItem { measurement { weight { value unit } } }
+          inventoryPolicy fulfillmentService requiresShipping
+          selectedOptions { name value }
+        } } }
+      } }
+      pageInfo { hasNextPage endCursor }
+    }
+  }`;
+
+async function fetchProductsPage(sourceShop, sourceToken, cursor, version) {
+  const data = await shopifyGraphql(sourceShop, sourceToken, PRODUCT_QUERY, { after: cursor || null }, version);
+  const edges = data?.products?.edges || [];
+  return {
+    products: edges.map((e) => e.node),
+    nextCursor: data?.products?.pageInfo?.endCursor || null,
+    hasNextPage: !!data?.products?.pageInfo?.hasNextPage,
+  };
+}
+
+async function getProductCount(sourceShop, sourceToken, version) {
+  try {
+    const data = await shopifyGraphql(sourceShop, sourceToken, `{ productsCount { count } }`, {}, version);
+    return data?.productsCount?.count || 0;
+  } catch { return 0; }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Main worker
+// ────────────────────────────────────────────────────────────────────────────
+
+export async function runMigrationWorker(jobId) {
+  if (activeWorkers.has(jobId)) return; // already running
+  activeWorkers.set(jobId, { startedAt: Date.now(), running: true });
+
+  try {
+    const job = await prisma.migrationJob.findUnique({ where: { id: jobId } });
+    if (!job) { activeWorkers.delete(jobId); return; }
+    if (job.status === "COMPLETED" || job.status === "FAILED") { activeWorkers.delete(jobId); return; }
+
+    const sourceToken = decrypt(job.sourceToken);
+    const destToken = decrypt(job.destToken);
+    const ctx = {
+      targetShop: job.shop,
+      targetToken: destToken,
+      sourceShop: job.sourceShop,
+      sourceToken,
+      version: job.apiVersion,
+      conflictMode: job.conflictMode,
+    };
+
+    await prisma.migrationJob.update({ where: { id: jobId }, data: { status: "RUNNING" } });
+    console.log(`[migration-worker] job=${jobId} STARTED source=${job.sourceShop} dest=${job.shop} conflictMode=${job.conflictMode}`);
+
+    // Get total product count upfront for progress percentage
+    if (!job.totalProducts) {
+      const total = await getProductCount(job.sourceShop, sourceToken, job.apiVersion);
+      if (total > 0) await prisma.migrationJob.update({ where: { id: jobId }, data: { totalProducts: total } });
+    }
+
+    let cursor = job.lastCursor || null;
+    let processedDelta = 0;
+    let failedDelta = 0;
+    const errorLog = [];
+
+    // Fetch already-done product IDs from ProductMapping to skip on resume
+    const doneSet = new Set();
+    const doneMappings = await prisma.productMapping.findMany({
+      where: { jobId, status: "DONE" },
+      select: { sourceProductId: true },
+    });
+    for (const m of doneMappings) doneSet.add(m.sourceProductId);
+    console.log(`[migration-worker] job=${jobId} resuming from cursor=${cursor} already-done=${doneSet.size}`);
+
+    let hasMore = true;
+    while (hasMore) {
+      let page;
+      try {
+        page = await fetchProductsPage(job.sourceShop, sourceToken, cursor, job.apiVersion);
+      } catch (err) {
+        console.error(`[migration-worker] job=${jobId} failed to fetch product page:`, err.message);
+        await prisma.migrationJob.update({
+          where: { id: jobId },
+          data: { status: "FAILED", errorLog: JSON.stringify([...errorLog, { error: `Fetch page failed: ${err.message}` }]) },
+        });
+        activeWorkers.delete(jobId);
+        return;
+      }
+
+      const { products, nextCursor, hasNextPage } = page;
+      hasMore = hasNextPage;
+
+      // Process this page in small parallel batches
+      for (let i = 0; i < products.length; i += CREATE_CONCURRENCY) {
+        const slice = products.slice(i, i + CREATE_CONCURRENCY);
+        await Promise.all(slice.map(async (src) => {
+          const srcId = src.id?.split("/").pop();
+          if (!srcId) return;
+
+          // Skip if already transferred (idempotency on resume)
+          if (doneSet.has(srcId)) return;
+
+          try {
+            const { id: destId, gid: destGid, skipped } = await transferOneProduct(src, ctx);
+            doneSet.add(srcId);
+            await prisma.productMapping.upsert({
+              where: { jobId_sourceProductId: { jobId, sourceProductId: srcId } },
+              create: { jobId, sourceProductId: srcId, destProductId: destId, status: "DONE" },
+              update: { destProductId: destId, status: "DONE", error: null },
+            });
+            processedDelta++;
+            if (skipped) console.log(`[migration-worker] job=${jobId} skipped (conflict): ${src.title}`);
+          } catch (err) {
+            failedDelta++;
+            const entry = { sourceId: srcId, title: src.title || "(no title)", error: err.message };
+            errorLog.push(entry);
+            console.warn(`[migration-worker] job=${jobId} product failed: ${srcId} — ${err.message}`);
+            await prisma.productMapping.upsert({
+              where: { jobId_sourceProductId: { jobId, sourceProductId: srcId } },
+              create: { jobId, sourceProductId: srcId, status: "FAILED", error: err.message },
+              update: { status: "FAILED", error: err.message },
+            });
+          }
+        }));
+
+        // Checkpoint: flush progress to DB after every CHECKPOINT_EVERY products
+        if ((processedDelta + failedDelta) % CHECKPOINT_EVERY === 0 || i + CREATE_CONCURRENCY >= products.length) {
+          if (processedDelta > 0 || failedDelta > 0) {
+            await prisma.migrationJob.update({
+              where: { id: jobId },
+              data: {
+                processedProducts: { increment: processedDelta },
+                failedProducts: { increment: failedDelta },
+                lastCursor: cursor,
+                errorLog: JSON.stringify(errorLog.slice(-200)),
+              },
+            });
+            processedDelta = 0;
+            failedDelta = 0;
+          }
+        }
+      }
+
+      // Advance cursor to end of this page
+      if (nextCursor) {
+        cursor = nextCursor;
+        await prisma.migrationJob.update({ where: { id: jobId }, data: { lastCursor: cursor } });
+      }
+
+      // Small breathing room between pages to avoid hammering Shopify
+      if (hasMore) await sleep(300);
+    }
+
+    // Flush any remaining delta
+    if (processedDelta > 0 || failedDelta > 0) {
+      await prisma.migrationJob.update({
+        where: { id: jobId },
+        data: {
+          processedProducts: { increment: processedDelta },
+          failedProducts: { increment: failedDelta },
+          errorLog: JSON.stringify(errorLog.slice(-200)),
+        },
+      });
+    }
+
+    await prisma.migrationJob.update({
+      where: { id: jobId },
+      data: { status: "COMPLETED", lastCursor: null, errorLog: JSON.stringify(errorLog.slice(-200)) },
+    });
+    console.log(`[migration-worker] job=${jobId} COMPLETED`);
+  } catch (err) {
+    console.error(`[migration-worker] job=${jobId} UNCAUGHT:`, err);
+    try {
+      await prisma.migrationJob.update({
+        where: { id: jobId },
+        data: { status: "FAILED", errorLog: JSON.stringify([{ error: err.message }]) },
+      });
+    } catch { /* best-effort */ }
+  } finally {
+    activeWorkers.delete(jobId);
+  }
+}

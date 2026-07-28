@@ -468,8 +468,8 @@ export default function FullImportPage() {
                 {MODULE_KEYS.map((mod) => {
                   const cfg = MODULES[mod];
                   return (
-                    <label key={mod} className={`flex items-center gap-4 rounded-lg border p-4 cursor-pointer transition-all ${enabled[mod] ? "border-green-800/30 bg-green-50/30" : "border-gray-200 hover:border-gray-300"}`}>
-                      <input type="checkbox" checked={enabled[mod]} onChange={(e) => setEnabled((p) => ({ ...p, [mod]: e.target.checked }))}
+                    <label key={mod} htmlFor={`module-${mod}`} aria-label={cfg.label} className={`flex items-center gap-4 rounded-lg border p-4 cursor-pointer transition-all ${enabled[mod] ? "border-green-800/30 bg-green-50/30" : "border-gray-200 hover:border-gray-300"}`}>
+                      <input id={`module-${mod}`} type="checkbox" checked={enabled[mod]} onChange={(e) => setEnabled((p) => ({ ...p, [mod]: e.target.checked }))}
                         className="w-4 h-4 rounded border-gray-300 accent-green-800" style={{ accentColor: P }} />
                       <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background: enabled[mod] ? "rgba(23,50,10,0.1)" : "#f3f4f6", color: enabled[mod] ? S : "#9ca3af" }}>
                         <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d={cfg.icon} /></svg>
@@ -486,8 +486,8 @@ export default function FullImportPage() {
 
             {/* Options row */}
             <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
-              <label className="flex items-center gap-3 cursor-pointer">
-                <input type="checkbox" checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} className="w-4 h-4 rounded border-gray-300" style={{ accentColor: P }} />
+              <label htmlFor="dry-run-checkbox" aria-label="Dry run (test mode)" className="flex items-center gap-3 cursor-pointer">
+                <input id="dry-run-checkbox" type="checkbox" checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} className="w-4 h-4 rounded border-gray-300" style={{ accentColor: P }} />
                 <div>
                   <p className="text-sm font-medium text-gray-900">Dry run (test mode)</p>
                   <p className="text-xs text-gray-400">Validate everything without making changes to your store</p>
@@ -511,7 +511,7 @@ export default function FullImportPage() {
           <div className="space-y-4 animate-fade-in">
             <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
               <h2 className="text-base font-semibold text-gray-900 mb-1" style={{ fontFamily: F }}>Upload your CSV files</h2>
-              <p className="text-xs text-gray-500 mb-5">One file per data type. We'll auto-detect columns and delimiters.</p>
+              <p className="text-xs text-gray-500 mb-5">One file per data type. We&apos;ll auto-detect columns and delimiters.</p>
 
               <div className="space-y-4">
                 {enabledMods.map((mod) => {
@@ -752,7 +752,7 @@ export default function FullImportPage() {
                 </div>
                 <div>
                   <h3 className="text-base font-semibold text-gray-900">Importing your data...</h3>
-                  <p className="text-xs text-gray-500 mt-1">Please don't close this page.</p>
+                  <p className="text-xs text-gray-500 mt-1">Please don&apos;t close this page.</p>
                 </div>
               </div>
 

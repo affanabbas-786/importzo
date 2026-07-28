@@ -239,7 +239,7 @@ const OPTION_KEYWORDS = {
 // ═══════════════════════════════════════════════════════════════════
 
 export function smartMapColumns(headers, dataRows, aliases, options = {}) {
-  const { multiMap = [], singleMap = true } = options;
+  const { multiMap = [] } = options;
   // multiMap: field names that can be mapped to multiple columns (e.g. "image_src", "video_src")
 
   const mapping = {};

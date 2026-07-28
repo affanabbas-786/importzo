@@ -8,4 +8,7 @@ if (process.env.NODE_ENV !== "production") {
 
 const prisma = global.prismaGlobal ?? new PrismaClient();
 
+// WAL mode: allows concurrent reads (status polling) while the worker writes.
+prisma.$executeRawUnsafe("PRAGMA journal_mode=WAL;").catch(() => {});
+
 export default prisma;

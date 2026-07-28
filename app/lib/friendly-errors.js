@@ -33,7 +33,7 @@ export function friendlyError(raw) {
     if (pattern.test(msg)) return friendly;
   }
   // Strip verbose JSON-encoded Shopify error objects
-  const trimmed = msg.replace(/[{}"\[\]]/g, " ").replace(/\s+/g, " ").trim();
+  const trimmed = msg.replace(/[{}"[\]]/g, " ").replace(/\s+/g, " ").trim();
   return trimmed.length > 160 ? trimmed.slice(0, 157) + "..." : trimmed;
 }
 

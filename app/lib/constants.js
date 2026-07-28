@@ -14,7 +14,7 @@ export const JOB_TYPE_CONFIG = {
   products:    { label: "Products",    bg: "bg-green-50",   text: "text-green-700",   route: "/app/product-importer" },
   collections: { label: "Collections", bg: "bg-purple-50",  text: "text-purple-700",  route: "/app/collections" },
   inventory:   { label: "Inventory",   bg: "bg-amber-50",   text: "text-amber-700",   route: "/app/inventory" },
-  transfer:    { label: "Transfer",    bg: "bg-indigo-50",  text: "text-indigo-700",  route: "/app/collection-transfer" },
+  transfer:    { label: "Transfer",    bg: "bg-indigo-50",  text: "text-indigo-700",  route: "/app/transfer" },
 };
 
 // Import job status badges — used in dashboard and activity

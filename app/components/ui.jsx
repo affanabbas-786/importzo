@@ -3,6 +3,8 @@
 // Reusable across all import/export/transfer flows
 // ═══════════════════════════════════════════════════════════════════
 
+import PropTypes from "prop-types";
+
 const P = "#17320A";
 const S = "#2E6316";
 const F = "'ImportzoFont', sans-serif";
@@ -285,3 +287,57 @@ export function generateTransferResultSummary(results) {
   const variant = totalErrors === 0 ? "success" : totalSuccess > 0 ? "warning" : "error";
   return { items, variant };
 }
+
+StatusBadge.propTypes = {
+  status: PropTypes.string,
+  label: PropTypes.string,
+  showDot: PropTypes.bool,
+};
+
+EmptyState.propTypes = {
+  icon: PropTypes.node,
+  title: PropTypes.string,
+  description: PropTypes.string,
+  action: PropTypes.node,
+};
+
+LoadingState.propTypes = {
+  message: PropTypes.string,
+  size: PropTypes.string,
+};
+
+ErrorBanner.propTypes = {
+  title: PropTypes.string,
+  message: PropTypes.string,
+  onDismiss: PropTypes.func,
+  onRetry: PropTypes.func,
+};
+
+SuccessBanner.propTypes = {
+  message: PropTypes.string,
+  onDismiss: PropTypes.func,
+};
+
+ConfirmDialog.propTypes = {
+  title: PropTypes.string,
+  message: PropTypes.string,
+  confirmLabel: PropTypes.string,
+  cancelLabel: PropTypes.string,
+  variant: PropTypes.string,
+  onConfirm: PropTypes.func,
+  onCancel: PropTypes.func,
+};
+
+FileSourcePicker.propTypes = {
+  onFileSelected: PropTypes.func,
+  onSourceChange: PropTypes.func,
+  accept: PropTypes.string,
+  disabled: PropTypes.bool,
+};
+
+AISummary.propTypes = {
+  icon: PropTypes.node,
+  title: PropTypes.string,
+  items: PropTypes.arrayOf(PropTypes.string),
+  variant: PropTypes.string,
+};

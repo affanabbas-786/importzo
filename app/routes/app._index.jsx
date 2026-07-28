@@ -1,3 +1,4 @@
+import PropTypes from "prop-types";
 import { useState, useCallback, Fragment } from "react";
 import { useLoaderData, useNavigation, useRouteError, Link } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
@@ -92,6 +93,7 @@ function JobStatusBadge({ status }) {
     </span>
   );
 }
+JobStatusBadge.propTypes = { status: PropTypes.string };
 
 // ── Expanded detail row ──
 function DetailPanel({ job }) {
@@ -146,6 +148,15 @@ function DetailPanel({ job }) {
   );
 }
 
+DetailPanel.propTypes = {
+  job: PropTypes.shape({
+    results: PropTypes.oneOfType([PropTypes.string, PropTypes.array, PropTypes.object]),
+    id: PropTypes.string,
+    fileName: PropTypes.string,
+    totalRows: PropTypes.number,
+  }),
+};
+
 // ═══════════════════════════════════════════════════════════════════
 // Dashboard
 // ═══════════════════════════════════════════════════════════════════
@@ -153,6 +164,7 @@ function DetailPanel({ job }) {
 function Skeleton({ className = "" }) {
   return <div className={`animate-pulse rounded-lg bg-gray-200 ${className}`} />;
 }
+Skeleton.propTypes = { className: PropTypes.string };
 
 function DashboardSkeleton() {
   return (
@@ -272,7 +284,7 @@ export default function Dashboard() {
           </Link>
 
           <Link
-            to="/app/collection-transfer"
+            to="/app/transfer"
             className="group bg-white rounded-xl border border-gray-200 p-5 shadow-sm hover:shadow-lg transition-all duration-200 hover:-translate-y-1 flex items-start gap-4"
           >
             <div className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: "rgba(23,50,10,0.08)", color: secondary }}>
