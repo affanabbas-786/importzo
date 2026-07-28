@@ -11,10 +11,14 @@
 import prisma from "../db.server.js";
 import { apiVersion } from "../shopify.server.js";
 import { encrypt, decrypt } from "../utils/encryption.server.js";
+import { actorForSchedule } from "./audit.server.js";
 
 export async function startJobFromSchedule(schedule) {
   const job = await prisma.migrationJob.create({
     data: {
+      // Phase 3.7: attributed to the schedule, not a human — there is no
+      // request, no session and no IP behind a cron-driven run.
+      ...actorForSchedule(schedule.id),
       shop: schedule.shop,
       sourceShop: schedule.sourceShop,
       // Stored encrypted on the schedule; MigrationJob stores its own

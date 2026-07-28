@@ -13,6 +13,8 @@ import prisma from "../db.server";
 import { shopifyGraphql } from "../lib/shopify-api.server";
 import { createBackup, restoreBackup } from "../lib/backup.server";
 import { withPolicy } from "../lib/rate-limit.server";
+import { createLogBuffer } from "../lib/transfer-log.server";
+import { actorFromSession, describeActor } from "../lib/audit.server";
 
 const LIST_LIMIT = 50;
 
@@ -81,11 +83,20 @@ export const action = async ({ request }) => {
       return Response.json({ ok: false, error: "Backup not found" }, { status: 404 });
     }
 
+    // Phase 3.7: restore overwrites live product data, so record who asked.
+    const actor = actorFromSession(request, session);
+    console.log(`[api/backup] restore of ${backupId} requested by ${describeActor(actor)} for ${session.shop}`);
+
     // Writes back over every product in the snapshot — one at a time.
     return withPolicy({ policyName: "restore", shop: session.shop }, async () => {
       const result = await restoreBackup({
         prisma, shopifyGraphql, backup,
         token: session.accessToken, version,
+        // restoreBackup writes per-record log entries when given a buffer;
+        // attribute them to whoever triggered the restore.
+        logBuffer: backup.jobId
+          ? createLogBuffer({ prisma, jobId: backup.jobId, shop: session.shop, actor })
+          : null,
       });
 
       return Response.json({

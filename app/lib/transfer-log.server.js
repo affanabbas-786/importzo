@@ -45,7 +45,10 @@ export function truncate(value, max) {
 
 // Normalizes a caller-supplied entry into exactly the columns the table has,
 // so a typo'd extra key can't blow up the createMany call at runtime.
-export function normalizeEntry({ jobId, shop, entityType, action, sourceId, destId, title, reason, detail }) {
+export function normalizeEntry({
+  jobId, shop, entityType, action, sourceId, destId, title, reason, detail,
+  actorType, actorId, actorEmail, actorIp,
+}) {
   if (!jobId) throw new Error("transfer-log: jobId is required");
   if (!entityType) throw new Error("transfer-log: entityType is required");
   if (!Object.values(ACTION).includes(action)) {
@@ -61,6 +64,12 @@ export function normalizeEntry({ jobId, shop, entityType, action, sourceId, dest
     title: truncate(title, MAX_REASON_CHARS),
     reason: truncate(reason, MAX_REASON_CHARS),
     detail: truncate(detail, MAX_DETAIL_CHARS),
+    // Phase 3.7 audit trail. Defaults to "unknown" rather than guessing —
+    // an honestly unattributed row beats a wrongly attributed one.
+    actorType: actorType || "unknown",
+    actorId: actorId != null ? String(actorId) : null,
+    actorEmail: actorEmail || null,
+    actorIp: actorIp || null,
   };
 }
 
@@ -71,7 +80,10 @@ export function normalizeEntry({ jobId, shop, entityType, action, sourceId, dest
 // Logging is best-effort by design: a logging failure must never fail or
 // abort an in-flight transfer, so flush swallows its own errors (and reports
 // them via `lastError` for tests/diagnostics).
-export function createLogBuffer({ prisma, jobId, shop, flushEvery = 50 }) {
+// `actor` is stamped onto every entry this buffer writes. The background
+// worker has no request to derive it from, so it passes the actor captured
+// on MigrationJob at trigger time (see audit.server.js).
+export function createLogBuffer({ prisma, jobId, shop, flushEvery = 50, actor = null }) {
   let pending = [];
   let written = 0;
   let lastError = null;
@@ -95,7 +107,9 @@ export function createLogBuffer({ prisma, jobId, shop, flushEvery = 50 }) {
     async add(entry) {
       let normalized;
       try {
-        normalized = normalizeEntry({ jobId, shop, ...entry });
+        // Entry-level actor wins over the buffer default, so a caller can
+        // attribute an individual record differently if it ever needs to.
+        normalized = normalizeEntry({ jobId, shop, ...(actor || {}), ...entry });
       } catch (err) {
         // A malformed entry is a caller bug, not a transfer failure — record
         // and move on rather than taking the migration down with it.

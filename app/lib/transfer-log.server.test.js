@@ -41,7 +41,11 @@ describe("normalizeEntry", () => {
   it("produces exactly the table's columns", () => {
     const result = normalizeEntry({ ...base, sourceId: 1, destId: 2, title: "Tee" });
     expect(Object.keys(result).sort()).toEqual(
-      ["action", "destId", "detail", "entityType", "jobId", "reason", "shop", "sourceId", "title"].sort(),
+      [
+        "action", "destId", "detail", "entityType", "jobId", "reason", "shop", "sourceId", "title",
+        // Phase 3.7 audit trail
+        "actorType", "actorId", "actorEmail", "actorIp",
+      ].sort(),
     );
   });
 
@@ -136,6 +140,38 @@ describe("createLogBuffer", () => {
 
     expect(prisma.transferLogEntry.createMany).not.toHaveBeenCalled();
     expect(buf.getLastError().message).toMatch(/unknown action/);
+  });
+
+  // ── Phase 3.7 audit trail ──
+  it("stamps the buffer's actor onto every entry", async () => {
+    const actor = { actorType: "user", actorId: "42", actorEmail: "a@b.com", actorIp: "203.0.113.7" };
+    const buf = createLogBuffer({ prisma, jobId: "job-1", shop: "s", flushEvery: 1, actor });
+    await buf.add({ entityType: ENTITY.PRODUCT, action: ACTION.CREATED });
+
+    expect(prisma.transferLogEntry.createMany.mock.calls[0][0].data[0]).toMatchObject(actor);
+  });
+
+  it("records an honest 'unknown' actor rather than guessing when none is supplied", async () => {
+    const buf = createLogBuffer({ prisma, jobId: "job-1", shop: "s", flushEvery: 1 });
+    await buf.add({ entityType: ENTITY.PRODUCT, action: ACTION.CREATED });
+
+    const row = prisma.transferLogEntry.createMany.mock.calls[0][0].data[0];
+    expect(row.actorType).toBe("unknown");
+    expect(row.actorId).toBeNull();
+    expect(row.actorEmail).toBeNull();
+    expect(row.actorIp).toBeNull();
+  });
+
+  it("lets an individual entry override the buffer's actor", async () => {
+    const buf = createLogBuffer({
+      prisma, jobId: "job-1", shop: "s", flushEvery: 1,
+      actor: { actorType: "user", actorEmail: "a@b.com" },
+    });
+    await buf.add({ entityType: ENTITY.PRODUCT, action: ACTION.CREATED, actorType: "system", actorEmail: null });
+
+    const row = prisma.transferLogEntry.createMany.mock.calls[0][0].data[0];
+    expect(row.actorType).toBe("system");
+    expect(row.actorEmail).toBeNull();
   });
 
   it("stamps every entry with the buffer's jobId and shop", async () => {

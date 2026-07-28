@@ -697,6 +697,66 @@ describe("runMigrationWorker", () => {
     });
   });
 
+  // ── Phase 3.7: audit trail ──
+  describe("audit trail", () => {
+    it("attributes background-written log entries to whoever triggered the job", async () => {
+      // The worker has no request. If the actor didn't ride along on the job,
+      // every entry it writes would be unattributable.
+      fakePrisma = createFakePrisma(baseJob({
+        actorType: "user", actorId: "42", actorEmail: "staff@merchant.com", actorIp: "203.0.113.7",
+      }));
+      global.fetch = makeFetch({ productPages: [{ nodes: [productNode(1), productNode(2)], hasNextPage: false }] });
+
+      await runMigrationWorker("job-1");
+
+      const entries = fakePrisma.__getLogEntries();
+      expect(entries.length).toBeGreaterThan(0);
+      for (const e of entries) {
+        expect(e).toMatchObject({
+          actorType: "user", actorId: "42", actorEmail: "staff@merchant.com", actorIp: "203.0.113.7",
+        });
+      }
+    });
+
+    it("attributes a scheduled run to the schedule, with no IP", async () => {
+      fakePrisma = createFakePrisma(baseJob({ actorType: "schedule", actorId: "sched-1" }));
+      global.fetch = makeFetch({ productPages: [{ nodes: [productNode(1)], hasNextPage: false }] });
+
+      await runMigrationWorker("job-1");
+
+      const entry = fakePrisma.__getLogEntries().find((e) => e.entityType === "product");
+      expect(entry.actorType).toBe("schedule");
+      expect(entry.actorId).toBe("sched-1");
+      expect(entry.actorIp).toBeNull(); // a cron run has no client IP
+    });
+
+    it("falls back to 'unknown' for a job recorded before audit columns existed", async () => {
+      // Pre-migration rows default actorType to 'unknown' — they must not be
+      // misattributed to whoever happens to run the job later.
+      fakePrisma = createFakePrisma(baseJob());
+      global.fetch = makeFetch({ productPages: [{ nodes: [productNode(1)], hasNextPage: false }] });
+
+      await runMigrationWorker("job-1");
+
+      expect(fakePrisma.__getLogEntries()[0].actorType).toBe("unknown");
+    });
+
+    it("attributes a failed record to the same actor as a successful one", async () => {
+      fakePrisma = createFakePrisma(baseJob({ actorType: "user", actorEmail: "staff@merchant.com" }));
+      global.fetch = makeFetch({
+        productPages: [{ nodes: [productNode(1)], hasNextPage: false }],
+        productCreateHandler: () => jsonResponse({
+          data: { productCreate: { product: null, userErrors: [{ message: "Title can't be blank" }] } },
+        }),
+      });
+
+      await runMigrationWorker("job-1");
+
+      const failed = fakePrisma.__getLogEntries().find((e) => e.action === "failed");
+      expect(failed.actorEmail).toBe("staff@merchant.com");
+    });
+  });
+
   // ── Phase 2: granular per-record transfer log ──
   describe("detailed per-record transfer log", () => {
     it("writes a 'created' log entry per successfully created product", async () => {

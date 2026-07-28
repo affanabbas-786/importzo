@@ -8,6 +8,7 @@ import prisma from "../db.server";
 import { runMigrationWorker } from "../lib/migration-worker.server";
 import { getSavedSourceStore } from "../lib/safe-db";
 import { enforcePolicy, POLICIES } from "../lib/rate-limit.server";
+import { actorFromSession, describeActor } from "../lib/audit.server";
 
 export const action = async ({ request }) => {
   if (request.method !== "POST") {
@@ -79,6 +80,11 @@ export const action = async ({ request }) => {
     }, { status: 429, headers: { "Retry-After": "60", "Cache-Control": "no-store" } });
   }
 
+  // Phase 3.7: capture WHO triggered this, and from where, at trigger time.
+  // The worker is fire-and-forget, so this is the only moment a request (and
+  // therefore an IP and a session) still exists to attribute it to.
+  const actor = actorFromSession(request, session);
+
   const job = await prisma.migrationJob.create({
     data: {
       shop: targetShop,
@@ -88,8 +94,11 @@ export const action = async ({ request }) => {
       apiVersion: version,
       conflictMode,
       status: "PENDING",
+      ...actor,
     },
   });
+
+  console.log(`[api/migration-job] job=${job.id} triggered by ${describeActor(actor)} for ${targetShop}`);
 
   // Fire-and-forget: worker runs in the Node.js event loop, decoupled from this HTTP response.
   runMigrationWorker(job.id).catch((err) =>

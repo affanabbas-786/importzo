@@ -6,6 +6,7 @@ import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { isWorkerActive, runMigrationWorker } from "../lib/migration-worker.server";
 import { fetchJobLog, fetchJobLogSummary } from "../lib/transfer-log.server";
+import { describeActor } from "../lib/audit.server";
 
 export const loader = async ({ request, params }) => {
   await authenticate.admin(request);
@@ -20,6 +21,8 @@ export const loader = async ({ request, params }) => {
       totalProducts: true, processedProducts: true, failedProducts: true,
       lastCursor: true, errorLog: true, conflictMode: true,
       createdAt: true, updatedAt: true,
+      // Phase 3.7 audit trail: who triggered this transfer, and from where.
+      actorType: true, actorId: true, actorEmail: true, actorIp: true,
     },
   });
 
@@ -64,6 +67,15 @@ export const loader = async ({ request, params }) => {
     errorLog: errorLog.slice(-50),
     logSummary,
     log,
+    // Phase 3.7: who triggered this transfer, when, from which IP.
+    triggeredBy: {
+      actorType: job.actorType,
+      actorId: job.actorId,
+      actorEmail: job.actorEmail,
+      actorIp: job.actorIp,
+      at: job.createdAt,
+      description: describeActor(job),
+    },
     updatedAt: job.updatedAt,
   });
 };

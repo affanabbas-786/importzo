@@ -9,6 +9,7 @@ import { shopifyGraphql } from "./shopify-api.server.js";
 import { createProductWithVariants } from "./product-variants.server.js";
 import { createLogBuffer, ACTION, ENTITY } from "./transfer-log.server.js";
 import { createBackup } from "./backup.server.js";
+import { actorFromRecord, describeActor } from "./audit.server.js";
 
 const BATCH_SIZE = 250;     // products fetched per GQL page
 const CREATE_CONCURRENCY = 5; // parallel productCreate calls
@@ -394,7 +395,7 @@ export async function runMigrationWorker(jobId) {
     };
 
     await prisma.migrationJob.update({ where: { id: jobId }, data: { status: "RUNNING" } });
-    console.log(`[migration-worker] job=${jobId} STARTED source=${job.sourceShop} dest=${job.shop} conflictMode=${job.conflictMode}`);
+    console.log(`[migration-worker] job=${jobId} STARTED source=${job.sourceShop} dest=${job.shop} conflictMode=${job.conflictMode} triggeredBy=${describeActor(actorFromRecord(job))}`);
 
     // Declared before the backup step so backup warnings land in the same log
     // the rest of the job appends to.
@@ -451,7 +452,12 @@ export async function runMigrationWorker(jobId) {
 
     // Granular per-record log (Phase 2). Buffered so a 50k-product job doesn't
     // issue 50k INSERTs; best-effort so a logging failure can't abort the job.
-    logBuffer = createLogBuffer({ prisma, jobId, shop: job.shop });
+    //
+    // Phase 3.7: this worker has no request, so the actor comes from what was
+    // recorded on the job when a human (or a schedule) triggered it. Every
+    // entry written below is attributed to them.
+    const actor = actorFromRecord(job);
+    logBuffer = createLogBuffer({ prisma, jobId, shop: job.shop, actor });
 
     // Fetch already-done product IDs from ProductMapping to skip on resume
     const doneSet = new Set();

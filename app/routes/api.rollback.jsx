@@ -16,6 +16,7 @@ import { shopifyGraphql } from "../lib/shopify-api.server";
 import { getRollbackPlan, rollbackJob, DEFAULT_ROLLBACK_WINDOW_HOURS } from "../lib/rollback.server";
 import { createLogBuffer } from "../lib/transfer-log.server";
 import { withPolicy } from "../lib/rate-limit.server";
+import { actorFromSession, describeActor } from "../lib/audit.server";
 
 export const loader = async ({ request }) => {
   const { session } = await authenticate.admin(request);
@@ -71,9 +72,14 @@ export const action = async ({ request }) => {
   const jobId = (formData.get("jobId") || "").trim();
   if (!jobId) return Response.json({ ok: false, error: "Missing jobId" }, { status: 400 });
 
+  // Phase 3.7: rollback deletes products, so who asked for it is the single
+  // most important thing to have on record afterwards.
+  const actor = actorFromSession(request, session);
+  console.log(`[api/rollback] job=${jobId} rollback requested by ${describeActor(actor)} for ${session.shop}`);
+
   // Deletes products — never run two rollbacks for one shop concurrently.
   return withPolicy({ policyName: "rollback", shop: session.shop }, async () => {
-    const logBuffer = createLogBuffer({ prisma, jobId, shop: session.shop });
+    const logBuffer = createLogBuffer({ prisma, jobId, shop: session.shop, actor });
 
     const result = await rollbackJob({
       prisma, shopifyGraphql, jobId,

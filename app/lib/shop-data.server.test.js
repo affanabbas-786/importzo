@@ -124,6 +124,30 @@ describe("shop data inventory", () => {
     });
   });
 
+  // Phase 3.7 introduced actorEmail/actorIp/actorId — personal data about the
+  // merchant's staff. Any model holding it must be erased on shop/redact, and
+  // that has to keep being true as the schema grows.
+  it("erases every model that stores audit PII (actorEmail / actorIp / actorId)", () => {
+    const schema = fs.readFileSync(path.resolve(process.cwd(), "prisma/schema.prisma"), "utf8");
+
+    const modelsWithPii = [];
+    for (const m of schema.matchAll(/^model\s+(\w+)\s*\{([\s\S]*?)^\}/gm)) {
+      if (/\b(actorEmail|actorIp|actorId)\b/.test(m[2])) {
+        modelsWithPii.push(m[1].charAt(0).toLowerCase() + m[1].slice(1));
+      }
+    }
+
+    // Sanity: if this finds nothing the assertion below would pass vacuously.
+    expect(modelsWithPii.length, "expected at least one model to carry audit PII").toBeGreaterThan(0);
+
+    const uncovered = modelsWithPii.filter((m) => !SHOP_SCOPED_MODELS.includes(m));
+    expect(
+      uncovered,
+      `Model(s) ${uncovered.join(", ")} store audit PII (actor email/IP) but are not erased on ` +
+      `shop/redact. Personal data must not survive a GDPR erasure request.`,
+    ).toEqual([]);
+  });
+
   it("deletes child rows before their parent job", () => {
     // Once MigrationJob rows are gone, ProductMapping/TransferLogEntry are
     // unreachable, so they must come first.

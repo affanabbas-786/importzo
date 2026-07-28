@@ -95,6 +95,15 @@ model MigrationJob {
   backupId          String?
   backupStatus      String? // mirrors StoreBackup.status for cheap display
   rolledBackAt      DateTime?
+  // Phase 3.7 audit trail: who triggered this transfer, and from where.
+  // Captured at creation time because the worker is fire-and-forget — by the
+  // time it writes log entries there is no request, and therefore no IP or
+  // session, to attribute them to. The worker reads these back and stamps
+  // them onto every TransferLogEntry it writes.
+  actorType         String   @default("unknown") // user | schedule | system | unknown
+  actorId           String?
+  actorEmail        String?
+  actorIp           String?
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 }
@@ -191,6 +200,13 @@ model TransferLogEntry {
   title      String?
   reason     String? // why it was skipped, or the failure message
   detail     String? // JSON: payload snapshot / warnings, truncated
+  // Phase 3.7 audit trail: who caused this record to change, and from where.
+  // `createdAt` is the "when". actorEmail is personal data, so this table is
+  // covered by shop/redact erasure (see shop-data.server.js).
+  actorType  String   @default("unknown") // user | schedule | system | unknown
+  actorId    String? // Shopify staff user id, when the session exposes one
+  actorEmail String?
+  actorIp    String?
   createdAt  DateTime @default(now())
 
   @@index([jobId])
