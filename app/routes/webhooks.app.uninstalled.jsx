@@ -25,6 +25,25 @@ export const action = async ({ request }) => {
   // If this webhook already ran, the session may have been deleted previously.
   if (shop) {
     await db.session.deleteMany({ where: { shop } });
+
+    // Uninstall is not erasure — shop/redact does that 48h later. But the
+    // shop's offline token is revoked the moment the app is uninstalled, so
+    // any enabled ScheduledSync would keep firing against a dead credential
+    // until it burned through its failure budget. Disable them immediately,
+    // with a reason the merchant sees if they reinstall.
+    try {
+      const { count } = await db.scheduledSync.updateMany({
+        where: { shop, enabled: true },
+        data: {
+          enabled: false,
+          disabledReason: "Disabled automatically because the app was uninstalled from this store.",
+        },
+      });
+      if (count) console.log(`[app/uninstalled] ${shop}: disabled ${count} scheduled sync(s)`);
+    } catch (err) {
+      // Table may not exist on an older deployment — non-fatal.
+      console.warn(`[app/uninstalled] ${shop}: could not disable scheduled syncs:`, err?.message);
+    }
   }
 
   return new Response();
