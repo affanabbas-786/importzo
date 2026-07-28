@@ -215,6 +215,37 @@ against the pre-session baseline) — no new lint errors were introduced.
 - The full-file-in-one-HTTP-request architecture limit for CSV import/export (see Task 5) — documented,
   not fixed, since fixing it properly means a UX change (polling), not just a hardening fix.
 
+## Post-Phase-1 fix: productCreate sending options/variants directly on ProductInput
+
+**Commit:** `82c6720` (on `main`)
+
+Another bug found via manual production testing (separate from the giftCard fix above, which was
+confirmed working). Error: `Variable $input of type ProductInput! was provided invalid value for
+options (Field is not defined on ProductInput), variants (Field is not defined on ProductInput)`.
+
+Verified against shopify.dev's GraphQL reference for the pinned API version (2025-10) rather than
+guessing: `ProductInput` has neither field; `productCreate`'s `input: ProductInput` argument is
+deprecated in favor of `product: ProductCreateInput`, which has `productOptions` but still no
+`variants` — productCreate only ever creates a single initial variant. Multi-variant products need a
+follow-up `productVariantsBulkCreate(productId, variants, strategy: REMOVE_STANDALONE_VARIANT)` call,
+whose `ProductVariantsBulkInput` nests `sku`/`requiresShipping`/`weight` under `inventoryItem` rather
+than directly on the variant.
+
+This exact bug existed in three places (all building the same deprecated shape): `migration-worker.server.js`,
+`app.transfer.jsx`, and `app.product-importer.jsx`. Extracted the corrected two-mutation flow into a
+shared, unit-tested `app/lib/product-variants.server.js` instead of fixing it three times separately, and
+wired all three call sites through it. 14 new unit tests for the shared module, plus a targeted
+multi-variant integration test added to each call site's existing suite asserting the actual mutation
+payloads sent are well-formed (no bare `options`/`variants` field; correct `productOptions`/
+`optionValues`/`inventoryItem` nesting).
+
+`productUpdate`'s `input: ProductInput` path (conflictMode=overwrite) is unaffected — it never set
+options/variants, and the fields it does use (title, descriptionHtml, vendor, productType, tags) still
+exist on `ProductInput`. It uses the same deprecated argument name as productCreate, which is a
+lower-priority modernization note, not a live bug — left as-is.
+
+---
+
 ## Next step
 
 Waiting for review/confirmation before starting Phase 2 (Trust & Safety features: pre-transfer
