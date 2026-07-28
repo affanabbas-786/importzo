@@ -18,6 +18,7 @@ import { friendlyError, summarizeFailures } from "../lib/friendly-errors";
 import { notifyJobComplete } from "../lib/notify";
 import { saveThemeZip, deleteThemeZipLater } from "../lib/theme-zip.server";
 import { shopifyFetch as sharedShopifyFetch, shopifyGraphql as sharedShopifyGraphql } from "../lib/shopify-api.server";
+import { createProductWithVariants } from "../lib/product-variants.server";
 
 // ═══════════════════════════════════════════════════════════════════
 // Server
@@ -326,7 +327,7 @@ export const action = async ({ request }) => {
 
     const tags = Array.isArray(src.tags) ? src.tags : (typeof src.tags === "string" ? src.tags.split(",").map((t) => t.trim()).filter(Boolean) : []);
 
-    const gqlInput = {
+    const productInput = {
       title: src.title || "Untitled",
       descriptionHtml: src.descriptionHtml || src.body_html || "",
       vendor: src.vendor || "",
@@ -336,60 +337,49 @@ export const action = async ({ request }) => {
       status: (src.status === "ACTIVE" || !!src.publishedAt || !!src.published_at) ? "ACTIVE" : "DRAFT",
     };
 
-    // Options
     const srcOptions = src.options || [];
-    if (srcOptions.length > 0) gqlInput.options = srcOptions.map((o) => typeof o === "string" ? o : o.name);
+    const optionNames = srcOptions.map((o) => typeof o === "string" ? o : o.name);
 
     // Variants — handle both GraphQL edges format and REST array format
     const variants = src.variants?.edges
       ? src.variants.edges.map((e) => e.node)
       : (src.variants || []);
-    if (variants.length > 0) {
-      gqlInput.variants = variants.map((v) => {
-        const gv = {};
-        // GraphQL selectedOptions or REST option1/2/3
-        const sel = v.selectedOptions;
-        if (sel?.length) {
-          gv.options = sel.map((s) => s.value).filter(Boolean);
-        } else {
-          const opts = [v.option1, v.option2, v.option3].filter(Boolean);
-          if (opts.length) gv.options = opts;
-        }
-        if (v.price) gv.price = v.price;
-        if (v.compareAtPrice || v.compare_at_price) gv.compareAtPrice = v.compareAtPrice || v.compare_at_price;
-        if (v.sku) gv.sku = v.sku;
-        if (v.barcode) gv.barcode = v.barcode;
-        const gqlWeight = v.inventoryItem?.measurement?.weight;
-        const wVal = gqlWeight?.value ?? v.weight;
-        if (wVal !== undefined && wVal !== null && wVal !== "") gv.weight = wVal;
-        const wu = gqlWeight?.unit || v.weightUnit || v.weight_unit;
-        if (wu) gv.weightUnit = String(wu).toUpperCase();
-        const ip = v.inventoryPolicy || v.inventory_policy;
-        if (ip) gv.inventoryPolicy = ip.toUpperCase();
-        const fs = v.fulfillmentService || v.fulfillment_service;
-        if (fs) gv.fulfillmentService = fs === "gift_card" ? "MANUAL" : fs.toUpperCase();
-        if (v.requiresShipping !== undefined) gv.requiresShipping = v.requiresShipping;
-        else if (v.requires_shipping !== undefined) gv.requiresShipping = v.requires_shipping !== false;
-        if (v.taxable !== undefined) gv.taxable = v.taxable;
-        return gv;
-      });
-    }
+    const normalizedVariants = variants.map((v) => {
+      const gv = {};
+      // GraphQL selectedOptions or REST option1/2/3
+      const sel = v.selectedOptions;
+      if (sel?.length) {
+        gv.options = sel.map((s) => s.value).filter(Boolean);
+      } else {
+        const opts = [v.option1, v.option2, v.option3].filter(Boolean);
+        if (opts.length) gv.options = opts;
+      }
+      if (v.price) gv.price = v.price;
+      if (v.compareAtPrice || v.compare_at_price) gv.compareAtPrice = v.compareAtPrice || v.compare_at_price;
+      if (v.sku) gv.sku = v.sku;
+      if (v.barcode) gv.barcode = v.barcode;
+      const gqlWeight = v.inventoryItem?.measurement?.weight;
+      const wVal = gqlWeight?.value ?? v.weight;
+      if (wVal !== undefined && wVal !== null && wVal !== "") gv.weight = wVal;
+      const wu = gqlWeight?.unit || v.weightUnit || v.weight_unit;
+      if (wu) gv.weightUnit = wu;
+      const ip = v.inventoryPolicy || v.inventory_policy;
+      if (ip) gv.inventoryPolicy = ip;
+      const rs = v.inventoryItem?.requiresShipping ?? v.requiresShipping;
+      if (rs !== undefined) gv.requiresShipping = rs;
+      else if (v.requires_shipping !== undefined) gv.requiresShipping = v.requires_shipping !== false;
+      if (v.taxable !== undefined) gv.taxable = v.taxable;
+      return gv;
+    });
 
     let warnings = [];
-    const data = await shopifyGraphql(targetShop, targetToken, `#graphql
-      mutation ProductCreate($input: ProductInput!) {
-        productCreate(input: $input) {
-          product { id }
-          userErrors { field message }
-        }
-      }`, { input: gqlInput });
-    const userErrors = data?.productCreate?.userErrors || [];
-    if (userErrors.length) throw new Error(userErrors.map((e) => e.message).join("; "));
-    const created = data?.productCreate?.product;
-    if (!created?.id) throw new Error("Product creation failed: API returned no product ID");
-
-    const productGid = created.id;
-    const productLegacyId = created.id.split("/").pop();
+    // ProductInput no longer accepts "options"/"variants" directly (see
+    // product-variants.server.js) — productCreate only sets up options and a
+    // single placeholder variant; productVariantsBulkCreate does the rest.
+    const { id: productLegacyId, gid: productGid } = await createProductWithVariants({
+      shopifyGraphql, shop: targetShop, token: targetToken, version,
+      product: productInput, optionNames, variants: normalizedVariants,
+    });
 
     // Images — handle both GraphQL edges format and REST src format
     const images = src.images?.edges

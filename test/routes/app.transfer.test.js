@@ -102,7 +102,7 @@ describe("app.transfer action — transfer-products (products, media, metafields
     vi.restoreAllMocks();
   });
 
-  function makeProductTransferFetch({ sourceProducts, existingByHandle = null } = {}) {
+  function makeProductTransferFetch({ sourceProducts, existingByHandle = null, onProductCreate, onVariantsBulkCreate } = {}) {
     const seenResourceTypes = new Set();
     const { handleMetafieldsQuery, handleMetafieldsSet } = metafieldsFetchHandlers(seenResourceTypes);
     const fetchFn = vi.fn(async (url, opts) => {
@@ -112,7 +112,12 @@ describe("app.transfer action — transfer-products (products, media, metafields
       if (query.includes("productsCount")) return jsonResponse({ data: { productsCount: { count: sourceProducts.length } } });
       if (query.includes("query SourceProducts")) return jsonResponse({ data: { products: { edges: sourceProducts.map((p) => ({ cursor: p.id, node: p })), pageInfo: { hasNextPage: false } } } });
       if (query.includes("query FindProduct")) return jsonResponse({ data: { products: { edges: existingByHandle ? [{ node: existingByHandle }] : [] } } });
+      if (query.includes("mutation ProductVariantsBulkCreate")) {
+        onVariantsBulkCreate?.(body.variables);
+        return jsonResponse({ data: { productVariantsBulkCreate: { productVariants: (body.variables?.variants || []).map((_, i) => ({ id: `gid://shopify/ProductVariant/new-${i}` })), userErrors: [] } } });
+      }
       if (query.includes("mutation ProductCreate")) {
+        onProductCreate?.(body.variables);
         const id = `gid://shopify/Product/new-${Math.floor(Math.random() * 1e9)}`;
         return jsonResponse({ data: { productCreate: { product: { id }, userErrors: [] } } });
       }
@@ -154,6 +159,46 @@ describe("app.transfer action — transfer-products (products, media, metafields
     await action({ request: req });
 
     expect(fetchFn.__seenResourceTypes.has("product")).toBe(true);
+  });
+
+  // Regression coverage for a production bug: productCreate used to receive
+  // "options"/"variants" directly on ProductInput, which the pinned API
+  // version rejects ("Field is not defined on ProductInput"). Asserts the
+  // actual payloads sent for a multi-variant product use the corrected
+  // two-mutation shape.
+  it("creates a multi-variant product via productCreate(productOptions) + productVariantsBulkCreate, never a bare options/variants field", async () => {
+    let productCreateVariables = null;
+    let bulkCreateVariables = null;
+    global.fetch = makeProductTransferFetch({
+      sourceProducts: [sourceProduct(1, {
+        options: [{ name: "Color" }],
+        variants: {
+          edges: [
+            { node: { sku: "MUG-RED", price: "12.00", selectedOptions: [{ name: "Color", value: "Red" }] } },
+            { node: { sku: "MUG-BLUE", price: "12.00", selectedOptions: [{ name: "Color", value: "Blue" }] } },
+          ],
+        },
+      })],
+      onProductCreate: (variables) => { productCreateVariables = variables; },
+      onVariantsBulkCreate: (variables) => { bulkCreateVariables = variables; },
+    });
+
+    const req = mockActionRequest({ intent: "transfer-products", sourceUrl: SOURCE_SHOP, sourceToken: "src-token", conflictMode: "create" });
+    const result = await action({ request: req });
+
+    expect(result.results[0].status).toBe("success");
+    expect(productCreateVariables.product).not.toHaveProperty("options");
+    expect(productCreateVariables.product).not.toHaveProperty("variants");
+    expect(productCreateVariables.product.productOptions).toEqual([
+      { name: "Color", values: [{ name: "Red" }, { name: "Blue" }] },
+    ]);
+    expect(bulkCreateVariables.strategy).toBe("REMOVE_STANDALONE_VARIANT");
+    expect(bulkCreateVariables.variants).toHaveLength(2);
+    expect(bulkCreateVariables.variants[0]).toMatchObject({
+      price: "12.00",
+      optionValues: [{ optionName: "Color", name: "Red" }],
+      inventoryItem: { sku: "MUG-RED" },
+    });
   });
 
   it("conflictMode=skip leaves an existing product untouched instead of duplicating it", async () => {

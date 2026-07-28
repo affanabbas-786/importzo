@@ -6,6 +6,7 @@
 import prisma from "../db.server.js";
 import { encrypt, decrypt } from "../utils/encryption.server.js";
 import { shopifyGraphql } from "./shopify-api.server.js";
+import { createProductWithVariants } from "./product-variants.server.js";
 
 const BATCH_SIZE = 250;     // products fetched per GQL page
 const CREATE_CONCURRENCY = 5; // parallel productCreate calls
@@ -211,7 +212,7 @@ async function transferOneProduct(src, ctx) {
   const srcOptions = src.options || [];
   const variants = src.variants?.edges ? src.variants.edges.map((e) => e.node) : (src.variants || []);
 
-  const gqlInput = {
+  const productInput = {
     title: src.title || "Untitled",
     descriptionHtml: src.descriptionHtml || src.body_html || "",
     vendor: src.vendor || "",
@@ -220,52 +221,41 @@ async function transferOneProduct(src, ctx) {
     handle: src.handle || "",
     status: (src.status === "ACTIVE" || !!src.publishedAt || !!src.published_at) ? "ACTIVE" : "DRAFT",
   };
-  if (srcOptions.length > 0) gqlInput.options = srcOptions.map((o) => typeof o === "string" ? o : o.name);
-  if (variants.length > 0) {
-    gqlInput.variants = variants.map((v) => {
-      const gv = {};
-      const sel = v.selectedOptions;
-      if (sel?.length) gv.options = sel.map((s) => s.value).filter(Boolean);
-      else {
-        const opts = [v.option1, v.option2, v.option3].filter(Boolean);
-        if (opts.length) gv.options = opts;
-      }
-      if (v.price) gv.price = v.price;
-      if (v.compareAtPrice || v.compare_at_price) gv.compareAtPrice = v.compareAtPrice || v.compare_at_price;
-      if (v.sku) gv.sku = v.sku;
-      if (v.barcode) gv.barcode = v.barcode;
-      const wt = v.inventoryItem?.measurement?.weight;
-      const wVal = wt?.value ?? v.weight;
-      if (wVal !== undefined && wVal !== null && wVal !== "") gv.weight = wVal;
-      const wu = wt?.unit || v.weightUnit || v.weight_unit;
-      if (wu) gv.weightUnit = String(wu).toUpperCase();
-      const ip = v.inventoryPolicy || v.inventory_policy;
-      if (ip) gv.inventoryPolicy = ip.toUpperCase();
-      const fs = v.fulfillmentService || v.fulfillment_service;
-      if (fs) gv.fulfillmentService = fs === "gift_card" ? "MANUAL" : fs.toUpperCase();
-      // requiresShipping now comes from InventoryItem, not the variant itself (see PRODUCT_QUERY).
-      const rs = v.inventoryItem?.requiresShipping ?? v.requiresShipping;
-      if (rs !== undefined) gv.requiresShipping = rs;
-      else if (v.requires_shipping !== undefined) gv.requiresShipping = v.requires_shipping !== false;
-      if (v.taxable !== undefined) gv.taxable = v.taxable;
-      return gv;
-    });
-  }
+  const optionNames = srcOptions.map((o) => typeof o === "string" ? o : o.name);
+  const normalizedVariants = variants.map((v) => {
+    const gv = {};
+    const sel = v.selectedOptions;
+    if (sel?.length) gv.options = sel.map((s) => s.value).filter(Boolean);
+    else {
+      const opts = [v.option1, v.option2, v.option3].filter(Boolean);
+      if (opts.length) gv.options = opts;
+    }
+    if (v.price) gv.price = v.price;
+    if (v.compareAtPrice || v.compare_at_price) gv.compareAtPrice = v.compareAtPrice || v.compare_at_price;
+    if (v.sku) gv.sku = v.sku;
+    if (v.barcode) gv.barcode = v.barcode;
+    const wt = v.inventoryItem?.measurement?.weight;
+    const wVal = wt?.value ?? v.weight;
+    if (wVal !== undefined && wVal !== null && wVal !== "") gv.weight = wVal;
+    const wu = wt?.unit || v.weightUnit || v.weight_unit;
+    if (wu) gv.weightUnit = wu;
+    const ip = v.inventoryPolicy || v.inventory_policy;
+    if (ip) gv.inventoryPolicy = ip;
+    // requiresShipping now comes from InventoryItem, not the variant itself (see PRODUCT_QUERY).
+    const rs = v.inventoryItem?.requiresShipping ?? v.requiresShipping;
+    if (rs !== undefined) gv.requiresShipping = rs;
+    else if (v.requires_shipping !== undefined) gv.requiresShipping = v.requires_shipping !== false;
+    if (v.taxable !== undefined) gv.taxable = v.taxable;
+    return gv;
+  });
 
-  const data = await shopifyGraphql(targetShop, targetToken, `#graphql
-    mutation ProductCreate($input: ProductInput!) {
-      productCreate(input: $input) {
-        product { id }
-        userErrors { field message }
-      }
-    }`, { input: gqlInput }, version);
-  const errs = data?.productCreate?.userErrors || [];
-  if (errs.length) throw new Error(errs.map((e) => e.message).join("; "));
-  const created = data?.productCreate?.product;
-  if (!created?.id) throw new Error("productCreate returned no product ID");
-
-  const gid = created.id;
-  const id = gid.split("/").pop();
+  // ProductInput no longer accepts "options"/"variants" directly (see
+  // product-variants.server.js) — productCreate only sets up options and a
+  // single placeholder variant; productVariantsBulkCreate does the rest.
+  const { id, gid } = await createProductWithVariants({
+    shopifyGraphql, shop: targetShop, token: targetToken, version,
+    product: productInput, optionNames, variants: normalizedVariants,
+  });
 
   // Images
   const images = src.images?.edges ? src.images.edges.map((e) => ({ src: e.node?.url, alt: e.node?.altText })).filter((i) => i.src) : (src.images || []);

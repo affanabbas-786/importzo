@@ -66,13 +66,13 @@ function baseJob(overrides = {}) {
   };
 }
 
-function productNode(id, { handle = `p-${id}`, title = `Product ${id}`, isGiftCard = false, variants = { edges: [] } } = {}) {
+function productNode(id, { handle = `p-${id}`, title = `Product ${id}`, isGiftCard = false, variants = { edges: [] }, options = [] } = {}) {
   return {
     id: `gid://shopify/Product/${id}`,
     title, handle,
     descriptionHtml: "", vendor: "", productType: "", tags: [], status: "ACTIVE", publishedAt: "2024-01-01",
     isGiftCard,
-    options: [],
+    options,
     images: { edges: [] },
     variants,
   };
@@ -85,7 +85,7 @@ function productsPageResponse(nodes, hasNextPage = false, endCursor = null) {
 const emptyMediaResponse = jsonResponse({ data: { product: { media: { nodes: [] } } } });
 const emptyMetafieldsResponse = (resourceKey) => jsonResponse({ data: { [resourceKey]: { metafields: { edges: [] } } } });
 
-function makeFetch({ productPages, findProductByHandleResult = null, productCreateHandler, metafieldsHandler, onSourceProductsQuery } = {}) {
+function makeFetch({ productPages, findProductByHandleResult = null, productCreateHandler, variantsBulkCreateHandler, metafieldsHandler, onSourceProductsQuery } = {}) {
   let pageCallIndex = 0;
   return vi.fn(async (url, opts) => {
     const body = opts?.body ? JSON.parse(opts.body) : {};
@@ -100,6 +100,10 @@ function makeFetch({ productPages, findProductByHandleResult = null, productCrea
     }
     if (query.includes("query FindProduct")) {
       return jsonResponse({ data: { products: { edges: findProductByHandleResult ? [{ node: findProductByHandleResult }] : [] } } });
+    }
+    if (query.includes("mutation ProductVariantsBulkCreate")) {
+      if (variantsBulkCreateHandler) return variantsBulkCreateHandler(body);
+      return jsonResponse({ data: { productVariantsBulkCreate: { productVariants: (body.variables?.variants || []).map((_, i) => ({ id: `gid://shopify/ProductVariant/new-${i}` })), userErrors: [] } } });
     }
     if (query.includes("mutation ProductCreate")) {
       if (productCreateHandler) return productCreateHandler(body);
@@ -145,6 +149,61 @@ describe("runMigrationWorker", () => {
     expect(mappings.every((m) => m.status === "DONE")).toBe(true);
   });
 
+  // Regression coverage for a production bug: productCreate used to receive
+  // "options"/"variants" directly on ProductInput, which the pinned API
+  // version rejects outright ("Field is not defined on ProductInput"). This
+  // asserts the actual mutation payloads sent for a multi-variant product are
+  // structured the corrected way: productCreate carries only productOptions,
+  // and productVariantsBulkCreate carries the priced/SKU'd variants.
+  it("creates a multi-variant product via productCreate(productOptions) + productVariantsBulkCreate, never a bare options/variants field", async () => {
+    fakePrisma = createFakePrisma(baseJob());
+    let createProductVariables = null;
+    let bulkCreateVariables = null;
+    global.fetch = makeFetch({
+      productPages: [{
+        nodes: [productNode(1, {
+          options: [{ name: "Size" }],
+          variants: {
+            edges: [
+              { node: { sku: "TEE-S", price: "19.99", taxable: true, inventoryPolicy: "DENY", inventoryItem: { measurement: { weight: { value: 0.2, unit: "KILOGRAMS" } }, requiresShipping: true }, selectedOptions: [{ name: "Size", value: "Small" }] } },
+              { node: { sku: "TEE-M", price: "19.99", taxable: true, inventoryPolicy: "DENY", inventoryItem: { measurement: { weight: { value: 0.2, unit: "KILOGRAMS" } }, requiresShipping: true }, selectedOptions: [{ name: "Size", value: "Medium" }] } },
+            ],
+          },
+        })],
+        hasNextPage: false,
+      }],
+      productCreateHandler: (body) => {
+        createProductVariables = body.variables;
+        return jsonResponse({ data: { productCreate: { product: { id: "gid://shopify/Product/new-1" }, userErrors: [] } } });
+      },
+      variantsBulkCreateHandler: (body) => {
+        bulkCreateVariables = body.variables;
+        return jsonResponse({ data: { productVariantsBulkCreate: { productVariants: [{ id: "v1" }, { id: "v2" }], userErrors: [] } } });
+      },
+    });
+
+    await runMigrationWorker("job-1");
+
+    expect(createProductVariables.product).not.toHaveProperty("options");
+    expect(createProductVariables.product).not.toHaveProperty("variants");
+    expect(createProductVariables.product.productOptions).toEqual([
+      { name: "Size", values: [{ name: "Small" }, { name: "Medium" }] },
+    ]);
+
+    expect(bulkCreateVariables.productId).toBe("gid://shopify/Product/new-1");
+    expect(bulkCreateVariables.strategy).toBe("REMOVE_STANDALONE_VARIANT");
+    expect(bulkCreateVariables.variants).toHaveLength(2);
+    expect(bulkCreateVariables.variants[0]).toMatchObject({
+      price: "19.99",
+      optionValues: [{ optionName: "Size", name: "Small" }],
+      inventoryItem: { sku: "TEE-S", requiresShipping: true, measurement: { weight: { value: 0.2, unit: "KILOGRAMS" } } },
+    });
+
+    const job = fakePrisma.__getJob("job-1");
+    expect(job.status).toBe("COMPLETED");
+    expect(job.processedProducts).toBe(1);
+  });
+
   it("is idempotent on resume: does not re-create products already marked DONE", async () => {
     fakePrisma = createFakePrisma(baseJob({ lastCursor: null }));
     // Pre-seed as if product 1 already succeeded in a prior run.
@@ -175,7 +234,7 @@ describe("runMigrationWorker", () => {
     global.fetch = makeFetch({
       productPages: [{ nodes: [productNode(1), productNode(2)], hasNextPage: false }],
       productCreateHandler: (body) => {
-        if (body.variables.input.handle === "p-1") {
+        if (body.variables.product.handle === "p-1") {
           return jsonResponse({ data: { productCreate: { product: null, userErrors: [{ field: ["title"], message: "Title can't be blank" }] } } });
         }
         return jsonResponse({ data: { productCreate: { product: { id: "gid://shopify/Product/new-2" }, userErrors: [] } } });
@@ -321,7 +380,7 @@ describe("runMigrationWorker", () => {
 
     it("reads requiresShipping from the InventoryItem sub-selection into the destination variant input", async () => {
       fakePrisma = createFakePrisma(baseJob());
-      let createdInput = null;
+      let bulkVariables = null;
       global.fetch = makeFetch({
         productPages: [{
           nodes: [productNode(1, {
@@ -338,15 +397,15 @@ describe("runMigrationWorker", () => {
           })],
           hasNextPage: false,
         }],
-        productCreateHandler: (body) => {
-          createdInput = body.variables.input;
-          return jsonResponse({ data: { productCreate: { product: { id: "gid://shopify/Product/new-1" }, userErrors: [] } } });
+        variantsBulkCreateHandler: (body) => {
+          bulkVariables = body.variables;
+          return jsonResponse({ data: { productVariantsBulkCreate: { productVariants: [{ id: "gid://shopify/ProductVariant/new-1" }], userErrors: [] } } });
         },
       });
 
       await runMigrationWorker("job-1");
 
-      expect(createdInput.variants[0].requiresShipping).toBe(false);
+      expect(bulkVariables.variants[0].inventoryItem.requiresShipping).toBe(false);
     });
   });
 });

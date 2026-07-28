@@ -18,6 +18,10 @@ function productCreateResponse(id, errors = []) {
   return jsonResponse({ data: { productCreate: { product: errors.length ? null : { id: `gid://shopify/Product/${id}` }, userErrors: errors } } });
 }
 
+function variantsBulkCreateResponse(count, errors = []) {
+  return jsonResponse({ data: { productVariantsBulkCreate: { productVariants: errors.length ? [] : Array.from({ length: count }, (_, i) => ({ id: `gid://shopify/ProductVariant/${i}` })), userErrors: errors } } });
+}
+
 describe("app.product-importer action", () => {
   let fetchMock;
 
@@ -134,6 +138,56 @@ describe("app.product-importer action", () => {
     expect(result.results[0]).toMatchObject({ status: "success", productId: "777", skipped: true });
     // location fetch + the handle-existence check — no productCreate call
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  // Regression coverage for a production bug: productCreate used to receive
+  // "options"/"variants" directly on ProductInput, which the pinned API
+  // version rejects ("Field is not defined on ProductInput"). Asserts the
+  // actual payloads sent for a multi-variant CSV row use the corrected
+  // two-mutation shape (productCreate + productVariantsBulkCreate).
+  it("creates a multi-variant product via productCreate(productOptions) + productVariantsBulkCreate, never a bare options/variants field", async () => {
+    let productCreateVariables = null;
+    let bulkCreateVariables = null;
+    fetchMock.mockImplementation(async (url, opts) => {
+      const body = JSON.parse(opts.body);
+      if (body.query.includes("locations(first: 1)")) return jsonResponse({ data: { locations: { edges: [{ node: { id: "gid://shopify/Location/1" } }] } } });
+      if (body.query.includes("mutation ProductVariantsBulkCreate")) {
+        bulkCreateVariables = body.variables;
+        return variantsBulkCreateResponse(2);
+      }
+      if (body.query.includes("mutation ProductCreate")) {
+        productCreateVariables = body.variables;
+        return productCreateResponse("999");
+      }
+      throw new Error(`Unexpected fetch: ${body.query.slice(0, 100)}`);
+    });
+
+    const req = mockActionRequest({
+      products: JSON.stringify([{
+        title: "Variant Shirt",
+        option1_name: "Size",
+        variants: [
+          { option1: "Small", price: "15.00", sku: "SHIRT-S" },
+          { option1: "Medium", price: "15.00", sku: "SHIRT-M" },
+        ],
+      }]),
+      fileName: "p.csv",
+    });
+    const result = await action({ request: req });
+
+    expect(result.successCount).toBe(1);
+    expect(productCreateVariables.product).not.toHaveProperty("options");
+    expect(productCreateVariables.product).not.toHaveProperty("variants");
+    expect(productCreateVariables.product.productOptions).toEqual([
+      { name: "Size", values: [{ name: "Small" }, { name: "Medium" }] },
+    ]);
+    expect(bulkCreateVariables.strategy).toBe("REMOVE_STANDALONE_VARIANT");
+    expect(bulkCreateVariables.variants).toHaveLength(2);
+    expect(bulkCreateVariables.variants[0]).toMatchObject({
+      price: "15.00",
+      optionValues: [{ optionName: "Size", name: "Small" }],
+      inventoryItem: { sku: "SHIRT-S" },
+    });
   });
 
   it("creates the product when the handle doesn't already exist", async () => {

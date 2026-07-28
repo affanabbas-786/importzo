@@ -4,7 +4,8 @@ import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate, apiVersion } from "../shopify.server";
 import prisma from "../db.server";
-import { shopifyFetch } from "../lib/shopify-api.server";
+import { shopifyFetch, shopifyGraphql } from "../lib/shopify-api.server";
+import { createProductWithVariants } from "../lib/product-variants.server";
 import { parseCSV } from "../lib/csv-parser";
 import { smartMapColumns, PRODUCT_ALIASES, confidenceLevel, confidenceColor } from "../lib/smart-mapper";
 import { FileSourcePicker, AISummary, generateMappingSummary, generateImportResultSummary } from "../components/ui";
@@ -219,66 +220,48 @@ export const action = async ({ request }) => {
         }
       }
 
-      // Build GraphQL ProductInput from productData
-      const gqlInput = { title: productData.title };
-      if (productData.body_html !== undefined) gqlInput.descriptionHtml = productData.body_html;
-      if (productData.vendor) gqlInput.vendor = productData.vendor;
-      if (productData.product_type) gqlInput.productType = productData.product_type;
-      if (productData.tags) gqlInput.tags = typeof productData.tags === "string" ? productData.tags.split(",").map((t) => t.trim()).filter(Boolean) : productData.tags;
-      if (productData.handle) gqlInput.handle = productData.handle;
-      if (productData.published !== undefined) gqlInput.status = productData.published ? "ACTIVE" : "DRAFT";
-      if (productData.options?.length > 0) gqlInput.options = productData.options.map((o) => o.name);
-      if (productData.variants?.length > 0) {
-        gqlInput.variants = productData.variants.map((v) => {
-          const gv = {};
-          const opts = [v.option1, v.option2, v.option3].filter(Boolean);
-          if (opts.length) gv.options = opts;
-          if (v.price !== undefined) gv.price = v.price;
-          if (v.sku) gv.sku = v.sku;
-          if (v.barcode) gv.barcode = v.barcode;
-          if (v.weight !== undefined) gv.weight = v.weight;
-          if (v.weight_unit) gv.weightUnit = v.weight_unit.toUpperCase();
-          if (v.inventory_policy) gv.inventoryPolicy = v.inventory_policy.toUpperCase();
-          if (v.fulfillment_service) gv.fulfillmentService = v.fulfillment_service === "gift_card" ? "MANUAL" : v.fulfillment_service.toUpperCase();
-          if (v.inventory_quantity !== undefined && defaultLocationId) {
-            gv.inventoryQuantities = [{ availableQuantity: v.inventory_quantity, locationId: defaultLocationId }];
-          }
-          return gv;
-        });
-      }
+      // Build ProductCreateInput fields from productData (no options/variants
+      // — those no longer belong on ProductInput/ProductCreateInput; see
+      // product-variants.server.js for the two-mutation replacement flow).
+      const productInput = { title: productData.title };
+      if (productData.body_html !== undefined) productInput.descriptionHtml = productData.body_html;
+      if (productData.vendor) productInput.vendor = productData.vendor;
+      if (productData.product_type) productInput.productType = productData.product_type;
+      if (productData.tags) productInput.tags = typeof productData.tags === "string" ? productData.tags.split(",").map((t) => t.trim()).filter(Boolean) : productData.tags;
+      if (productData.handle) productInput.handle = productData.handle;
+      if (productData.published !== undefined) productInput.status = productData.published ? "ACTIVE" : "DRAFT";
+
+      const optionNames = (productData.options || []).map((o) => o.name);
+      const normalizedVariants = (productData.variants || []).map((v) => {
+        const gv = {};
+        const opts = [v.option1, v.option2, v.option3].filter(Boolean);
+        if (opts.length) gv.options = opts;
+        if (v.price !== undefined) gv.price = v.price;
+        if (v.sku) gv.sku = v.sku;
+        if (v.barcode) gv.barcode = v.barcode;
+        if (v.weight !== undefined) gv.weight = v.weight;
+        if (v.weight_unit) gv.weightUnit = v.weight_unit;
+        if (v.inventory_policy) gv.inventoryPolicy = v.inventory_policy;
+        if (v.inventory_quantity !== undefined && defaultLocationId) {
+          gv.inventoryQuantity = v.inventory_quantity;
+          gv.locationId = defaultLocationId;
+        }
+        return gv;
+      });
       const mediaInputs = (productData.images || []).map((img) => ({ originalSource: img.src, mediaContentType: "IMAGE" }));
 
-      const gqlRes = await shopifyFetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": accessToken },
-        body: JSON.stringify({
-          query: `mutation ProductCreate($input: ProductInput!) {
-            productCreate(input: $input) {
-              product { id }
-              userErrors { field message }
-            }
-          }`,
-          variables: { input: gqlInput },
-        }),
-      });
-      if (!gqlRes.ok) throw new Error(`HTTP ${gqlRes.status}`);
-      const gqlData = await gqlRes.json();
-      if (gqlData.errors?.length) {
-        console.error(`[importzo] productCreate GraphQL errors for "${product.title}":`, JSON.stringify(gqlData.errors));
-        throw new Error(gqlData.errors.map((e) => e.message).join("; "));
+      let created;
+      try {
+        created = await createProductWithVariants({
+          shopifyGraphql, shop: shopDomain, token: accessToken, version,
+          product: productInput, optionNames, variants: normalizedVariants,
+        });
+      } catch (err) {
+        console.error(`[importzo] productCreate failed for "${product.title}":`, err.message);
+        throw err;
       }
-      const userErrors = gqlData?.data?.productCreate?.userErrors || [];
-      if (userErrors.length) {
-        console.error(`[importzo] productCreate userErrors for "${product.title}":`, JSON.stringify(userErrors));
-        throw new Error(userErrors.map((e) => e.message).join("; "));
-      }
-      const created = gqlData?.data?.productCreate?.product;
-      if (!created?.id) {
-        console.error(`[importzo] productCreate returned no product for "${product.title}". Response:`, JSON.stringify(gqlData));
-        throw new Error("Product creation failed: API returned no product data");
-      }
-      const productGid = created.id;
-      const numericId = created.id.split("/").pop();
+      const productGid = created.gid;
+      const numericId = created.id;
 
       // Attach images via productCreateMedia (media param removed from productCreate in 2025-01+)
       if (mediaInputs.length > 0) {
