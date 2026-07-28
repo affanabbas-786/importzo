@@ -114,6 +114,11 @@ async function uploadNonImageMedia(targetShop, targetToken, productGid, media, v
   }
 }
 
+// Returns { copied, errors }. `errors` entries are { error, payload } — never
+// thrown, since a metafield-copy failure must not fail the whole product
+// transfer — but every entry is returned to the caller so it can be persisted
+// (see runMigrationWorker) instead of only reaching a console.warn that
+// nobody can retrieve after the fact.
 async function copyMetafields(sourceShop, sourceToken, targetShop, targetToken, sourceGid, targetGid, version) {
   // Derive resource type from GID (e.g. gid://shopify/Product/123 → "product").
   // Bug fix: index 3 is the type segment; index 4 is the numeric ID
@@ -127,10 +132,12 @@ async function copyMetafields(sourceShop, sourceToken, targetShop, targetToken, 
         metafields(first: 250) { edges { node { namespace key value type } } }
       }
     }`;
+  const errors = [];
+  let copied = 0;
   try {
     const data = await shopifyGraphql(sourceShop, sourceToken, query, { id: sourceGid }, version);
     const mfs = (data?.[resourceType]?.metafields?.edges || []).map((e) => e.node);
-    if (!mfs.length) return;
+    if (!mfs.length) return { copied, errors };
     const mutation = `#graphql
       mutation MetafieldsSet($metafields: [MetafieldsSetInput!]!) {
         metafieldsSet(metafields: $metafields) {
@@ -149,15 +156,35 @@ async function copyMetafields(sourceShop, sourceToken, targetShop, targetToken, 
           type: mf.type,
         }));
       if (!batch.length) continue;
+      // Truncated payload snapshot for debugging — capped so a huge metafield
+      // value (e.g. rich-text JSON) can't blow up the persisted error log.
+      const payload = batch.map((b) => ({ namespace: b.namespace, key: b.key, type: b.type, value: String(b.value).slice(0, 200) }));
       try {
-        await shopifyGraphql(targetShop, targetToken, mutation, { metafields: batch }, version);
+        const result = await shopifyGraphql(targetShop, targetToken, mutation, { metafields: batch }, version);
+        // Bug fix: this call's result was previously discarded entirely — a
+        // 200 OK response with a non-empty userErrors array (e.g. Shopify
+        // rejecting a value/type as invalid) was silently treated as success
+        // because shopifyGraphql only throws on HTTP/GraphQL-protocol errors,
+        // never on mutation-level userErrors. That meant a metafield could
+        // fail to copy with literally no error anywhere, not even a log line.
+        const set = result?.metafieldsSet?.metafields || [];
+        const userErrors = result?.metafieldsSet?.userErrors || [];
+        copied += set.length;
+        if (userErrors.length) {
+          const detail = userErrors.map((e) => `${e.field ? e.field.join(".") + ": " : ""}${e.message}${e.code ? ` [${e.code}]` : ""}`).join("; ");
+          console.warn(`[migration-worker] metafieldsSet userErrors for ${targetGid}:`, detail);
+          errors.push({ error: `metafieldsSet rejected: ${detail}`, payload });
+        }
       } catch (err) {
-        console.warn(`[migration-worker] metafields batch failed:`, err.message);
+        console.warn(`[migration-worker] metafields batch failed for ${targetGid}:`, err.message);
+        errors.push({ error: err.message, payload });
       }
     }
   } catch (err) {
-    console.warn(`[migration-worker] copyMetafields failed:`, err.message);
+    console.warn(`[migration-worker] copyMetafields failed for ${targetGid}:`, err.message);
+    errors.push({ error: `copyMetafields fetch failed: ${err.message}` });
   }
+  return { copied, errors };
 }
 
 async function findProductByHandle(targetShop, targetToken, handle, version) {
@@ -172,7 +199,7 @@ async function findProductByHandle(targetShop, targetToken, handle, version) {
 }
 
 // Creates (or skips/overwrites based on conflictMode) a single product on the destination.
-// Returns { id, gid } of the destination product.
+// Returns { id, gid, metafieldErrors } of the destination product.
 async function transferOneProduct(src, ctx) {
   const { targetShop, targetToken, sourceShop, sourceToken, version, conflictMode } = ctx;
   const srcId = src.id?.split("/").pop();
@@ -267,15 +294,19 @@ async function transferOneProduct(src, ctx) {
     await uploadNonImageMedia(targetShop, targetToken, gid, media, version);
   }
 
-  // Metafields
+  // Metafields — failures here must not fail the whole product transfer, but
+  // are returned up to runMigrationWorker so they get persisted into the
+  // job's errorLog instead of only reaching a console.warn.
+  let metafieldErrors = [];
   if (srcId) {
-    await copyMetafields(
+    const mfResult = await copyMetafields(
       sourceShop, sourceToken, targetShop, targetToken,
       `gid://shopify/Product/${srcId}`, gid, version,
     );
+    metafieldErrors = mfResult.errors;
   }
 
-  return { id, gid };
+  return { id, gid, metafieldErrors };
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -402,7 +433,7 @@ export async function runMigrationWorker(jobId) {
           if (doneSet.has(srcId)) return;
 
           try {
-            const { id: destId, gid: destGid, skipped } = await transferOneProduct(src, ctx);
+            const { id: destId, gid: destGid, skipped, metafieldErrors } = await transferOneProduct(src, ctx);
             doneSet.add(srcId);
             await prisma.productMapping.upsert({
               where: { jobId_sourceProductId: { jobId, sourceProductId: srcId } },
@@ -411,6 +442,12 @@ export async function runMigrationWorker(jobId) {
             });
             processedDelta++;
             if (skipped) console.log(`[migration-worker] job=${jobId} skipped (conflict): ${src.title}`);
+            // Metafield failures don't fail the product transfer, but must
+            // still be retrievable afterward — not just a console.warn.
+            for (const mfErr of metafieldErrors || []) {
+              errorLog.push({ sourceId: srcId, title: src.title || "(no title)", destId, type: "metafield", error: mfErr.error, payload: mfErr.payload });
+              console.warn(`[migration-worker] job=${jobId} metafield copy failed for source=${srcId} dest=${destId}: ${mfErr.error}`);
+            }
           } catch (err) {
             failedDelta++;
             const entry = { sourceId: srcId, title: src.title || "(no title)", error: err.message };

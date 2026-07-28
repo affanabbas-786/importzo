@@ -252,6 +252,58 @@ describe("runMigrationWorker", () => {
     });
   });
 
+  // Regression coverage for the real root cause of the reported "metafield
+  // silently doesn't copy" bug: metafieldsSet returning a 200 OK with a
+  // non-empty userErrors array (e.g. Shopify rejecting the value/type) was
+  // never checked at all — shopifyGraphql only throws on HTTP/GraphQL-protocol
+  // errors, so this was previously indistinguishable from success and never
+  // even reached a console.warn.
+  it("captures metafieldsSet userErrors into the job's errorLog instead of treating a 200 OK as success", async () => {
+    fakePrisma = createFakePrisma(baseJob());
+    global.fetch = makeFetch({
+      productPages: [{ nodes: [productNode(1)], hasNextPage: false }],
+      productCreateHandler: () => jsonResponse({ data: { productCreate: { product: { id: "gid://shopify/Product/new-1" }, userErrors: [] } } }),
+      metafieldsHandler: (query, resourceKey) =>
+        jsonResponse({ data: { [resourceKey]: { metafields: { edges: [{ node: { namespace: "custom", key: "material", value: "Cotton", type: "single_line_text_field" } }] } } } }),
+    });
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn(async (url, opts) => {
+      const body = JSON.parse(opts.body);
+      if (body.query.includes("mutation MetafieldsSet")) {
+        // A perfectly valid HTTP 200 response — no exception is thrown for this.
+        return jsonResponse({
+          data: {
+            metafieldsSet: {
+              metafields: [],
+              userErrors: [{ field: ["metafields", "0", "value"], message: "Value does not match expected type", code: "INVALID" }],
+            },
+          },
+        });
+      }
+      return originalFetch(url, opts);
+    });
+
+    await runMigrationWorker("job-1");
+
+    // The product itself must still succeed — a metafield rejection is not fatal.
+    const job = fakePrisma.__getJob("job-1");
+    expect(job.status).toBe("COMPLETED");
+    expect(job.processedProducts).toBe(1);
+    expect(job.failedProducts).toBe(0);
+    const mappings = fakePrisma.__getMappings();
+    expect(mappings[0].status).toBe("DONE");
+
+    // But the metafield failure must be retrievable from the job record —
+    // exactly what /api/migration-status/:jobId already exposes.
+    const errorLog = JSON.parse(job.errorLog);
+    const mfError = errorLog.find((e) => e.type === "metafield");
+    expect(mfError).toBeDefined();
+    expect(mfError.destId).toBe("new-1");
+    expect(mfError.error).toMatch(/Value does not match expected type/);
+    expect(mfError.error).toMatch(/INVALID/);
+    expect(mfError.payload[0]).toMatchObject({ namespace: "custom", key: "material", type: "single_line_text_field", value: "Cotton" });
+  });
+
   it("is idempotent on resume: does not re-create products already marked DONE", async () => {
     fakePrisma = createFakePrisma(baseJob({ lastCursor: null }));
     // Pre-seed as if product 1 already succeeded in a prior run.

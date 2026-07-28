@@ -457,14 +457,20 @@ export const action = async ({ request }) => {
             type: mf.type,
           }));
         if (!batch.length) continue;
+        // Truncated payload snapshot for debugging — capped so a huge
+        // metafield value (e.g. rich-text JSON) can't blow up the warning.
+        const payload = batch.map((b) => ({ namespace: b.namespace, key: b.key, type: b.type, value: String(b.value).slice(0, 200) }));
         try {
           const data = await shopifyGraphql(targetShop, targetToken, mutation, { metafields: batch });
           const set = data?.metafieldsSet?.metafields || [];
           const errors = data?.metafieldsSet?.userErrors || [];
           copied += set.length;
-          if (errors.length) warnings.push(...errors.map((e) => `${e.message}${e.field ? ` (${e.field.join(".")})` : ""}`));
+          if (errors.length) {
+            const detail = errors.map((e) => `${e.field ? e.field.join(".") + ": " : ""}${e.message}${e.code ? ` [${e.code}]` : ""}`).join("; ");
+            warnings.push(`Metafields rejected: ${detail} — payload: ${JSON.stringify(payload)}`);
+          }
         } catch (err) {
-          warnings.push(`Metafields batch failed: ${err.message}`);
+          warnings.push(`Metafields batch failed: ${err.message} — payload: ${JSON.stringify(payload)}`);
         }
       }
     } catch (err) {

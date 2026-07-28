@@ -209,6 +209,45 @@ describe("app.transfer action — transfer-products (products, media, metafields
     });
   });
 
+  // app.transfer.jsx's copyGraphqlMetafields already checked userErrors
+  // correctly (unlike migration-worker.server.js's copyMetafields, which
+  // silently discarded them entirely — see migration-worker.server.test.js).
+  // This confirms a userErrors rejection is surfaced with enough detail
+  // (Shopify's message + the exact payload sent) to debug in one look.
+  it("surfaces metafieldsSet userErrors as a detailed warning including the payload sent", async () => {
+    global.fetch = makeProductTransferFetch({
+      sourceProducts: [sourceProduct(1)],
+      sourceMetafields: [{ namespace: "custom", key: "material", value: "Cotton", type: "single_line_text_field" }],
+    });
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn(async (url, opts) => {
+      const body = JSON.parse(opts.body);
+      if (body.query.includes("mutation MetafieldsSet")) {
+        return jsonResponse({
+          data: {
+            metafieldsSet: {
+              metafields: [],
+              userErrors: [{ field: ["metafields", "0", "value"], message: "Value does not match expected type", code: "INVALID" }],
+            },
+          },
+        });
+      }
+      return originalFetch(url, opts);
+    });
+
+    const req = mockActionRequest({ intent: "transfer-products", sourceUrl: SOURCE_SHOP, sourceToken: "src-token", conflictMode: "create" });
+    const result = await action({ request: req });
+
+    // The product itself still succeeds — a metafield rejection is not fatal.
+    expect(result.results[0].status).toBe("success");
+    const warning = result.results[0].warnings.find((w) => w.includes("Metafields rejected"));
+    expect(warning).toBeDefined();
+    expect(warning).toMatch(/Value does not match expected type/);
+    expect(warning).toMatch(/INVALID/);
+    expect(warning).toMatch(/"namespace":"custom"/);
+    expect(warning).toMatch(/"key":"material"/);
+  });
+
   // Regression coverage for a production bug: productCreate used to receive
   // "options"/"variants" directly on ProductInput, which the pinned API
   // version rejects ("Field is not defined on ProductInput"). Asserts the
