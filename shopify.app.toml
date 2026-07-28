@@ -34,7 +34,29 @@ api_version = "2026-04"
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
 # Note: read_collections/write_collections merged into read_products/write_products in 2025-01+
-scopes = "read_products,write_products,read_orders,read_inventory,write_inventory,read_themes,write_themes,read_files,write_files,read_content,write_content,read_online_store_pages,read_legal_policies,read_online_store_navigation,write_online_store_navigation,read_customers"
+#
+# Phase 3 scope audit — every scope below was traced to actual API usage:
+#   read_products/write_products      product transfer + CSV import/export
+#   read_inventory/write_inventory    inventorySetQuantities, inventoryItem, locations
+#   read_themes/write_themes          theme ZIP transfer (themes.json, assets.json)
+#   read_files/write_files            fileCreate + files query (media transfer)
+#   read_content/write_content        pages, blogs, articles
+#   read_online_store_pages           page transfer
+#   read_legal_policies               shopPolicies (copied as pages)
+#   read_online_store_navigation/write  menu transfer
+#   read_customers                    customer CSV export (app.export.jsx) — see note
+#
+# REMOVED: read_orders. Audited across the whole codebase — no orders,
+# draftOrders, or fulfillmentOrder query exists anywhere. It was requested
+# and never used, which is exactly what scope minimization is for.
+#
+# read_customers is genuinely used (customer CSV export), but note it is
+# Shopify "protected customer data" and requires separate approval. See
+# PROGRESS.md: the published privacy policy says the app does not collect
+# customer personal information, which is true (the export streams to the
+# merchant's browser and is never persisted) but sits awkwardly next to a
+# feature that reads names/emails/phones. Flagged for your review.
+scopes = "read_products,write_products,read_inventory,write_inventory,read_themes,write_themes,read_files,write_files,read_content,write_content,read_online_store_pages,read_legal_policies,read_online_store_navigation,write_online_store_navigation,read_customers"
 
 [auth]
 redirect_urls = [ "https://importzo.dazzletech.co/auth/callback" ]
