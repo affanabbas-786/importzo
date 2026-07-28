@@ -1,12 +1,195 @@
 # Importzo Hardening — Progress Log
 
-Tracks execution of `Importzo-PRD-Growth-Plan.md`. Currently: **Phase 1 (Core Hardening) — complete.**
-Phase 2, 3, 4 have not been started, per instructions.
+Tracks execution of `Importzo-PRD-Growth-Plan.md`. Currently: **Phase 1 (Core Hardening) — complete
+and deployed. Phase 2 (Trust & Safety) — complete, awaiting review.**
+Phase 3 (Security) and Phase 4 (Differentiation) have not been started, per instructions.
 
 Original work: five commits on `phase-1-hardening`, one per Phase 1 checklist item, each committed only
 after the full test suite passed. That branch was subsequently merged into `main` (fast-forward,
 outside this session) along with a separately-added PRD/growth-plan doc commit; all further work
 described below happened directly on `main`.
+
+**Test suite: 351 passing across 20 files** (was 133 at the end of Phase 1).
+
+---
+
+# PHASE 2 — Trust & Safety Features (complete, awaiting review)
+
+Five commits, one per checklist item, each landed only after the full suite passed:
+
+| Commit | Item |
+|---|---|
+| `5484a3f` | 2.4 — Detailed per-record transfer logs |
+| `c074f8a` | 2.1 — Pre-transfer backup/snapshot + one-click restore |
+| `aa003cb` | 2.2 — Dry-run preview with a real create/update/skip diff |
+| `acc2a71` | 2.3 — Rollback within a time window |
+| `2bda58b` | 2.5 — Scheduled/recurring sync |
+
+Implemented in dependency order rather than PRD order: detailed logs (2.4) first because backup,
+rollback and scheduling all write to them; rollback (2.3) after backup (2.1) because the two are
+complementary halves of a single undo. All five items are fully implemented either way.
+
+## 🔴 Three things that need your decision
+
+**1. Default behavior change — a failed backup now aborts the transfer.**
+`MigrationJob.backupPolicy` defaults to `"require"`, so a job stops **before writing anything** if its
+pre-transfer snapshot fails. The alternative default would let an irreversible transfer run with no way
+back, which is the exact failure mode this phase exists to prevent — but it does mean a transfer that
+would previously have succeeded (e.g. against a destination where the app lacks read scope for the
+snapshot) will now fail with an explanatory error. `"best-effort"` (proceed with a loud warning) and
+`"skip"` are both available per-job. **Tell me if you'd rather default to `"best-effort"`.**
+
+**2. The scheduler needs an external cron + a new env var.**
+`/api/scheduler-tick` is driven externally, not by an in-process `setInterval`, because the app runs
+multiple PM2 workers and an interval in each would fire every schedule once per worker. To activate
+recurring sync you need to:
+- set `SCHEDULER_SECRET` in the environment (with it unset the endpoint returns 503 and no schedule
+  ever runs — it fails closed rather than open), and
+- add a cron hitting `POST /api/scheduler-tick` with header `x-scheduler-secret: <that value>`,
+  every ~15 minutes.
+
+**3. Backups have a hard size ceiling that a large destination will hit.**
+Snapshots are JSON in a SQLite TEXT column, capped at 5000 products / 1000 collections. Past that the
+backup is stored as `PARTIAL` and the job's error log states exactly how much is restorable. It does
+not silently truncate — but on a big destination store, "one-click restore" genuinely only covers part
+of the store. Moving snapshots to files or object storage is the real fix and is a bigger change than
+belonged in this phase.
+
+## 2.4 — Detailed per-record transfer logs (`5484a3f`)
+
+The PRD asked to "verify it's genuinely granular, not just a summary count". It wasn't: per-record
+history existed only for products via `ProductMapping`, only as `DONE|FAILED`, with no reason for a
+skip and **no record at all** of pages/blogs/menus/files/themes/metafields. `MigrationJob.errorLog` is
+a capped JSON summary of failures only.
+
+New `TransferLogEntry` table + `app/lib/transfer-log.server.js`:
+- `createLogBuffer()` — batches INSERTs (a 50k-product job must not issue 50k writes) and is
+  best-effort by design: a logging failure can never abort an in-flight transfer.
+- `normalizeEntry()` — throws on an unknown action so typos surface instead of storing junk.
+- `fetchJobLog()` / `fetchJobLogSummary()` — read side, with limit clamping and DB-side aggregation.
+
+The worker now logs every product as created/updated/skipped/failed **with its reason**, and every
+metafield rejection as its own queryable entry. `/api/migration-status/:jobId` returns `logSummary`
+plus a filterable page of entries (`?action=&entityType=&limit=&offset=`); the existing `errorLog` is
+unchanged.
+
+*Worth noting:* the worker's test fake had to gain a real `transferLogEntry` model — because the buffer
+deliberately swallows write failures, without it those tests would have passed while logging silently
+did nothing. That's the same trap the metafields bug fell into.
+
+## 2.1 — Pre-transfer backup/snapshot (`c074f8a`)
+
+`StoreBackup` table + `app/lib/backup.server.js` (`snapshotStore`, `createBackup`, `restoreBackup`,
+`purgeExpiredBackups`, 30-day retention). Taken against the **destination**, before any write.
+
+Two deliberate scope decisions, both to keep "undo" honest:
+- Backup/restore reverts records a transfer **overwrote**. It does not delete records the transfer
+  **created** — that's rollback. Neither is a complete undo alone.
+- A product deleted since the snapshot is reported as failed, **not recreated**: recreating it would
+  mint a different product ID and quietly diverge from what a merchant means by "undo".
+
+Resumed jobs never re-snapshot — by then the destination already contains this transfer's writes, so
+that snapshot would be useless as an undo point.
+
+`/api/backup` (list/create/restore) scopes everything to the authenticated shop; another shop's backup
+id returns the same "Backup not found" as a nonexistent one, and the list view never ships the payload.
+
+## 2.2 — Dry-run preview with a real diff (`aa003cb`)
+
+The existing dry run tagged every record `"dry-run"` and counted them. It could not answer the question
+a merchant actually has: how many get **created**, how many **overwritten**, how many **left alone**.
+
+`app/lib/transfer-diff.server.js` fetches the destination's handles **once** into an in-memory index,
+then classifies purely against it — classifying per-product would be one round trip per product, which
+is unusable at 50k for something that runs interactively. A test pins the request count to pages, not
+products.
+
+Three cases it calls out rather than glossing over:
+- `conflictMode: "create"` against a colliding handle — Shopify doesn't reject it, it mints a suffixed
+  handle, leaving a near-duplicate.
+- An overwrite with no detectable field change is still a write, and says so.
+- Duplicate handles **within the source itself**, where one silently clobbers the other.
+
+Truncation is always propagated, never silent: a partial destination index would make existing products
+look like they need creating.
+
+## 2.3 — Rollback (`acc2a71`)
+
+**This one closed a real data-loss hole.** `ProductMapping` recorded only `DONE|FAILED` — it had no
+record of whether this app *created* a destination product or merely *skipped* one that already
+existed. Rolling back off that data would have deleted the merchant's own pre-existing products.
+
+`ProductMapping.action` now records `created|updated|skipped`, and rollback's rules are:
+
+| action | rollback behavior |
+|---|---|
+| `created` | **deleted** — we made it; removing it restores the prior state |
+| `skipped` | **never** — the handle already existed; this is the merchant's own product |
+| `updated` | **never** — pre-existed and was overwritten; restore reverts it, deletion would destroy it |
+| `unknown` | **never** — the column's default, so every row written before this migration is un-deletable: we can't prove we created it, so we assume we didn't |
+
+Each rule has its own test. Other guards: 24h window from the job's last run; a job still running,
+already rolled back, or belonging to another shop is refused before any delete is issued;
+`rolledBackAt` is stamped even on partial failure so a retry can't re-attempt deletes against
+already-deleted products.
+
+`GET /api/rollback` is a separate read-only planning step so a confirmation screen can show exactly
+what will and won't be touched. A test caught it returning another shop's plan with a 200 — it now
+404s indistinguishably, since the body would otherwise leak both that the id is real and the
+destination product ids inside it.
+
+## 2.5 — Scheduled/recurring sync (`2bda58b`)
+
+`ScheduledSync` model, `app/lib/scheduler.server.js`, CRUD at `/api/scheduled-sync`, tick at
+`/api/scheduler-tick`. See decision #2 above for the deployment requirement.
+
+`computeNextRun()` is pure and exhaustively tested, including the case that matters most: it always
+returns a time **strictly** in the future. Returning "now" when a schedule fires exactly on its slot
+would make it re-fire on every subsequent tick.
+
+Two failure modes handled explicitly, because both otherwise become silent runaways:
+- **Overlap** — previous job still running when the next slot arrives: the slot is skipped rather than
+  starting a second job writing to the same store pair concurrently.
+- **Expiring credentials** — offline tokens expire (the app sets `expiringOfflineAccessTokens: true`).
+  Three consecutive failures disable the schedule with an actionable reason; a recognized 401/403
+  disables immediately rather than burning the retry budget on something that will never self-heal.
+  Re-enabling clears the failure streak *and* refreshes the stored token from the live session —
+  otherwise one more failure would instantly re-disable it.
+
+The CRUD surface never returns token columns in any response.
+
+## Notes for Phase 3 (not acted on)
+
+Surfaced while working, deliberately left for the security phase:
+- `encrypt()` in `app/utils/encryption.server.js` **silently passes plaintext through** when
+  `ENCRYPTION_KEY` is unset (it warns to console and returns the input). Every token in `SourceStore`,
+  `TransferSession`, `MigrationJob` and now `ScheduledSync` is affected. Directly relevant to Phase 3's
+  "OAuth token storage encrypted at rest (verify Prisma/SQLite field-level encryption, not plaintext)".
+  A test now sets a key explicitly so the at-rest assertion is meaningful.
+- `/api/scheduler-tick` is the app's only endpoint not behind Shopify admin auth. It's guarded by a
+  constant-time secret comparison and fails closed, but it's worth a look during the security pass.
+- Phase 3's "rate-limit / abuse protection on your own API endpoints" now has more surface to cover —
+  backup/restore, rollback and preview are all newly reachable and non-trivial to run.
+
+## Files added in Phase 2
+
+**Libraries:** `transfer-log.server.js`, `backup.server.js`, `transfer-diff.server.js`,
+`rollback.server.js`, `scheduler.server.js` (each with a co-located `.test.js`)
+
+**Routes:** `api.backup.jsx`, `api.transfer-preview.jsx`, `api.rollback.jsx`,
+`api.scheduled-sync.jsx`, `api.scheduler-tick.jsx` (each with a `test/routes/` test)
+
+**Migrations:** `add_transfer_log_entry`, `add_store_backup`, `add_rollback_support`,
+`add_scheduled_sync` — all additive; the one column added to an existing table
+(`ProductMapping.action`) defaults to the safe `"unknown"`.
+
+**Modified:** `migration-worker.server.js` (backup gating, action tracking, per-record logging),
+`api.migration-status.$jobId.jsx` (log surfacing), `test-helpers.js` (POST default),
+`.eslintrc.cjs` (Node env for tests)
+
+---
+
+# PHASE 1 — Core Hardening (complete, deployed)
 
 ---
 
@@ -308,7 +491,19 @@ old code.
 
 ---
 
-## Next step
+---
 
-Waiting for review/confirmation before starting Phase 2 (Trust & Safety features: pre-transfer
-backup/snapshot, dry-run diff view, rollback, detailed per-record logs, scheduled sync).
+# Next step
+
+**Phase 2 is complete and awaiting your review.** Stopping here per instructions — Phase 3 (Security
+Hardening) has not been started.
+
+Before Phase 3, I need decisions on the three items flagged at the top of the Phase 2 section:
+1. Whether `backupPolicy` should default to `"require"` (aborts a transfer whose backup fails) or
+   `"best-effort"`.
+2. Setting `SCHEDULER_SECRET` + adding the cron, without which recurring sync stays dormant.
+3. Whether the 5000-product backup ceiling is acceptable for now, or whether snapshots should move to
+   file/object storage first.
+
+None of the Phase 2 work touched billing, OAuth, or webhook signature verification, so nothing hit the
+PRD's human-review gate mid-phase.
