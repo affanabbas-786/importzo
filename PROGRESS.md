@@ -271,6 +271,43 @@ environment-specific. Reported this back rather than inventing an unverifiable f
 
 ---
 
+## Post-Phase-1 fix: the actual root cause of the metafields regression
+
+**Commit:** `703774b` (on `main`)
+
+No live Shopify test-store credentials exist anywhere in this repo/env (`.env` only has
+`DATABASE_URL`) — could not run a live reproduction as requested. Found the real bug instead by
+comparing migration-worker.server.js's `copyMetafields` against app.transfer.jsx's
+`copyGraphqlMetafields` line by line, since the two are meant to be kept in sync manually.
+
+**Root cause:** `copyMetafields` called the `metafieldsSet` mutation via
+`await shopifyGraphql(...)` and discarded the result completely — never read it at all.
+`shopifyGraphql` only throws on HTTP failures or a top-level GraphQL `errors` array; a mutation
+returning HTTP 200 with a non-empty `userErrors` array (Shopify rejecting a value/type, a permission
+issue, etc.) is a normal, non-exceptional response. So a rejected metafield was silently treated as
+success — not even a `console.warn` fired, because nothing was catching it. This is exactly
+"product creates fine, metafield isn't there, no error anywhere."
+
+app.transfer.jsx's `copyGraphqlMetafields` already checked `userErrors` correctly and surfaced them
+into the user-visible `warnings` array — this bug was specific to migration-worker.server.js's copy,
+which had drifted from its "mirror" during some earlier edit.
+
+**Fix:** `copyMetafields` now checks `userErrors` and returns `{ copied, errors }`, each error
+carrying Shopify's message/field/code plus a truncated (200-char) snapshot of the exact metafield
+payload sent. These propagate up through `transferOneProduct` into `runMigrationWorker`, which pushes
+them into the job's existing `errorLog` (tagged `type: "metafield"` with source/dest product IDs) —
+already exposed by `GET /api/migration-status/:jobId` and persisted on `MigrationJob`, so retrievable
+after the fact via the API or a DB query, satisfying the "store in the job's DB record" ask without a
+schema migration. A metafield failure still doesn't fail the product transfer itself.
+app.transfer.jsx's already-correct path gained the same payload-snapshot detail for parity.
+
+Regression tests added for both files: mock `metafieldsSet` returning a valid 200 OK with non-empty
+`userErrors`, assert the product still completes successfully AND the failure is retrievable with the
+Shopify error text/code/payload. These tests would have silently passed (caught nothing) against the
+old code.
+
+---
+
 ## Next step
 
 Waiting for review/confirmation before starting Phase 2 (Trust & Safety features: pre-transfer
