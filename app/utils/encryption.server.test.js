@@ -168,6 +168,46 @@ describe("decrypt", () => {
       const shaped = `${"a".repeat(32)}:${"b".repeat(32)}`;
       expect(decrypt(shaped)).toBe(shaped);
     });
+
+    // ── The legacy path must fail closed on config errors too ──
+    //
+    // getKey() used to be called inside the CBC try block, so a missing key
+    // was caught by the same catch that implements the plaintext fallback,
+    // and decrypt() handed back raw ciphertext as if it were a token. That is
+    // the fail-open bug this module exists to remove, surviving on the legacy
+    // path after the v2 path was fixed.
+    it("throws on a legacy CBC value when the key is missing, instead of returning ciphertext", () => {
+      const legacy = legacyCbcEncrypt(SHOPIFY_TOKEN);
+      delete process.env.ENCRYPTION_KEY;
+
+      expect(() => decrypt(legacy)).toThrow(EncryptionConfigError);
+    });
+
+    it("throws on a legacy CBC value when the key is too weak to be usable", () => {
+      const legacy = legacyCbcEncrypt(SHOPIFY_TOKEN);
+      process.env.ENCRYPTION_KEY = "weak";
+
+      expect(() => decrypt(legacy)).toThrow(EncryptionConfigError);
+    });
+
+    it("never returns the ciphertext itself when the key is missing", () => {
+      const legacy = legacyCbcEncrypt(SHOPIFY_TOKEN);
+      delete process.env.ENCRYPTION_KEY;
+
+      // Assert the specific old failure mode: a caller must not receive the
+      // stored value back and mistake it for a usable token.
+      let returned;
+      try { returned = decrypt(legacy); } catch { /* expected */ }
+      expect(returned).toBeUndefined();
+    });
+
+    it("still reads plaintext without a key, since no key is needed for it", () => {
+      // The plaintext fallback is not a config-error path — don't over-correct
+      // and break reads of rows the old fail-open encrypt() wrote.
+      delete process.env.ENCRYPTION_KEY;
+
+      expect(decrypt(SHOPIFY_TOKEN)).toBe(SHOPIFY_TOKEN);
+    });
   });
 });
 

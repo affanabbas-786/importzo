@@ -155,10 +155,19 @@ export function decrypt(text) {
 
   if (isLegacyCbc(value)) {
     // Pre-Phase-3 rows. Readable, never written anymore.
+    //
+    // getKey() is deliberately called OUTSIDE the try. Called inside it, a
+    // missing or invalid ENCRYPTION_KEY would be swallowed by the catch and
+    // the raw ciphertext returned as though it were a token — precisely the
+    // fail-open behavior this module exists to remove. A configuration error
+    // must surface as one here, exactly as it does on the v2 path above.
+    // Only a genuine decrypt failure may fall through to the plaintext
+    // fallback below.
+    const key = getKey();
     try {
       const colonIdx = value.indexOf(":");
       const iv = Buffer.from(value.slice(0, colonIdx), "hex");
-      const decipher = crypto.createDecipheriv(LEGACY_CBC_ALGORITHM, getKey(), iv);
+      const decipher = crypto.createDecipheriv(LEGACY_CBC_ALGORITHM, key, iv);
       let dec = decipher.update(value.slice(colonIdx + 1), "hex", "utf8");
       dec += decipher.final("utf8");
       return dec;

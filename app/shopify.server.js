@@ -6,6 +6,7 @@ import {
 } from "@shopify/shopify-app-react-router/server";
 import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prisma";
 import prisma from "./db.server";
+import { assertEncryptionConfigured } from "./utils/encryption.server";
 
 // Validate required environment variables on startup
 const missingVars = ["SHOPIFY_API_KEY", "SHOPIFY_API_SECRET", "SHOPIFY_APP_URL"].filter(
@@ -14,9 +15,18 @@ const missingVars = ["SHOPIFY_API_KEY", "SHOPIFY_API_SECRET", "SHOPIFY_APP_URL"]
 if (missingVars.length > 0) {
   console.error(`[importzo] FATAL: Missing required env vars: ${missingVars.join(", ")}. App will not function correctly.`);
 }
-if (!process.env.ENCRYPTION_KEY) { // eslint-disable-line no-undef
-  console.warn("[importzo] WARNING: ENCRYPTION_KEY is not set. Source store tokens will be stored unencrypted in the database.");
-}
+
+// ENCRYPTION_KEY is checked differently from the vars above: it THROWS rather
+// than logging, so the process refuses to start.
+//
+// This replaces a console.warn that was the boot-time half of the same
+// fail-open bug fixed in encrypt(). A warning scrolls past in a deploy log
+// and the app then runs happily, unable to protect the tokens it stores.
+// Because encrypt() now throws, a keyless boot would otherwise stay silent
+// until the first store connected — turning a config mistake into a runtime
+// failure for a user mid-OAuth. Failing here moves it to deploy time, where
+// it belongs.
+assertEncryptionConfigured();
 
 const shopify = shopifyApp({
   apiKey: process.env.SHOPIFY_API_KEY,
