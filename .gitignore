@@ -46,8 +46,10 @@ archive.zip
 /prisma/dev.sqlite-shm
 /prisma/dev.sqlite-wal
 
-# Nested dev database. DATABASE_URL is "file:./prisma/dev.sqlite" and Prisma
-# resolves relative sqlite paths from the SCHEMA directory (prisma/), not the
-# project root — so that path lands at prisma/prisma/dev.sqlite. Ignored
-# because it holds real OAuth tokens and must never be committed.
+# Guard against a nested dev database reappearing. Prisma resolves relative
+# sqlite paths from the SCHEMA directory (prisma/), not the project root, so a
+# DATABASE_URL of "file:./prisma/dev.sqlite" silently lands at
+# prisma/prisma/dev.sqlite. That happened, and the resulting database held real
+# OAuth tokens while being ignored by nothing. DATABASE_URL now reads
+# "file:./dev.sqlite"; this rule stays so a regression cannot commit tokens.
 prisma/prisma/
