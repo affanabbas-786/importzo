@@ -93,11 +93,11 @@ describe("api.scheduled-sync", () => {
     db.schedules = [];
     db.jobs = [];
     savedSourceStore.value = null;
-    // encryption.server.js passes plaintext through (with a warning) when no
-    // key is configured, so the at-rest assertion below is only meaningful
-    // with one set.
+    // encrypt() now throws without a valid key (Phase 3 fail-closed), and
+    // enforces a 32-char minimum — so this fixture must be a realistic key,
+    // not a short placeholder.
     originalEncryptionKey = process.env.ENCRYPTION_KEY;
-    process.env.ENCRYPTION_KEY = "test-encryption-key";
+    process.env.ENCRYPTION_KEY = "test-encryption-key-long-enough-to-pass-validation-0123456789";
   });
 
   afterEach(() => {
