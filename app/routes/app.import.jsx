@@ -60,11 +60,12 @@ export default function ImportHub() {
         </div>
 
         {/* ── Selective Import Cards ── */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           {[
             { href: "/app/product-importer", label: "Import Products", desc: "Upload products with variants, images, pricing, and SKU", icon: "M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" },
             { href: "/app/collections", label: "Import Collections", desc: "Create custom and smart collections from CSV", icon: "M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" },
             { href: "/app/inventory", label: "Update Inventory", desc: "Update stock quantities by SKU and location", icon: "M3.75 12h16.5m-16.5 3.75h16.5M3.75 19.5h16.5M5.625 4.5h12.75a1.875 1.875 0 010 3.75H5.625a1.875 1.875 0 010-3.75z" },
+            { href: "/app/woocommerce-importer", label: "Import from WooCommerce", desc: "Migrate products from a WooCommerce CSV export, variations and all", icon: "M21 12a9 9 0 11-18 0 9 9 0 0118 0zM9.75 9.75l4.5 4.5m0-4.5l-4.5 4.5" },
           ].map((item) => (
             <Link key={item.label} to={item.href} className="group bg-white rounded-xl border border-gray-200 p-5 shadow-sm hover:shadow-md transition-all duration-200 hover:-translate-y-0.5">
               <div className="w-9 h-9 rounded-lg flex items-center justify-center mb-3" style={{ background: "rgba(23,50,10,0.08)", color: S }}>
