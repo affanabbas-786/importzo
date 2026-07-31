@@ -1,12 +1,11 @@
 # Importzo Hardening — Progress Log
 
-Tracks execution of `Importzo-PRD-Growth-Plan.md`. Currently: **Phases 1, 2 and 3 complete and deployed**
-(Phase 3.1 token encryption is now committed — see `cae5df8`/`82f1da0`/`cdf6cd1`). **Phase 4
-(Differentiation Features) is implemented and fully tested end to end. Two of its four items are
-committed (4.3 field-mapping templates, 4.1 WooCommerce import); the other two (4.2 Markets-aware
-transfer, 4.4 AI SEO cleanup) are implemented and passing but held UNCOMMITTED pending your explicit
-review**, per the same policy that held Phase 3.1 — both touch OAuth scope or a new third-party
-credential. Details in the Phase 4 section below.
+Tracks execution of `Importzo-PRD-Growth-Plan.md`. Currently: **Phases 1, 2, 3, and 4 all complete,
+committed, and (per your review) ready to deploy.** All four Phase 4 items are committed — 4.2 (Markets)
+and 4.4 (AI cleanup) were held for explicit review before committing, per policy; you reviewed both,
+confirmed the AI-cleanup encryption/no-fallback behavior, and approved committing. The pending
+react-router RCE fix (`fix-rce-upgrade`, flagged before this session) is also now merged into `main` at
+your instruction. Details in the Phase 4 section below.
 
 **Test suite: 623 passing across 37 files** (491 → 623 across Phase 4; 133 at end of Phase 1).
 
@@ -31,43 +30,42 @@ templates, (4) AI-assisted cleanup. I implemented **4.3 → 4.1 → 4.2 → 4.4*
 
 All four items are fully implemented and tested either way.
 
-## 🔴 Decisions needed
+## ✅ Decisions resolved this session
 
-**1. Markets-aware transfer (4.2) is held uncommitted — it adds a new OAuth scope.**
-`read_markets` is required to list a source store's Markets and is not currently declared in
-`shopify.app.toml`. Adding it triggers Shopify's re-authorization prompt for every existing install —
-same mechanism as the Phase 3.2 scope *removal*, but in the other direction (this one asks for **more**
-access). Implemented, tested (30 new tests across `markets.server.js`, `migration-worker.server.js`,
-`api.migration-job.jsx`, `app.transfer.jsx`), and `test/scopes.test.js`'s pinned scope list is updated
-to match — but I did not commit the scope change itself. See "What it does" below for the feature
-summary. **If you approve, committing is just staging the changed/new files listed there** — everything
-is already written and passing.
+**1. Markets-aware transfer (4.2) — committed (`8640ff3`).** You decided to add the `read_markets` scope
+now rather than after App Store submission, since there's no real merchant install base yet to disrupt
+with a re-authorization prompt — better to have the scope list settle before real merchants are on it.
+`shopify.app.toml` and `test/scopes.test.js`'s pinned list both reflect it. You also asked whether the
+privacy policy needed a wording change for this — it doesn't: Markets data is store configuration
+(region names, currency), not personal data, and the policy doesn't enumerate every scope the same way
+it doesn't mention "themes" or "collections" access. No change made for 4.2 specifically (see 4.4 below
+for the privacy-policy change that *was* needed).
 
-**2. AI SEO cleanup (4.4) is held uncommitted — it's a new third-party credential path.**
-You chose bring-your-own-key (merchant pastes their own Anthropic or OpenAI API key) over a shared
-free-tier LLM, for the reasons discussed in-session: a free tier is a fragile foundation for a paid
-feature, and self-hosting an open-weight model isn't realistic on the shared VPS this app already runs
-on. BYOK means Importzo never holds or bills a shared key, and I could build and test it completely
-without needing any live API key myself. Even so, this is exactly the "new third-party credential"
-category you asked me to stop and flag — a merchant's LLM key is stored (encrypted, reusing Phase 3.1's
-`encryption.server.js`) and used server-side, which deserves the same explicit sign-off as the token
-encryption work did. Fully implemented and tested (47 new tests). See "What it does" below.
+**2. AI SEO cleanup (4.4) — committed (`1882438`), after verification.** You asked me to explicitly
+re-confirm two things before committing, re-reading the actual code fresh rather than trusting my own
+summary of what I'd written:
+- The merchant's API key is encrypted at rest via the same `encrypt()`/`decrypt()` in
+  `utils/encryption.server.js` that Phase 3.1 hardened — confirmed by re-reading both files; not a
+  separate or weaker path.
+- There is no fallback to a shared/default key — confirmed via three independent guards
+  (`getAiIntegrationForUse` returns `null` with nothing configured; the route 400s on that before calling
+  any provider; `generateSeoCopy` itself refuses a missing key too) and an exhaustive grep for
+  `process.env.ANTHROPIC_*`/`OPENAI_*` across every new file, which found zero matches.
 
-**3. The pending react-router RCE fix (from before this session) is still uncommitted — but I fixed the
-underlying installer problem while working on this.** Adding the two new AI SDK dependencies
-(`@anthropic-ai/sdk`, `openai`) required running `npm install`, which hit the exact resolver deadlock
-described in the previous session's decision #1 (`@react-router/dev@7.18.2` requiring
-`react-router@^7.18.2` while a stale `node_modules` still had `7.13.2` installed). I regenerated
-`node_modules` and `package-lock.json` from scratch — the same fix already verified on the
-`fix-rce-upgrade` branch — and it resolved cleanly: `npm ls react-router` now shows a single deduped
-`7.18.2` everywhere, the full suite (623 tests) passes, and `npm run build` exits 0 with no server-code
-leakage into the client bundle (checked by grepping the built client assets for AI-SDK/Anthropic/OpenAI
-strings — the only matches are UI label text like "Connect your Anthropic or OpenAI key", not SDK code).
-**I did not commit this** — it's not part of Phase 4 and the prior recommendation was "deploy the branch
-to staging, then merge," not merge directly to `main`. `package.json`/`package-lock.json` currently
-contain both the react-router bump and the two new AI SDK dependencies together (regenerating the
-lockfile a second time to split them apart isn't practical — the fix is yours to merge as one unit,
-exactly as previously recommended).
+Also found and fixed while doing this: `privacy.jsx` Section 5 said "no other third-party services...
+are used", which becomes false once BYOK AI ships (product text is sent to the merchant's own connected
+provider). Fixed the wording as part of this commit rather than leaving it inaccurate — this was a
+factual-accuracy correction directly caused by a feature landing in the same commit, not a legal-strategy
+judgment call like the still-open `read_customers` wording question from Phase 3.
+
+**3. The react-router RCE fix — merged into `main` (`6445d69`).** Per your explicit instruction. One
+sequencing note: I merged `fix-rce-upgrade` *before* finalizing the 4.4 commit rather than after, so
+`package.json`'s diff for 4.4 would show only the two new AI SDK dependencies, not those tangled up with
+the react-router version bump — the merge commit carries the react-router change on its own, cleanly
+attributable. Verified post-merge: `npm ls react-router` shows a single deduped `7.18.2` everywhere, the
+full suite (623 tests) passes, and `npm run build` exits 0 with no server-code leakage into the client
+bundle (grepped the built client assets for AI-SDK/Anthropic/OpenAI code — only UI label text like
+"Anthropic (Claude)" appears, confirming the SDKs are only ever reached from server-side code).
 
 ## What it does
 
@@ -130,7 +128,7 @@ this environment regardless. CSV covers the standard migration path and needed n
 all, so I built that and flagged REST API as a deferred, separate decision rather than silently skipping
 it.
 
-### 4.2 — Markets/multi-currency aware transfer — IMPLEMENTED, NOT COMMITTED
+### 4.2 — Markets/multi-currency aware transfer (`8640ff3`)
 
 Lets a merchant scope a product transfer to a single source-store Market and tags the resulting
 destination products with it (e.g. `market:eu`), matching what competing clone/migration apps advertise.
@@ -163,7 +161,7 @@ baseline coverage alongside the market-specific tests), `app.transfer.jsx` (+tes
 (`read_markets` scope, commented), `test/scopes.test.js` (pinned list updated),
 `prisma/migrations/20260731173254_add_market_scoped_transfer/`.
 
-### 4.4 — AI-assisted product data cleanup — IMPLEMENTED, NOT COMMITTED
+### 4.4 — AI-assisted product data cleanup (`1882438`)
 
 Optional, explicit, per-product SEO title/meta-description suggestion after import — never automatic,
 never applied without the merchant clicking Accept. Bring-your-own-key: the merchant connects their own
@@ -922,28 +920,18 @@ old code.
 
 **Phases 1, 2, and 3 are done and deployed. Phase 4 is fully implemented and tested (623 passing) —
 two of its four items are committed (4.3 field-mapping templates, 4.1 WooCommerce import); the other two
-(4.2 Markets-aware transfer, 4.4 AI SEO cleanup) are implemented and passing but held uncommitted
-pending your explicit review.** See the Phase 4 section near the top of this file for full detail on
-each item.
+all four items are now committed, and the previously-pending react-router RCE fix is merged into `main`.**
+See the Phase 4 section near the top of this file for full detail on each item and how each decision was
+resolved.
 
-Blocking on you, in priority order:
-
-1. **Review + commit Phase 4.2 (Markets)** — adds the `read_markets` OAuth scope, which re-prompts every
-   existing install for permission. Implemented and tested; not committed.
-2. **Review + commit Phase 4.4 (AI cleanup)** — new `AiIntegration` table storing a merchant's own
-   encrypted Anthropic/OpenAI key (bring-your-own-key, per your decision in-session). Implemented and
-   tested; not committed.
-3. **The pending react-router RCE fix is still open** — now un-stuck (I fixed the `node_modules`
-   resolver deadlock that was blocking it while installing Phase 4.4's new dependencies) but still
-   uncommitted, per the original recommendation to deploy to staging before merging to `main`.
-   `package.json`/`package-lock.json` currently bundle this fix together with the two new AI SDK
-   dependencies (`@anthropic-ai/sdk`, `openai`) — splitting them back apart isn't practical, so review
-   and merge them as one unit.
+Nothing is blocking from this session. `main` is 7 commits ahead of `origin/main`: `2b2afd6` (4.3
+field-mapping templates), `1ffa79e` (4.1 WooCommerce import), `0969e8f` (PROGRESS.md), `8640ff3` (4.2
+Markets), `12d7d79`/`6445d69` (the react-router RCE fix branch and its merge), and `1882438` (4.4 AI
+cleanup) — push when ready.
 
 Phases 1–3's own decision items (migration chain, scope-change deploy timing, `read_customers` wording)
 aren't repeated here — you told me those phases are complete and deployed, so I'm treating them as
 resolved rather than re-flagging stale items I have no evidence are still open.
 
-Once Phase 4 items 4.2 and 4.4 are reviewed and merged: Section 6 of the PRD (App Store listing rewrite,
-beta merchant recruitment, BFS application) is the only unstarted work — everything in the Feature
-Roadmap (Section 2) is now implemented.
+Section 6 of the PRD (App Store listing rewrite, beta merchant recruitment, BFS application) is now the
+only unstarted work — everything in the Feature Roadmap (Section 2) is implemented.
