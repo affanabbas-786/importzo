@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { useFetcher, useRouteError, Link } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
@@ -7,7 +7,7 @@ import prisma from "../db.server";
 import { shopifyFetch, shopifyGraphql } from "../lib/shopify-api.server";
 import { createProductWithVariants } from "../lib/product-variants.server";
 import { parseCSV } from "../lib/csv-parser";
-import { smartMapColumns, PRODUCT_ALIASES, confidenceLevel, confidenceColor } from "../lib/smart-mapper";
+import { smartMapColumns, PRODUCT_ALIASES, confidenceLevel, confidenceColor, templateFromMapping, applyMappingTemplate } from "../lib/smart-mapper";
 import { FileSourcePicker, AISummary, generateMappingSummary, generateImportResultSummary } from "../components/ui";
 import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
 
@@ -465,8 +465,12 @@ const STEP_IMPORT = 3;
 // ═══════════════════════════════════════════════════════════════════
 // Component
 // ═══════════════════════════════════════════════════════════════════
+const MAPPING_IMPORT_TYPE = "products";
+
 export default function ImportPage() {
   const fetcher = useFetcher();
+  const templatesFetcher = useFetcher();
+  const templateActionFetcher = useFetcher();
   const shopify = useAppBridge();
   const fileInputRef = useRef(null);
 
@@ -481,6 +485,77 @@ export default function ImportPage() {
   const [dragOver, setDragOver] = useState(false);
   const [variantsDetected, setVariantsDetected] = useState(false);
   const [errorsExpanded, setErrorsExpanded] = useState(false);
+  const [selectedTemplateId, setSelectedTemplateId] = useState("");
+  const [newTemplateName, setNewTemplateName] = useState("");
+
+  // ── Field-mapping templates (Phase 4) ──────────────────────────
+  useEffect(() => {
+    if (templatesFetcher.state === "idle" && !templatesFetcher.data) {
+      templatesFetcher.load(`/api/mapping-templates?importType=${MAPPING_IMPORT_TYPE}`);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const templates = useMemo(() => templatesFetcher.data?.templates || [], [templatesFetcher.data]);
+
+  const reloadTemplates = useCallback(() => {
+    templatesFetcher.load(`/api/mapping-templates?importType=${MAPPING_IMPORT_TYPE}`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (templateActionFetcher.data?.ok && templateActionFetcher.state === "idle") {
+      reloadTemplates();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [templateActionFetcher.data, templateActionFetcher.state]);
+
+  const applyTemplate = useCallback((templateId) => {
+    const template = templates.find((t) => t.id === templateId);
+    if (!template) return;
+    const { mapping: appliedMapping, confidence: appliedConfidence, matchedCount, unmatchedTemplateKeys } =
+      applyMappingTemplate(csvHeaders, template.mapping);
+    setMapping(appliedMapping);
+    setConfidence(appliedConfidence);
+    setConfirmed(new Set(
+      Object.entries(appliedMapping).filter(([, f]) => f).map(([idx]) => parseInt(idx)),
+    ));
+    setVariantsDetected(Object.values(appliedMapping).some((f) => f.startsWith("option") || f === "handle"));
+    if (unmatchedTemplateKeys.length > 0) {
+      shopify.toast.show(
+        `Applied "${template.name}" — ${matchedCount} column${matchedCount !== 1 ? "s" : ""} matched, ${unmatchedTemplateKeys.length} field${unmatchedTemplateKeys.length !== 1 ? "s" : ""} from the template not found in this file`,
+      );
+    } else {
+      shopify.toast.show(`Applied "${template.name}" — ${matchedCount} column${matchedCount !== 1 ? "s" : ""} mapped`);
+    }
+  }, [templates, csvHeaders, shopify]);
+
+  const handleSaveTemplate = useCallback(() => {
+    const name = newTemplateName.trim();
+    if (!name) return;
+    const template = templateFromMapping(csvHeaders, mapping);
+    if (Object.keys(template).length === 0) {
+      shopify.toast.show("Map at least one column before saving a template", { isError: true });
+      return;
+    }
+    const fd = new FormData();
+    fd.append("intent", "save");
+    fd.append("importType", MAPPING_IMPORT_TYPE);
+    fd.append("name", name);
+    fd.append("mapping", JSON.stringify(template));
+    templateActionFetcher.submit(fd, { method: "POST", action: "/api/mapping-templates" });
+    setNewTemplateName("");
+    shopify.toast.show(`Saved mapping as "${name}"`);
+  }, [newTemplateName, csvHeaders, mapping, templateActionFetcher, shopify]);
+
+  const handleDeleteTemplate = useCallback((templateId, name) => {
+    const fd = new FormData();
+    fd.append("intent", "delete");
+    fd.append("id", templateId);
+    templateActionFetcher.submit(fd, { method: "POST", action: "/api/mapping-templates" });
+    if (selectedTemplateId === templateId) setSelectedTemplateId("");
+    shopify.toast.show(`Deleted "${name}"`);
+  }, [templateActionFetcher, selectedTemplateId, shopify]);
 
   const isImporting =
     ["loading", "submitting"].includes(fetcher.state) &&
@@ -1069,6 +1144,59 @@ export default function ImportPage() {
               const { items, variant } = generateMappingSummary(csvHeaders, mapping, confidence, confirmed, ["title"]);
               return <AISummary title="Smart Summary" items={items} variant={variant} />;
             })()}
+
+            {/* Saved mapping templates (Phase 4) */}
+            <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4 sm:p-5">
+              <h3 className="text-sm font-semibold text-gray-900 mb-3">Saved Column Mappings</h3>
+              {templates.length > 0 && (
+                <div className="flex flex-wrap items-center gap-2 mb-3">
+                  <select
+                    value={selectedTemplateId}
+                    onChange={(e) => { setSelectedTemplateId(e.target.value); if (e.target.value) applyTemplate(e.target.value); }}
+                    className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-green-800/20 bg-white text-gray-700 max-w-[240px]"
+                  >
+                    <option value="">Apply a saved mapping…</option>
+                    {templates.map((t) => (
+                      <option key={t.id} value={t.id}>{t.name}</option>
+                    ))}
+                  </select>
+                  {selectedTemplateId && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const t = templates.find((x) => x.id === selectedTemplateId);
+                        if (t) handleDeleteTemplate(t.id, t.name);
+                      }}
+                      className="text-xs font-medium text-red-600 hover:text-red-700"
+                    >
+                      Delete
+                    </button>
+                  )}
+                </div>
+              )}
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  type="text"
+                  value={newTemplateName}
+                  onChange={(e) => setNewTemplateName(e.target.value)}
+                  placeholder="Save this mapping as…"
+                  className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-green-800/20 flex-1 min-w-[160px] max-w-[240px]"
+                />
+                <button
+                  type="button"
+                  onClick={handleSaveTemplate}
+                  disabled={!newTemplateName.trim()}
+                  className={`px-3 py-1.5 text-sm font-medium rounded-lg transition-colors ${
+                    newTemplateName.trim() ? "bg-gray-900 text-white hover:bg-gray-800" : "bg-gray-100 text-gray-400 cursor-not-allowed"
+                  }`}
+                >
+                  Save mapping
+                </button>
+              </div>
+              <p className="text-xs text-gray-400 mt-2">
+                Templates match by column header text, so they still apply if a future file reorders columns.
+              </p>
+            </div>
 
             <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
               <div className="px-6 py-4 border-b border-gray-100">

@@ -6,6 +6,8 @@ import {
   INVENTORY_ALIASES,
   confidenceLevel,
   confidenceColor,
+  templateFromMapping,
+  applyMappingTemplate,
 } from "./smart-mapper.js";
 
 describe("confidenceLevel", () => {
@@ -165,5 +167,56 @@ describe("smartMapColumns — Edge cases", () => {
     const { mapping } = smartMapColumns(headers, rows, PRODUCT_ALIASES);
     // Should not throw
     expect(mapping).toBeDefined();
+  });
+});
+
+describe("templateFromMapping / applyMappingTemplate (Phase 4 saved templates)", () => {
+  it("builds a header-text-keyed template from a column mapping, skipping unmapped columns", () => {
+    const headers = ["Product Name", "Cost", "SKU Code", "Ignore Me"];
+    const mapping = { 0: "title", 1: "price", 2: "sku", 3: "" };
+    const template = templateFromMapping(headers, mapping);
+    expect(template).toEqual({ "product name": "title", "cost": "price", "sku code": "sku" });
+  });
+
+  it("re-applies a saved template to the same headers", () => {
+    const headers = ["Product Name", "Cost", "SKU Code"];
+    const template = { "product name": "title", "cost": "price", "sku code": "sku" };
+    const { mapping, confidence, matchedCount, unmatchedTemplateKeys } = applyMappingTemplate(headers, template);
+    expect(mapping).toEqual({ 0: "title", 1: "price", 2: "sku" });
+    expect(confidence).toEqual({ 0: 100, 1: 100, 2: 100 });
+    expect(matchedCount).toBe(3);
+    expect(unmatchedTemplateKeys).toEqual([]);
+  });
+
+  it("matches header text case- and whitespace-insensitively", () => {
+    const headers = ["  PRODUCT NAME  ", "cost"];
+    const template = { "product name": "title", "cost": "price" };
+    const { mapping } = applyMappingTemplate(headers, template);
+    expect(mapping).toEqual({ 0: "title", 1: "price" });
+  });
+
+  it("leaves a column unmapped when the new file has a header the template doesn't know", () => {
+    const headers = ["Product Name", "Weight (kg)"];
+    const template = { "product name": "title" };
+    const { mapping, confidence } = applyMappingTemplate(headers, template);
+    expect(mapping).toEqual({ 0: "title", 1: "" });
+    expect(confidence[1]).toBe(0);
+  });
+
+  it("reports template entries that found no matching column in this file, instead of silently dropping them", () => {
+    const headers = ["Product Name"];
+    const template = { "product name": "title", "sku code": "sku" };
+    const { unmatchedTemplateKeys, matchedCount } = applyMappingTemplate(headers, template);
+    expect(unmatchedTemplateKeys).toEqual(["sku code"]);
+    expect(matchedCount).toBe(1);
+  });
+
+  it("round-trips through smartMapColumns's own output", () => {
+    const headers = ["Title", "Price", "SKU"];
+    const rows = [["Shirt", "19.99", "BT-001"]];
+    const { mapping } = smartMapColumns(headers, rows, PRODUCT_ALIASES);
+    const template = templateFromMapping(headers, mapping);
+    const reapplied = applyMappingTemplate(headers, template);
+    expect(reapplied.mapping).toEqual(mapping);
   });
 });

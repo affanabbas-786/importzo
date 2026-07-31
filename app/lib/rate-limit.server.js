@@ -103,6 +103,8 @@ export const POLICIES = Object.freeze({
   scheduleAdmin: { limit: 120, windowMs: 60 * 60 * 1000, maxConcurrent: 10 },
   // Starting a migration is the single most expensive thing the app does.
   migrationJob: { limit: 20, windowMs: 60 * 60 * 1000, maxConcurrent: 2 },
+  // Cheap CRUD — saved field-mapping templates (Phase 4).
+  mappingTemplate: { limit: 120, windowMs: 60 * 60 * 1000, maxConcurrent: 10 },
 });
 
 function tooManyRequests(body, retryAfterSeconds) {

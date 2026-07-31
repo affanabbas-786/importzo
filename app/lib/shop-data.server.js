@@ -26,6 +26,7 @@ export const SHOP_SCOPED_MODELS = Object.freeze([
   "transferSession",
   "sourceStore",
   "importJob",
+  "fieldMappingTemplate", // Phase 4 — saved CSV mappings, shop-owned config
   "session",
 ]);
 

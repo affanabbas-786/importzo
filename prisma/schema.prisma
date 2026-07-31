@@ -213,3 +213,25 @@ model TransferLogEntry {
   @@index([jobId, action])
   @@index([jobId, entityType])
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 4 — Differentiation
+// ─────────────────────────────────────────────────────────────────────────────
+
+// A merchant-saved CSV column → Shopify field mapping, reusable across repeat
+// imports so a recurring supplier feed doesn't need re-mapping every time.
+// `mapping` is keyed by CSV HEADER TEXT (not column index), since index would
+// silently misapply if a future file reorders columns — see
+// smart-mapper.js's applyMappingTemplate/templateFromMapping.
+model FieldMappingTemplate {
+  id         String   @id @default(cuid())
+  shop       String
+  name       String
+  importType String   // products | collections | inventory | woocommerce
+  mapping    String   // JSON: { [csvHeaderText]: shopifyField }
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([shop, importType, name])
+  @@index([shop, importType])
+}

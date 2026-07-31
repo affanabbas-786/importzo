@@ -342,3 +342,59 @@ export function confidenceColor(level) {
     default: return { bg: "bg-gray-50", text: "text-gray-400", border: "border-gray-200" };
   }
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Field-mapping templates (Phase 4)
+//
+// A saved template is keyed by CSV HEADER TEXT, not column index — a
+// repeat supplier feed rarely keeps columns in the exact same order, and
+// an index-keyed template would silently misapply to the wrong field the
+// moment a column shifts. Matching is exact (case/whitespace-insensitive)
+// by design: silently fuzzy-matching a saved template risks applying the
+// wrong field to a similarly-named-but-different column with no review
+// step, which is worse than leaving it unmapped for the merchant to fix.
+// ═══════════════════════════════════════════════════════════════════
+
+function normalizeHeaderKey(header) {
+  return (header || "").trim().toLowerCase();
+}
+
+// Converts a live column mapping (colIndex -> field) into a portable,
+// header-text-keyed template. Only mapped (non-empty) columns are kept.
+export function templateFromMapping(headers, mapping) {
+  const template = {};
+  headers.forEach((header, colIndex) => {
+    const field = mapping[colIndex];
+    if (!field) return;
+    const key = normalizeHeaderKey(header);
+    if (key) template[key] = field;
+  });
+  return template;
+}
+
+// Applies a saved header-keyed template to a (possibly reordered, possibly
+// different) set of CSV headers. Returns the same shape as smartMapColumns
+// so callers can use either interchangeably, plus which template entries
+// had no matching column in this file (surfaced so the UI can say so
+// rather than silently dropping part of a saved mapping).
+export function applyMappingTemplate(headers, template) {
+  const mapping = {};
+  const confidence = {};
+  const matchedKeys = new Set();
+
+  headers.forEach((header, colIndex) => {
+    const key = normalizeHeaderKey(header);
+    const field = template[key];
+    if (field) {
+      mapping[colIndex] = field;
+      confidence[colIndex] = 100;
+      matchedKeys.add(key);
+    } else {
+      mapping[colIndex] = "";
+      confidence[colIndex] = 0;
+    }
+  });
+
+  const unmatchedTemplateKeys = Object.keys(template).filter((k) => !matchedKeys.has(k));
+  return { mapping, confidence, matchedCount: matchedKeys.size, unmatchedTemplateKeys };
+}
