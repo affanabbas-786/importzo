@@ -10,6 +10,7 @@ import { createProductWithVariants } from "./product-variants.server.js";
 import { createLogBuffer, ACTION, ENTITY } from "./transfer-log.server.js";
 import { createBackup } from "./backup.server.js";
 import { actorFromRecord, describeActor } from "./audit.server.js";
+import { marketQueryFilter } from "./markets.server.js";
 
 const BATCH_SIZE = 250;     // products fetched per GQL page
 const CREATE_CONCURRENCY = 5; // parallel productCreate calls
@@ -208,8 +209,18 @@ async function findProductByHandle(targetShop, targetToken, handle, version) {
 // logging: rollback uses it to know which destination products this app
 // actually created, so an "skipped" product (one that already existed on the
 // destination and is the merchant's own data) is never deleted by an undo.
+// Phase 4.2: tags a product with its source market, e.g. "market:eu".
+// Applied to both the create and overwrite paths so a market-scoped
+// transfer is identifiable on the destination either way. Idempotent
+// against re-runs — dedupes rather than appending the tag twice.
+function withMarketTag(tags, marketTag) {
+  if (!marketTag) return tags;
+  const tag = `market:${marketTag}`;
+  return tags.includes(tag) ? tags : [...tags, tag];
+}
+
 async function transferOneProduct(src, ctx) {
-  const { targetShop, targetToken, sourceShop, sourceToken, version, conflictMode } = ctx;
+  const { targetShop, targetToken, sourceShop, sourceToken, version, conflictMode, marketTag } = ctx;
   const srcId = src.id?.split("/").pop();
 
   if (src.isGiftCard || src.giftCard || src.gift_card) throw new Error("Gift card products cannot be transferred");
@@ -220,7 +231,7 @@ async function transferOneProduct(src, ctx) {
     if (existing) {
       if (conflictMode === "skip") return { id: existing.id.split("/").pop(), gid: existing.id, skipped: true, action: "skipped", reason: "A product with this handle already exists on the destination" };
       if (conflictMode === "overwrite") {
-        const tags = Array.isArray(src.tags) ? src.tags : (typeof src.tags === "string" ? src.tags.split(",").map((t) => t.trim()).filter(Boolean) : []);
+        const tags = withMarketTag(Array.isArray(src.tags) ? src.tags : (typeof src.tags === "string" ? src.tags.split(",").map((t) => t.trim()).filter(Boolean) : []), marketTag);
         const data = await shopifyGraphql(targetShop, targetToken, `#graphql
           mutation ProductUpdate($input: ProductInput!) {
             productUpdate(input: $input) { product { id } userErrors { field message } }
@@ -243,7 +254,7 @@ async function transferOneProduct(src, ctx) {
     }
   }
 
-  const tags = Array.isArray(src.tags) ? src.tags : (typeof src.tags === "string" ? src.tags.split(",").map((t) => t.trim()).filter(Boolean) : []);
+  const tags = withMarketTag(Array.isArray(src.tags) ? src.tags : (typeof src.tags === "string" ? src.tags.split(",").map((t) => t.trim()).filter(Boolean) : []), marketTag);
   const srcOptions = src.options || [];
   const variants = src.variants?.edges ? src.variants.edges.map((e) => e.node) : (src.variants || []);
 
@@ -329,8 +340,8 @@ async function transferOneProduct(src, ctx) {
 // fail to parse, so this wasn't a partial-data problem — every single page
 // fetch failed and the whole migration job aborted immediately.
 const PRODUCT_QUERY = `#graphql
-  query SourceProducts($after: String) {
-    products(first: ${BATCH_SIZE}, after: $after) {
+  query SourceProducts($after: String, $query: String) {
+    products(first: ${BATCH_SIZE}, after: $after, query: $query) {
       edges { cursor node {
         id title handle
         descriptionHtml vendor productType tags status publishedAt
@@ -348,8 +359,8 @@ const PRODUCT_QUERY = `#graphql
     }
   }`;
 
-async function fetchProductsPage(sourceShop, sourceToken, cursor, version) {
-  const data = await shopifyGraphql(sourceShop, sourceToken, PRODUCT_QUERY, { after: cursor || null }, version);
+async function fetchProductsPage(sourceShop, sourceToken, cursor, version, marketQuery) {
+  const data = await shopifyGraphql(sourceShop, sourceToken, PRODUCT_QUERY, { after: cursor || null, query: marketQuery || null }, version);
   const edges = data?.products?.edges || [];
   return {
     products: edges.map((e) => e.node),
@@ -358,9 +369,11 @@ async function fetchProductsPage(sourceShop, sourceToken, cursor, version) {
   };
 }
 
-async function getProductCount(sourceShop, sourceToken, version) {
+async function getProductCount(sourceShop, sourceToken, version, marketQuery) {
   try {
-    const data = await shopifyGraphql(sourceShop, sourceToken, `{ productsCount { count } }`, {}, version);
+    const data = await shopifyGraphql(sourceShop, sourceToken, `#graphql
+      query ProductsCount($query: String) { productsCount(query: $query) { count } }`,
+      { query: marketQuery || null }, version);
     return data?.productsCount?.count || 0;
   } catch { return 0; }
 }
@@ -385,6 +398,16 @@ export async function runMigrationWorker(jobId) {
 
     const sourceToken = decrypt(job.sourceToken);
     const destToken = decrypt(job.destToken);
+
+    // Phase 4.2: market-scoped transfer, resolved and snapshotted onto the
+    // job at creation time (api.migration-job.jsx) rather than re-fetched
+    // here — a resumed job must filter identically to how it started.
+    let marketPublicationIds = null;
+    try {
+      marketPublicationIds = job.sourceMarketPublicationIds ? JSON.parse(job.sourceMarketPublicationIds) : null;
+    } catch { marketPublicationIds = null; }
+    const marketQuery = marketQueryFilter({ publicationIds: marketPublicationIds });
+
     const ctx = {
       targetShop: job.shop,
       targetToken: destToken,
@@ -392,6 +415,7 @@ export async function runMigrationWorker(jobId) {
       sourceToken,
       version: job.apiVersion,
       conflictMode: job.conflictMode,
+      marketTag: job.sourceMarketHandle || null,
     };
 
     await prisma.migrationJob.update({ where: { id: jobId }, data: { status: "RUNNING" } });
@@ -442,7 +466,7 @@ export async function runMigrationWorker(jobId) {
 
     // Get total product count upfront for progress percentage
     if (!job.totalProducts) {
-      const total = await getProductCount(job.sourceShop, sourceToken, job.apiVersion);
+      const total = await getProductCount(job.sourceShop, sourceToken, job.apiVersion, marketQuery);
       if (total > 0) await prisma.migrationJob.update({ where: { id: jobId }, data: { totalProducts: total } });
     }
 
@@ -472,7 +496,7 @@ export async function runMigrationWorker(jobId) {
     while (hasMore) {
       let page;
       try {
-        page = await fetchProductsPage(job.sourceShop, sourceToken, cursor, job.apiVersion);
+        page = await fetchProductsPage(job.sourceShop, sourceToken, cursor, job.apiVersion, marketQuery);
       } catch (err) {
         console.error(`[migration-worker] job=${jobId} failed to fetch product page:`, err.message);
         await prisma.migrationJob.update({

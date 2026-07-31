@@ -9,6 +9,8 @@ import { runMigrationWorker } from "../lib/migration-worker.server";
 import { getSavedSourceStore } from "../lib/safe-db";
 import { enforcePolicy, POLICIES } from "../lib/rate-limit.server";
 import { actorFromSession, describeActor } from "../lib/audit.server";
+import { shopifyGraphql } from "../lib/shopify-api.server";
+import { listMarkets, findMarket } from "../lib/markets.server";
 
 export const action = async ({ request }) => {
   if (request.method !== "POST") {
@@ -85,6 +87,32 @@ export const action = async ({ request }) => {
   // therefore an IP and a session) still exists to attribute it to.
   const actor = actorFromSession(request, session);
 
+  // Phase 4.2: optional Markets-scoped transfer. Resolved here, against the
+  // SOURCE store, rather than trusting a client-supplied handle/publication
+  // list — the client only ever sends the market id it displayed. A merchant
+  // who explicitly picked a market and got silently ignored (rather than an
+  // explicit error) would have no way to know their filter didn't apply.
+  const marketId = (formData.get("marketId") || "").trim();
+  let marketFields = { sourceMarketId: null, sourceMarketHandle: null, sourceMarketPublicationIds: null };
+  if (marketId) {
+    const marketsResult = await listMarkets({ shopifyGraphql, shop: sourceShop, token: sourceToken, version });
+    if (!marketsResult.ok) {
+      return Response.json({
+        ok: false,
+        error: `Could not load Markets from the source store: ${marketsResult.error}. The source store's connection may need the Markets permission re-granted.`,
+      }, { status: 400 });
+    }
+    const market = findMarket(marketsResult.markets, marketId);
+    if (!market) {
+      return Response.json({ ok: false, error: "Selected market was not found on the source store." }, { status: 400 });
+    }
+    marketFields = {
+      sourceMarketId: market.id,
+      sourceMarketHandle: market.handle,
+      sourceMarketPublicationIds: market.publicationIds.length ? JSON.stringify(market.publicationIds) : null,
+    };
+  }
+
   const job = await prisma.migrationJob.create({
     data: {
       shop: targetShop,
@@ -95,6 +123,7 @@ export const action = async ({ request }) => {
       conflictMode,
       status: "PENDING",
       ...actor,
+      ...marketFields,
     },
   });
 

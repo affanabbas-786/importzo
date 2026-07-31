@@ -104,6 +104,15 @@ model MigrationJob {
   actorId           String?
   actorEmail        String?
   actorIp           String?
+  // Phase 4.2: optional Markets-scoped transfer. Resolved server-side at job
+  // creation time (never trusted from the client) and snapshotted here so a
+  // resumed/restarted worker doesn't need to re-fetch Markets mid-job.
+  // sourceMarketPublicationIds is null when the market has no restricting
+  // catalog (see markets.server.js) — every product is "in" that market, so
+  // there is nothing to filter by, and the worker skips filtering entirely.
+  sourceMarketId                 String?
+  sourceMarketHandle             String?
+  sourceMarketPublicationIds     String? // JSON array of publication GIDs, or null
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 }

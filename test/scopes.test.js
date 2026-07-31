@@ -79,6 +79,7 @@ describe("OAuth scope minimization", () => {
       "read_files",
       "read_inventory",
       "read_legal_policies",
+      "read_markets", // Phase 4.2 — Markets-scoped transfer, see shopify.app.toml
       "read_online_store_navigation",
       "read_online_store_pages",
       "read_products",
@@ -104,6 +105,7 @@ describe("OAuth scope minimization", () => {
       ["write_online_store_navigation", /mutation\s+CreateMenu/],
       ["read_legal_policies", /shopPolicies/],
       ["read_customers", /customers\s*\(\s*first:/],
+      ["read_markets", /markets\s*\(\s*first:/],
     ];
     for (const [scope, usage] of required) {
       if (usage.test(source)) {

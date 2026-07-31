@@ -757,6 +757,120 @@ describe("runMigrationWorker", () => {
     });
   });
 
+  // ── Phase 4.2: market-scoped transfer ──
+  describe("market-scoped transfer", () => {
+    it("passes the market's publication_ids as the SourceProducts query filter", async () => {
+      fakePrisma = createFakePrisma(baseJob({
+        sourceMarketId: "gid://shopify/Market/1",
+        sourceMarketHandle: "eu",
+        sourceMarketPublicationIds: JSON.stringify(["gid://shopify/Publication/10", "gid://shopify/Publication/11"]),
+      }));
+      let sourceProductsVariables = null;
+      const inner = makeFetch({ productPages: [{ nodes: [productNode(1)], hasNextPage: false }] });
+      global.fetch = vi.fn(async (url, opts) => {
+        const body = JSON.parse(opts.body);
+        if ((body.query || "").includes("query SourceProducts")) sourceProductsVariables = body.variables;
+        return inner(url, opts);
+      });
+
+      await runMigrationWorker("job-1");
+
+      expect(sourceProductsVariables.query).toBe("publication_ids:10,11");
+    });
+
+    it("passes a null query filter when the job has no market scope (unchanged default behavior)", async () => {
+      fakePrisma = createFakePrisma(baseJob());
+      let sourceProductsVariables = null;
+      const inner = makeFetch({ productPages: [{ nodes: [productNode(1)], hasNextPage: false }] });
+      global.fetch = vi.fn(async (url, opts) => {
+        const body = JSON.parse(opts.body);
+        if ((body.query || "").includes("query SourceProducts")) sourceProductsVariables = body.variables;
+        return inner(url, opts);
+      });
+
+      await runMigrationWorker("job-1");
+
+      expect(sourceProductsVariables.query).toBeNull();
+    });
+
+    it("tags a newly created product with the source market handle", async () => {
+      fakePrisma = createFakePrisma(baseJob({ sourceMarketHandle: "eu" }));
+      let createProductVariables = null;
+      global.fetch = makeFetch({
+        productPages: [{ nodes: [productNode(1, { })], hasNextPage: false }],
+        productCreateHandler: (body) => {
+          createProductVariables = body.variables;
+          return jsonResponse({ data: { productCreate: { product: { id: "gid://shopify/Product/new-1" }, userErrors: [] } } });
+        },
+      });
+
+      await runMigrationWorker("job-1");
+
+      expect(createProductVariables.product.tags).toContain("market:eu");
+    });
+
+    it("tags an overwritten product with the source market handle too", async () => {
+      fakePrisma = createFakePrisma(baseJob({ conflictMode: "overwrite", sourceMarketHandle: "eu" }));
+      let productUpdateVariables = null;
+      global.fetch = makeFetch({
+        productPages: [{ nodes: [productNode(1, { handle: "existing-handle" })], hasNextPage: false }],
+        findProductByHandleResult: { id: "gid://shopify/Product/existing-999", handle: "existing-handle" },
+        productUpdateHandler: (body) => {
+          productUpdateVariables = body.variables;
+          return jsonResponse({ data: { productUpdate: { product: { id: body.variables?.input?.id }, userErrors: [] } } });
+        },
+      });
+
+      await runMigrationWorker("job-1");
+
+      expect(productUpdateVariables.input.tags).toContain("market:eu");
+    });
+
+    it("does not duplicate the market tag if the source product already carries it", async () => {
+      fakePrisma = createFakePrisma(baseJob({ sourceMarketHandle: "eu" }));
+      let createProductVariables = null;
+      // The source product's own tags already include the market tag.
+      const page = { nodes: [{ ...productNode(1), tags: ["market:eu"] }], hasNextPage: false };
+      global.fetch = makeFetch({
+        productPages: [page],
+        productCreateHandler: (body) => {
+          createProductVariables = body.variables;
+          return jsonResponse({ data: { productCreate: { product: { id: "gid://shopify/Product/new-1" }, userErrors: [] } } });
+        },
+      });
+
+      await runMigrationWorker("job-1");
+
+      expect(createProductVariables.product.tags.filter((t) => t === "market:eu")).toHaveLength(1);
+    });
+
+    it("does not tag products when the job has no market scope", async () => {
+      fakePrisma = createFakePrisma(baseJob());
+      let createProductVariables = null;
+      global.fetch = makeFetch({
+        productPages: [{ nodes: [productNode(1, {})], hasNextPage: false }],
+        productCreateHandler: (body) => {
+          createProductVariables = body.variables;
+          return jsonResponse({ data: { productCreate: { product: { id: "gid://shopify/Product/new-1" }, userErrors: [] } } });
+        },
+      });
+
+      await runMigrationWorker("job-1");
+
+      expect(createProductVariables.product.tags || []).not.toContain(expect.stringContaining("market:"));
+    });
+
+    it("degrades to no filter rather than crashing the job when sourceMarketPublicationIds is corrupt JSON", async () => {
+      fakePrisma = createFakePrisma(baseJob({ sourceMarketPublicationIds: "{not-json" }));
+      global.fetch = makeFetch({ productPages: [{ nodes: [productNode(1)], hasNextPage: false }] });
+
+      await runMigrationWorker("job-1");
+
+      const job = fakePrisma.__getJob("job-1");
+      expect(job.status).toBe("COMPLETED");
+    });
+  });
+
   // ── Phase 2: granular per-record transfer log ──
   describe("detailed per-record transfer log", () => {
     it("writes a 'created' log entry per successfully created product", async () => {

@@ -56,7 +56,16 @@ api_version = "2026-04"
 # customer personal information, which is true (the export streams to the
 # merchant's browser and is never persisted) but sits awkwardly next to a
 # feature that reads names/emails/phones. Flagged for your review.
-scopes = "read_products,write_products,read_inventory,write_inventory,read_themes,write_themes,read_files,write_files,read_content,write_content,read_online_store_pages,read_legal_policies,read_online_store_navigation,write_online_store_navigation,read_customers"
+#
+# Phase 4.2 ADDITION — read_markets: lists the source store's configured
+# Markets so a transfer can optionally be scoped to one region and the
+# resulting products tagged with it (markets.server.js, api.migration-job.jsx,
+# app.transfer.jsx). Query-only (markets/listMarkets), no write mutations are
+# ever issued. NOT YET COMMITTED — adding a scope triggers Shopify's
+# re-authorization prompt for every existing install, same as the Phase 3.2
+# removal but in the other direction (this one asks for MORE access). Held
+# for your explicit review before shipping. See PROGRESS.md.
+scopes = "read_products,write_products,read_inventory,write_inventory,read_themes,write_themes,read_files,write_files,read_content,write_content,read_online_store_pages,read_legal_policies,read_online_store_navigation,write_online_store_navigation,read_customers,read_markets"
 
 [auth]
 redirect_urls = [ "https://importzo.dazzletech.co/auth/callback" ]

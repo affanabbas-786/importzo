@@ -527,3 +527,66 @@ describe("app.transfer action — transfer-theme idempotency", () => {
     expect(result.message).toMatch(/already exists/i);
   });
 });
+
+// Phase 4.2: Markets bundled into the connect/verify-connection responses
+// that populate the transfer UI's sourceInfo, so the market dropdown has
+// something to show without a separate round trip.
+describe("app.transfer action — connect (Markets integration)", () => {
+  let originalEncryptionKey;
+
+  beforeEach(() => {
+    originalEncryptionKey = process.env.ENCRYPTION_KEY;
+    process.env.ENCRYPTION_KEY = "test-encryption-key-long-enough-to-pass-validation-0123456789";
+  });
+
+  afterEach(() => {
+    if (originalEncryptionKey === undefined) delete process.env.ENCRYPTION_KEY;
+    else process.env.ENCRYPTION_KEY = originalEncryptionKey;
+    vi.restoreAllMocks();
+  });
+
+  function marketNode({ id, handle, publicationIds = [] }) {
+    return {
+      id, name: handle, handle, status: "ACTIVE", type: "REGULAR",
+      currencySettings: { baseCurrency: { currencyCode: "EUR" } },
+      catalogs: { nodes: publicationIds.map((pid, i) => ({ id: `gid://shopify/MarketCatalog/${i}`, publication: { id: pid } })) },
+    };
+  }
+
+  function makeConnectFetch({ marketsResponse } = {}) {
+    return vi.fn(async (url, opts) => {
+      const body = opts?.body ? JSON.parse(opts.body) : {};
+      const query = body.query || "";
+      if (query.includes("productsCount")) {
+        return jsonResponse({ data: { shop: { name: "Source Shop", email: "s@example.com", plan: { displayName: "Basic" } }, productsCount: { count: 5 }, collectionsCount: { count: 2 } } });
+      }
+      if (url.includes("/themes.json")) return { ok: false };
+      if (query.includes("query ListMarkets")) {
+        if (marketsResponse === "error") return { ok: false, status: 403, text: async () => JSON.stringify({ errors: [{ message: "Access denied for markets field" }] }) };
+        return jsonResponse({ data: { markets: { nodes: marketsResponse || [] } } });
+      }
+      return jsonResponse({ data: {} });
+    });
+  }
+
+  it("includes markets in a successful connect response", async () => {
+    global.fetch = makeConnectFetch({
+      marketsResponse: [marketNode({ id: "gid://shopify/Market/1", handle: "eu", publicationIds: ["gid://shopify/Publication/10"] })],
+    });
+    const req = mockActionRequest({ intent: "connect", sourceUrl: SOURCE_SHOP, sourceToken: "shpat_abc" });
+    const result = await action({ request: req });
+
+    expect(result.ok).toBe(true);
+    expect(result.markets).toHaveLength(1);
+    expect(result.markets[0]).toMatchObject({ handle: "eu", hasProductFilter: true });
+  });
+
+  it("still connects successfully when the Markets request fails (e.g. scope not yet granted)", async () => {
+    global.fetch = makeConnectFetch({ marketsResponse: "error" });
+    const req = mockActionRequest({ intent: "connect", sourceUrl: SOURCE_SHOP, sourceToken: "shpat_abc" });
+    const result = await action({ request: req });
+
+    expect(result.ok).toBe(true);
+    expect(result.markets).toEqual([]);
+  });
+});

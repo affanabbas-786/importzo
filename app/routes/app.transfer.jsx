@@ -19,6 +19,7 @@ import { notifyJobComplete } from "../lib/notify";
 import { saveThemeZip, deleteThemeZipLater } from "../lib/theme-zip.server";
 import { shopifyFetch as sharedShopifyFetch, shopifyGraphql as sharedShopifyGraphql } from "../lib/shopify-api.server";
 import { createProductWithVariants } from "../lib/product-variants.server";
+import { listMarkets } from "../lib/markets.server";
 
 // ═══════════════════════════════════════════════════════════════════
 // Server
@@ -1254,6 +1255,11 @@ export const action = async ({ request }) => {
       let themes = [];
       if (tc.ok) { const td = await tc.json(); themes = td.themes || []; themeCount = themes.length; }
 
+      // Phase 4.2: Markets, best-effort. A source token that predates the
+      // read_markets scope (not yet re-authorized) must not break the whole
+      // connect flow — the transfer UI just shows no market filter option.
+      const marketsResult = await listMarkets({ shopifyGraphql: sharedShopifyGraphql, shop: url, token, version }).catch(() => ({ ok: false, markets: [] }));
+
       // Save connection to DB (best-effort — never blocks the user)
       const saveToken = formData.get("sourceToken")?.trim() || token;
       await upsertSourceStore(session.shop, {
@@ -1264,6 +1270,7 @@ export const action = async ({ request }) => {
         intent: "connect", rid, ok: true,
         shopName, shopEmail, shopPlan, shopDomain: url,
         productCount, collectionCount, themeCount, themes,
+        markets: marketsResult.markets,
       };
     } catch (err) {
       return { intent: "connect", rid, ok: false, error: err.message };
@@ -1307,10 +1314,13 @@ export const action = async ({ request }) => {
       let themes = [];
       if (tc.ok) { const td = await tc.json(); themes = td.themes || []; themeCount = themes.length; }
 
+      const marketsResult = await listMarkets({ shopifyGraphql: sharedShopifyGraphql, shop: saved.sourceUrl, token: saved.token, version }).catch(() => ({ ok: false, markets: [] }));
+
       return {
         intent: "verify-connection", rid, ok: true,
         shopName: saved.sourceName, shopEmail: saved.sourceEmail, shopPlan: saved.sourcePlan, shopDomain: saved.sourceUrl,
         productCount, collectionCount, themeCount, themes,
+        markets: marketsResult.markets,
       };
     } catch (err) {
       return { intent: "verify-connection", rid, ok: false, error: err.message };
@@ -2008,6 +2018,8 @@ export default function StoreTransferPage() {
   const [conflictMode, setConflictMode] = useState("skip");
   const [selectedThemeId, setSelectedThemeId] = useState(null);
   const [ownershipConsent, setOwnershipConsent] = useState(false);
+  // Phase 4.2: optional Markets-scoped product transfer.
+  const [selectedMarketId, setSelectedMarketId] = useState("");
 
   useEffect(() => {
     const prefs = loadPrefs();
@@ -2082,6 +2094,7 @@ export default function StoreTransferPage() {
         shopDomain: d.shopDomain || d.sourceShop || "",
         productCount: d.productCount, collectionCount: d.collectionCount,
         themeCount: d.themeCount, themes: d.themes || [],
+        markets: d.markets || [],
       });
       credsRef.current.url = d.shopDomain;
       setHasSavedConnection(true);
@@ -2140,6 +2153,7 @@ export default function StoreTransferPage() {
         setLoadingMsg("Starting product transfer...");
         const fd = new FormData();
         fd.append("conflictMode", conflictMode);
+        if (selectedMarketId) fd.append("marketId", selectedMarketId);
         if (sessionIdRef.current) fd.append("sessionId", sessionIdRef.current);
         fetch("/api/migration-job", { method: "POST", body: fd, credentials: "same-origin" })
           .then((r) => r.json())
@@ -3138,6 +3152,35 @@ export default function StoreTransferPage() {
                   ))}
                 </div>
               </div>
+
+              {/* Market-scoped transfer (Phase 4.2) — only relevant to the products module */}
+              {selectedModules.has("products") && sourceInfo?.markets?.length > 0 && (
+                <div className="border-t border-gray-100 pt-4 mb-4">
+                  <p className="text-sm font-medium text-gray-700 mb-2">Limit products to a source Market (optional):</p>
+                  <select
+                    value={selectedMarketId}
+                    onChange={(e) => setSelectedMarketId(e.target.value)}
+                    className="w-full max-w-sm px-3 py-2 text-sm border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-green-800/20 bg-white text-gray-700"
+                  >
+                    <option value="">All products (no market filter)</option>
+                    {sourceInfo.markets.map((m) => (
+                      <option key={m.id} value={m.id} disabled={!m.hasProductFilter}>
+                        {m.name} ({m.currencyCode || "—"}){!m.hasProductFilter ? " — no product restriction configured" : ""}
+                      </option>
+                    ))}
+                  </select>
+                  {selectedMarketId && (
+                    <p className="text-xs text-gray-500 mt-2">
+                      Only products published to this market&apos;s catalog will be transferred, and transferred products will be tagged <code className="px-1 py-0.5 rounded bg-gray-100 text-gray-700">market:{sourceInfo.markets.find((m) => m.id === selectedMarketId)?.handle}</code>.
+                    </p>
+                  )}
+                  {!selectedMarketId && (
+                    <p className="text-xs text-gray-400 mt-2">
+                      Markets without a dedicated catalog make every product available to them, so there&apos;s nothing to filter by — those are shown disabled above.
+                    </p>
+                  )}
+                </div>
+              )}
 
               {/* Theme selection */}
               {selectedModules.has("themes") && sourceInfo?.themes?.length > 0 && (
