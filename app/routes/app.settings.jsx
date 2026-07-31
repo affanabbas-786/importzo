@@ -1,6 +1,6 @@
 import PropTypes from "prop-types";
 import { useEffect, useState } from "react";
-import { useRouteError } from "react-router";
+import { useRouteError, Link } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import { BRAND } from "../lib/constants";
@@ -209,6 +209,34 @@ export default function SettingsPage() {
               </p>
             )}
           </div>
+        </section>
+
+        {/* ── AI SEO Cleanup ── */}
+        <section className="space-y-4">
+          <div>
+            <h2 className="text-base font-semibold text-gray-900" style={{ fontFamily: F }}>AI SEO Cleanup</h2>
+            <p className="text-sm text-gray-500 mt-0.5">Optional, bring-your-own-key AI title/description suggestions after import.</p>
+          </div>
+          <Link
+            to="/app/ai-settings"
+            className="group flex items-start gap-4 p-5 rounded-xl border border-gray-200 bg-white shadow-sm hover:shadow-md hover:-translate-y-0.5 hover:border-gray-300 transition-all text-left w-full block"
+          >
+            <div className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: "rgba(23,50,10,0.08)", color: S }}>
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
+              </svg>
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-semibold text-gray-900" style={{ fontFamily: F }}>Connect your Anthropic or OpenAI key</p>
+              <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">
+                Importzo never bills you for AI usage — connect your own key and review every suggestion before it&apos;s applied.
+              </p>
+              <span className="mt-2 inline-flex items-center gap-1 text-xs font-semibold group-hover:gap-1.5 transition-all" style={{ color: S }}>
+                Manage AI settings
+                <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}><path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" /></svg>
+              </span>
+            </div>
+          </Link>
         </section>
 
         {/* ── Notifications ── */}

@@ -57,6 +57,10 @@ export default function PrivacyPolicy() {
               <span className="text-[#6d7175] select-none">·</span>
               <span><strong>Import / export / transfer history</strong> — a log of operations (timestamps, record counts, status) so you can review past activity inside the App.</span>
             </li>
+            <li className="flex gap-2">
+              <span className="text-[#6d7175] select-none">·</span>
+              <span><strong>AI provider API key (optional)</strong> — if you enable the AI SEO Cleanup feature, you voluntarily provide your own Anthropic or OpenAI API key. It is encrypted at rest and used only to generate the suggestions you explicitly request.</span>
+            </li>
           </ul>
           <p className="mt-3 text-sm text-[#6d7175]">
             We do <strong>not</strong> collect personal information about your customers (names, emails, addresses, payment data) unless it is incidentally present in products, collections, or other store data you explicitly choose to transfer.
@@ -110,7 +114,7 @@ export default function PrivacyPolicy() {
         <section className="px-6 py-5">
           <h2 className="text-base font-semibold text-[#202223] mb-3">5. Third-Party Services</h2>
           <p className="text-sm text-[#202223] leading-relaxed">
-            The App communicates with the Shopify Admin API on your behalf. No other third-party services, analytics providers, or tracking scripts are used.
+            The App communicates with the Shopify Admin API on your behalf. If you choose to enable the optional AI SEO Cleanup feature and connect your own Anthropic or OpenAI API key, the title and description of a product you explicitly request a suggestion for is sent to that provider &mdash; and only that provider, only for that product, only when you ask. This feature is off by default and uses your own account with that provider, not ours. No other third-party services, analytics providers, or tracking scripts are used.
           </p>
         </section>
 

@@ -486,6 +486,9 @@ export default function ImportPage() {
   const [variantsDetected, setVariantsDetected] = useState(false);
   const [errorsExpanded, setErrorsExpanded] = useState(false);
   const [selectedTemplateId, setSelectedTemplateId] = useState("");
+  // Phase 4.4 — optional post-import AI SEO cleanup (bring-your-own-key).
+  const [aiAvailable, setAiAvailable] = useState(null); // null = unknown yet, true/false once checked
+  const [aiState, setAiState] = useState({}); // { [productId]: { status, current, suggested, error } }
   const [newTemplateName, setNewTemplateName] = useState("");
 
   // ── Field-mapping templates (Phase 4) ──────────────────────────
@@ -556,6 +559,61 @@ export default function ImportPage() {
     if (selectedTemplateId === templateId) setSelectedTemplateId("");
     shopify.toast.show(`Deleted "${name}"`);
   }, [templateActionFetcher, selectedTemplateId, shopify]);
+
+  // ── AI SEO cleanup (Phase 4.4) — optional, per-product, never automatic ──
+  useEffect(() => {
+    if (step !== STEP_IMPORT) return;
+    fetch("/api/ai-settings", { credentials: "same-origin" })
+      .then((r) => r.json())
+      .then((data) => setAiAvailable(!!(data.ok && data.integration && data.integration.enabled)))
+      .catch(() => setAiAvailable(false));
+  }, [step]);
+
+  const handleAiSuggest = useCallback(async (productId) => {
+    setAiState((prev) => ({ ...prev, [productId]: { status: "loading" } }));
+    try {
+      const fd = new FormData();
+      fd.append("intent", "suggest");
+      fd.append("productId", productId);
+      const res = await fetch("/api/ai-enhance", { method: "POST", body: fd, credentials: "same-origin" });
+      const data = await res.json();
+      if (!data.ok) {
+        setAiState((prev) => ({ ...prev, [productId]: { status: "error", error: data.error } }));
+        return;
+      }
+      setAiState((prev) => ({ ...prev, [productId]: { status: "suggested", current: data.current, suggested: data.suggested } }));
+    } catch (err) {
+      setAiState((prev) => ({ ...prev, [productId]: { status: "error", error: err.message } }));
+    }
+  }, []);
+
+  const handleAiApply = useCallback(async (productId) => {
+    const entry = aiState[productId];
+    if (!entry?.suggested) return;
+    setAiState((prev) => ({ ...prev, [productId]: { ...prev[productId], status: "applying" } }));
+    try {
+      const fd = new FormData();
+      fd.append("intent", "apply");
+      fd.append("productId", productId);
+      fd.append("title", entry.suggested.title);
+      fd.append("description", entry.suggested.description);
+      const res = await fetch("/api/ai-enhance", { method: "POST", body: fd, credentials: "same-origin" });
+      const data = await res.json();
+      if (!data.ok) {
+        setAiState((prev) => ({ ...prev, [productId]: { ...prev[productId], status: "error", error: data.error } }));
+        shopify.toast.show(data.error || "Failed to apply AI suggestion", { isError: true });
+        return;
+      }
+      setAiState((prev) => ({ ...prev, [productId]: { ...prev[productId], status: "applied" } }));
+      shopify.toast.show("Product updated with AI suggestion");
+    } catch (err) {
+      setAiState((prev) => ({ ...prev, [productId]: { ...prev[productId], status: "error", error: err.message } }));
+    }
+  }, [aiState, shopify]);
+
+  const handleAiDiscard = useCallback((productId) => {
+    setAiState((prev) => ({ ...prev, [productId]: { status: "idle" } }));
+  }, []);
 
   const isImporting =
     ["loading", "submitting"].includes(fetcher.state) &&
@@ -1778,12 +1836,17 @@ export default function ImportPage() {
             {/* Success List */}
             {fetcher.data.successCount > 0 && (
               <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-                <div className="px-6 py-4 border-b border-gray-100">
+                <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between gap-3 flex-wrap">
                   <h3 className="text-sm font-semibold text-gray-900">
                     Successfully Imported ({fetcher.data.successCount})
                   </h3>
+                  {aiAvailable === false && (
+                    <Link to="/app/ai-settings" className="text-xs font-medium" style={{ color: "#2E6316" }}>
+                      Connect an AI key to enable SEO cleanup &rarr;
+                    </Link>
+                  )}
                 </div>
-                <div className="overflow-auto max-h-[300px]">
+                <div className="overflow-auto max-h-[500px]">
                   <table className="w-full">
                     <thead>
                       <tr className="bg-gray-50/80">
@@ -1799,15 +1862,22 @@ export default function ImportPage() {
                         <th className="px-6 py-2 text-left text-xs font-semibold text-gray-500">
                           Variants
                         </th>
+                        {aiAvailable && (
+                          <th className="px-6 py-2 text-left text-xs font-semibold text-gray-500">
+                            SEO
+                          </th>
+                        )}
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100">
                       {fetcher.data.results
                         .filter((r) => r.status === "success")
-                        .map((result) => (
+                        .map((result) => {
+                          const ai = aiState[result.productId];
+                          return (
                           <tr
                             key={result.row}
-                            className="hover:bg-gray-50/50 transition-colors"
+                            className="hover:bg-gray-50/50 transition-colors align-top"
                           >
                             <td className="px-6 py-2.5 text-sm text-gray-500">
                               {result.row}
@@ -1834,8 +1904,51 @@ export default function ImportPage() {
                                 </span>
                               )}
                             </td>
+                            {aiAvailable && (
+                              <td className="px-6 py-2.5 min-w-[220px] max-w-[320px]">
+                                {(!ai || ai.status === "idle") && (
+                                  <button type="button" onClick={() => handleAiSuggest(result.productId)}
+                                    className="text-xs font-medium px-2 py-1 rounded-md border border-gray-200 text-gray-700 hover:bg-gray-50">
+                                    \u2728 Improve with AI
+                                  </button>
+                                )}
+                                {ai?.status === "loading" && (
+                                  <span className="text-xs text-gray-400">Generating suggestion\u2026</span>
+                                )}
+                                {ai?.status === "error" && (
+                                  <div>
+                                    <p className="text-xs text-red-600">{ai.error}</p>
+                                    <button type="button" onClick={() => handleAiSuggest(result.productId)} className="text-xs font-medium mt-1" style={{ color: "#2E6316" }}>Retry</button>
+                                  </div>
+                                )}
+                                {ai?.status === "suggested" && (
+                                  <div className="space-y-1.5">
+                                    <p className="text-xs text-gray-400 line-through truncate" title={ai.current.title}>{ai.current.title}</p>
+                                    <p className="text-xs font-medium text-gray-900">{ai.suggested.title}</p>
+                                    <p className="text-[11px] text-gray-500 leading-snug">{ai.suggested.description}</p>
+                                    <div className="flex items-center gap-2 pt-0.5">
+                                      <button type="button" onClick={() => handleAiApply(result.productId)}
+                                        className="text-xs font-medium px-2 py-1 rounded-md text-white" style={{ background: "#17320A" }}>
+                                        Accept
+                                      </button>
+                                      <button type="button" onClick={() => handleAiDiscard(result.productId)}
+                                        className="text-xs font-medium text-gray-500 hover:text-gray-700">
+                                        Discard
+                                      </button>
+                                    </div>
+                                  </div>
+                                )}
+                                {ai?.status === "applying" && (
+                                  <span className="text-xs text-gray-400">Applying\u2026</span>
+                                )}
+                                {ai?.status === "applied" && (
+                                  <span className="text-xs font-medium" style={{ color: "#2E6316" }}>\u2713 Updated</span>
+                                )}
+                              </td>
+                            )}
                           </tr>
-                        ))}
+                          );
+                        })}
                     </tbody>
                   </table>
                 </div>

@@ -105,6 +105,11 @@ export const POLICIES = Object.freeze({
   migrationJob: { limit: 20, windowMs: 60 * 60 * 1000, maxConcurrent: 2 },
   // Cheap CRUD — saved field-mapping templates (Phase 4).
   mappingTemplate: { limit: 120, windowMs: 60 * 60 * 1000, maxConcurrent: 10 },
+  // AI SEO suggestions (Phase 4.4) — calls a third-party LLM on the
+  // merchant's own key. Capped mainly to stop a runaway client-side loop
+  // from silently burning through their API budget, not to protect our
+  // own infra (the cost lands on the merchant's account, not ours).
+  aiEnhance: { limit: 60, windowMs: 60 * 60 * 1000, maxConcurrent: 3 },
 });
 
 function tooManyRequests(body, retryAfterSeconds) {

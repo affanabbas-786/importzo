@@ -244,3 +244,20 @@ model FieldMappingTemplate {
   @@unique([shop, importType, name])
   @@index([shop, importType])
 }
+
+// Phase 4.4 — AI-assisted SEO cleanup, bring-your-own-key.
+// The merchant supplies their own LLM API key (Anthropic or OpenAI); Importzo
+// never bears inference cost. One integration per shop — re-saving replaces
+// the provider/key/model. apiKey is AES-encrypted at rest via the same
+// encryption.server.js used for OAuth tokens (Phase 3.1) — this is exactly
+// the "new third-party API key" case that policy exists for.
+model AiIntegration {
+  id        String   @id @default(cuid())
+  shop      String   @unique
+  provider  String   // "anthropic" | "openai"
+  apiKey    String   // AES-encrypted
+  model     String?  // merchant-editable override, e.g. "claude-haiku-4-5" / "gpt-4o-mini"
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
