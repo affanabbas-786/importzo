@@ -8,11 +8,54 @@ vi.mock("../../app/shopify.server", () => ({
   apiVersion: "2025-10",
 }));
 
+// Phase 5: every product create now goes through usage.server.js's
+// assertQuotaAvailable/recordUsageAndCheck, which read and write
+// prisma.shopPlan. Modeled as an in-memory Map, cleared before every test
+// (see the top-level beforeEach below).
+const shopPlanRows = new Map();
 vi.mock("../../app/db.server", () => ({
-  default: { importJob: { create: (...args) => mockCreate(...args) } },
+  default: {
+    importJob: { create: (...args) => mockCreate(...args) },
+    shopPlan: {
+      upsert: vi.fn(async ({ where: { shop }, update, create }) => {
+        const existing = shopPlanRows.get(shop);
+        if (existing) { Object.assign(existing, update); return { ...existing }; }
+        const row = {
+          id: "plan-1", recordsUsed: 0, subscriptionId: null, subscriptionStatus: null,
+          shopOwnerEmail: null, uninstalledAt: null, createdAt: new Date(), updatedAt: new Date(), ...create,
+        };
+        shopPlanRows.set(shop, row);
+        return { ...row };
+      }),
+      update: vi.fn(async ({ where: { shop }, data }) => {
+        const row = shopPlanRows.get(shop);
+        if (!row) throw new Error("Record to update not found.");
+        const patch = { ...data };
+        if (patch.recordsUsed && typeof patch.recordsUsed === "object" && "increment" in patch.recordsUsed) {
+          patch.recordsUsed = (row.recordsUsed || 0) + patch.recordsUsed.increment;
+        }
+        Object.assign(row, patch);
+        return { ...row };
+      }),
+    },
+  },
 }));
 
 import { action } from "../../app/routes/app.woocommerce-importer.jsx";
+
+const DEST_SHOP = "dest-shop.myshopify.com";
+
+function setShopPlan(data) {
+  shopPlanRows.set(DEST_SHOP, {
+    id: "plan-preset", shop: DEST_SHOP, tier: "free", recordsUsed: 0, usagePeriodStart: new Date(),
+    subscriptionId: null, subscriptionStatus: null, shopOwnerEmail: null, uninstalledAt: null,
+    createdAt: new Date(), updatedAt: new Date(), ...data,
+  });
+}
+
+beforeEach(() => {
+  shopPlanRows.clear();
+});
 
 function productCreateResponse(id, errors = []) {
   return jsonResponse({ data: { productCreate: { product: errors.length ? null : { id: `gid://shopify/Product/${id}` }, userErrors: errors } } });
@@ -166,5 +209,80 @@ describe("app.woocommerce-importer action", () => {
     expect(result.successCount).toBe(12);
     expect(result.results.map((r) => r.row)).toEqual([...Array(12)].map((_, i) => i + 1));
     expect(result.results.map((r) => r.title)).toEqual(products.map((p) => p.title));
+  });
+
+  describe("plan usage limits", () => {
+    it("refuses to import at all once the shop's monthly allowance is used up", async () => {
+      setShopPlan({ tier: "free", recordsUsed: 250 });
+      const req = mockActionRequest({
+        products: JSON.stringify([{ title: "Cotton T-Shirt", variants: [{ price: "19.99" }] }]),
+        fileName: "woo-export.csv",
+      });
+      const result = await action({ request: req });
+
+      expect(result.status).toBe("failed");
+      expect(result.errorCount).toBe(1);
+      expect(result.error).toMatch(/used all 250 records/i);
+      expect(fetchMock).not.toHaveBeenCalled(); // short-circuited before even fetching the default location
+    });
+
+    it("increments usage for each product actually created", async () => {
+      let productSeq = 0;
+      fetchMock.mockImplementation(async (url, opts) => {
+        const body = opts?.body ? JSON.parse(opts.body) : {};
+        const query = body.query || "";
+        if (query.includes("productVariantsBulkCreate")) return variantsBulkCreateResponse(1);
+        if (query.includes("productCreate")) return productCreateResponse(String(3000 + productSeq++));
+        return jsonResponse({ data: {} });
+      });
+      const products = [
+        { title: "Shirt", variants: [{ price: "10.00" }] },
+        { title: "Mug", variants: [{ price: "5.00" }] },
+      ];
+      const req = mockActionRequest({ products: JSON.stringify(products), fileName: "woo.csv" });
+      const result = await action({ request: req });
+
+      expect(result.successCount).toBe(2);
+      expect(shopPlanRows.get(DEST_SHOP).recordsUsed).toBe(2);
+    });
+
+    it("stops creating further products once the plan limit is reached mid-import", async () => {
+      // 5 remaining (245 used of 250) matches CONCURRENCY exactly, so batch 1
+      // (5 products, launched concurrently before any can flip the shared
+      // quota flag) lands exactly on the cap; batch 2 (2 more) only starts
+      // once batch 1 has fully resolved.
+      setShopPlan({ tier: "free", recordsUsed: 245 });
+      let productSeq = 0;
+      fetchMock.mockImplementation(async (url, opts) => {
+        const body = opts?.body ? JSON.parse(opts.body) : {};
+        const query = body.query || "";
+        if (query.includes("productVariantsBulkCreate")) return variantsBulkCreateResponse(1);
+        if (query.includes("productCreate")) return productCreateResponse(String(4000 + productSeq++));
+        return jsonResponse({ data: {} });
+      });
+      const products = Array.from({ length: 7 }, (_, i) => ({ title: `Product ${i + 1}`, variants: [{ price: "1.00" }] }));
+      const req = mockActionRequest({ products: JSON.stringify(products), fileName: "woo.csv" });
+      const result = await action({ request: req });
+
+      expect(shopPlanRows.get(DEST_SHOP).recordsUsed).toBe(250);
+      expect(result.successCount).toBe(5);
+      const quotaStopped = result.results.filter((r) => r.status === "error" && /plan limit reached/i.test(r.error));
+      expect(quotaStopped).toHaveLength(2);
+    });
+
+    it("never blocks an unlimited (Pro) plan", async () => {
+      setShopPlan({ tier: "pro", recordsUsed: 999999 });
+      fetchMock
+        .mockResolvedValueOnce(productCreateResponse("111"))
+        .mockResolvedValueOnce(variantsBulkCreateResponse(1));
+      const req = mockActionRequest({
+        products: JSON.stringify([{ title: "Cotton T-Shirt", variants: [{ price: "19.99" }] }]),
+        fileName: "woo-export.csv",
+      });
+      const result = await action({ request: req });
+
+      expect(result.successCount).toBe(1);
+      expect(shopPlanRows.get(DEST_SHOP).recordsUsed).toBe(1000000);
+    });
   });
 });

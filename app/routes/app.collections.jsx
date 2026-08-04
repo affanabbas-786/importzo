@@ -5,6 +5,7 @@ import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate, apiVersion } from "../shopify.server";
 import prisma from "../db.server";
 import { shopifyFetch } from "../lib/shopify-api.server";
+import { assertQuotaAvailable, recordUsageAndCheck } from "../lib/usage.server";
 import { parseCSV } from "../lib/csv-parser";
 import { smartMapColumns, COLLECTION_ALIASES, confidenceLevel, confidenceColor } from "../lib/smart-mapper";
 import { FileSourcePicker, AISummary, generateMappingSummary, generateImportResultSummary } from "../components/ui";
@@ -43,6 +44,20 @@ export const action = async ({ request }) => {
   const shopDomain = session.shop;
   const accessToken = session.accessToken;
   const version = apiVersion || "2025-10";
+
+  // Phase 5 — billing: refuse to start at all if this shop has already used
+  // its full monthly plan allowance.
+  const quotaGate = await assertQuotaAvailable({ prisma, shop: shopDomain });
+  if (!quotaGate.ok) {
+    return {
+      results: [{ row: 0, title: "", status: "error", error: quotaGate.message }],
+      successCount: 0, errorCount: 1, status: "failed",
+    };
+  }
+  // Flips true once the plan limit is hit mid-import; checked at the top of
+  // processCollection so the rest of the CSV is skipped rather than written
+  // past the cap.
+  let quotaExceeded = false;
 
   const SORT_ORDER_MAP = { manual: "MANUAL", "best-selling": "BEST_SELLING", "alpha-asc": "ALPHA_ASC", "alpha-desc": "ALPHA_DESC", "price-desc": "PRICE_DESC", "price-asc": "PRICE_ASC", created: "CREATED", "created-desc": "CREATED_DESC" };
   const RULE_COLUMN_MAP = { tag: "TAG", title: "TITLE", type: "TYPE", vendor: "VENDOR", variant_title: "VARIANT_TITLE", variant_price: "VARIANT_PRICE", variant_compare_at_price: "VARIANT_COMPARE_AT_PRICE", variant_weight: "VARIANT_WEIGHT", variant_inventory: "VARIANT_INVENTORY" };
@@ -100,6 +115,13 @@ export const action = async ({ request }) => {
   async function processCollection(collection, i) {
     const isSmartType = (collection.collection_type || "").toLowerCase() === "smart";
 
+    // Phase 5: once the plan limit is hit mid-import, stop creating new
+    // collections — the rest of the CSV is reported as skipped rather than
+    // silently written past the cap.
+    if (quotaExceeded) {
+      return { row: i + 1, title: collection.title || "Unknown", status: "error", error: "Skipped — plan limit reached (upgrade to continue)" };
+    }
+
     try {
       if (collection.title) {
         const existing = await findExistingCollectionByTitle(collection.title);
@@ -150,6 +172,8 @@ export const action = async ({ request }) => {
         };
 
         const col = await gqlCollectionCreate(input);
+        const { limitReached } = await recordUsageAndCheck({ prisma, shop: shopDomain, count: 1 });
+        if (limitReached) quotaExceeded = true;
         return { row: i + 1, title: collection.title, status: "success", collectionId: col.id.split("/").pop(), type: "smart" };
       } else {
         // Custom (manual) collection
@@ -164,10 +188,14 @@ export const action = async ({ request }) => {
             // Retry without image
             delete input.image;
             col = await gqlCollectionCreate(input);
+            const { limitReached } = await recordUsageAndCheck({ prisma, shop: shopDomain, count: 1 });
+            if (limitReached) quotaExceeded = true;
             return { row: i + 1, title: collection.title, status: "success", collectionId: col.id.split("/").pop(), type: "custom", warning: "Collection imported without image - URL not accessible" };
           }
           throw imgErr;
         }
+        const { limitReached } = await recordUsageAndCheck({ prisma, shop: shopDomain, count: 1 });
+        if (limitReached) quotaExceeded = true;
         return { row: i + 1, title: collection.title, status: "success", collectionId: col.id.split("/").pop(), type: "custom" };
       }
     } catch (error) {

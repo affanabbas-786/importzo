@@ -5,6 +5,7 @@ import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate, apiVersion } from "../shopify.server";
 import prisma from "../db.server";
 import { shopifyFetch } from "../lib/shopify-api.server";
+import { assertQuotaAvailable, recordUsageAndCheck } from "../lib/usage.server";
 import { parseCSV } from "../lib/csv-parser";
 import { smartMapColumns, INVENTORY_ALIASES, confidenceLevel, confidenceColor } from "../lib/smart-mapper";
 import { FileSourcePicker, AISummary, generateMappingSummary, generateImportResultSummary } from "../components/ui";
@@ -99,6 +100,20 @@ export const action = async ({ request }) => {
   }
   const fileName = formData.get("fileName") || "inventory.csv";
 
+  // Phase 5 — billing: refuse to start at all if this shop has already used
+  // its full monthly plan allowance.
+  const quotaGate = await assertQuotaAvailable({ prisma, shop: shopDomain });
+  if (!quotaGate.ok) {
+    return {
+      results: [{ row: 0, sku: "", status: "error", error: quotaGate.message }],
+      updatedCount: 0, notFoundCount: 0, errorCount: 1, status: "failed", error: quotaGate.message,
+    };
+  }
+  // Flips true once the plan limit is hit mid-import; checked at the top of
+  // processRow so the rest of the CSV is skipped rather than written past
+  // the cap.
+  let quotaExceeded = false;
+
   // Fetch locations via GraphQL
   const locMap = {};
   try {
@@ -127,6 +142,15 @@ export const action = async ({ request }) => {
 
   async function processRow(item, row, variant) {
     try {
+      // Phase 5: once the plan limit is hit mid-import, stop writing new
+      // inventory levels — the rest of the CSV is reported as skipped
+      // rather than silently written past the cap.
+      if (quotaExceeded) {
+        results.push({ row, sku: item.sku, status: "error", error: "Skipped — plan limit reached (upgrade to continue)" });
+        errorCount++;
+        return;
+      }
+
       if (!variant) {
         results.push({ row, sku: item.sku, status: "not_found", error: "SKU not found in store" });
         notFoundCount++;
@@ -185,6 +209,8 @@ export const action = async ({ request }) => {
 
       results.push({ row, sku: item.sku, status: "updated", quantity: qty });
       updatedCount++;
+      const { limitReached } = await recordUsageAndCheck({ prisma, shop: shopDomain, count: 1 });
+      if (limitReached) quotaExceeded = true;
     } catch (error) {
       results.push({ row, sku: item.sku, status: "error", error: error.message });
       errorCount++;

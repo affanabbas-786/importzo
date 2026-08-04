@@ -8,11 +8,54 @@ vi.mock("../../app/shopify.server", () => ({
   apiVersion: "2025-10",
 }));
 
+// Phase 5: every product create now goes through usage.server.js's
+// assertQuotaAvailable/recordUsageAndCheck, which read and write
+// prisma.shopPlan. Modeled as an in-memory Map, cleared before every test
+// (see the top-level beforeEach below).
+const shopPlanRows = new Map();
 vi.mock("../../app/db.server", () => ({
-  default: { importJob: { create: (...args) => mockCreate(...args) } },
+  default: {
+    importJob: { create: (...args) => mockCreate(...args) },
+    shopPlan: {
+      upsert: vi.fn(async ({ where: { shop }, update, create }) => {
+        const existing = shopPlanRows.get(shop);
+        if (existing) { Object.assign(existing, update); return { ...existing }; }
+        const row = {
+          id: "plan-1", recordsUsed: 0, subscriptionId: null, subscriptionStatus: null,
+          shopOwnerEmail: null, uninstalledAt: null, createdAt: new Date(), updatedAt: new Date(), ...create,
+        };
+        shopPlanRows.set(shop, row);
+        return { ...row };
+      }),
+      update: vi.fn(async ({ where: { shop }, data }) => {
+        const row = shopPlanRows.get(shop);
+        if (!row) throw new Error("Record to update not found.");
+        const patch = { ...data };
+        if (patch.recordsUsed && typeof patch.recordsUsed === "object" && "increment" in patch.recordsUsed) {
+          patch.recordsUsed = (row.recordsUsed || 0) + patch.recordsUsed.increment;
+        }
+        Object.assign(row, patch);
+        return { ...row };
+      }),
+    },
+  },
 }));
 
 import { action } from "../../app/routes/app.product-importer.jsx";
+
+const DEST_SHOP = "dest-shop.myshopify.com";
+
+function setShopPlan(data) {
+  shopPlanRows.set(DEST_SHOP, {
+    id: "plan-preset", shop: DEST_SHOP, tier: "free", recordsUsed: 0, usagePeriodStart: new Date(),
+    subscriptionId: null, subscriptionStatus: null, shopOwnerEmail: null, uninstalledAt: null,
+    createdAt: new Date(), updatedAt: new Date(), ...data,
+  });
+}
+
+beforeEach(() => {
+  shopPlanRows.clear();
+});
 
 function productCreateResponse(id, errors = []) {
   return jsonResponse({ data: { productCreate: { product: errors.length ? null : { id: `gid://shopify/Product/${id}` }, userErrors: errors } } });
@@ -203,5 +246,63 @@ describe("app.product-importer action", () => {
     expect(result.successCount).toBe(1);
     expect(result.results[0]).toMatchObject({ status: "success", productId: "888" });
     expect(result.results[0].skipped).toBeUndefined();
+  });
+
+  describe("plan usage limits", () => {
+    it("refuses to import at all once the shop's monthly allowance is used up", async () => {
+      setShopPlan({ tier: "free", recordsUsed: 250 });
+      const req = mockActionRequest({ products: JSON.stringify([{ title: "Basic Tee" }]), fileName: "p.csv" });
+      const result = await action({ request: req });
+
+      expect(result.status).toBe("failed");
+      expect(result.errorCount).toBe(1);
+      expect(result.error).toMatch(/used all 250 records/i);
+      expect(fetchMock).not.toHaveBeenCalled(); // short-circuited before even fetching the default location
+    });
+
+    it("increments usage for each product actually created, but not for one skipped by handle", async () => {
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse({ data: { products: { edges: [{ node: { id: "gid://shopify/Product/777" } }] } } })) // skip: existing handle
+        .mockResolvedValueOnce(productCreateResponse("888")); // create: new product
+      const req = mockActionRequest({
+        products: JSON.stringify([
+          { title: "Duplicate Tee", handle: "duplicate-tee" },
+          { title: "New Tee" },
+        ]),
+        fileName: "p.csv",
+      });
+      const result = await action({ request: req });
+
+      expect(result.successCount).toBe(2);
+      expect(shopPlanRows.get(DEST_SHOP).recordsUsed).toBe(1); // only the real create counted
+    });
+
+    it("stops creating further products once the plan limit is reached mid-import", async () => {
+      // 5 remaining (245 used of 250) matches CONCURRENCY exactly, so batch 1
+      // (5 products, launched concurrently before any can flip the shared
+      // quota flag) lands exactly on the cap; batch 2 (2 more) only starts
+      // once batch 1 has fully resolved.
+      setShopPlan({ tier: "free", recordsUsed: 245 });
+      const products = Array.from({ length: 7 }, (_, i) => ({ title: `Product ${i + 1}` }));
+      for (let i = 0; i < 7; i++) fetchMock.mockResolvedValueOnce(productCreateResponse(String(2000 + i)));
+
+      const req = mockActionRequest({ products: JSON.stringify(products), fileName: "p.csv" });
+      const result = await action({ request: req });
+
+      expect(shopPlanRows.get(DEST_SHOP).recordsUsed).toBe(250);
+      expect(result.successCount).toBe(5);
+      const quotaStopped = result.results.filter((r) => r.status === "error" && /plan limit reached/i.test(r.error));
+      expect(quotaStopped).toHaveLength(2);
+    });
+
+    it("never blocks an unlimited (Pro) plan", async () => {
+      setShopPlan({ tier: "pro", recordsUsed: 999999 });
+      fetchMock.mockResolvedValueOnce(productCreateResponse("111"));
+      const req = mockActionRequest({ products: JSON.stringify([{ title: "Basic Tee" }]), fileName: "p.csv" });
+      const result = await action({ request: req });
+
+      expect(result.successCount).toBe(1);
+      expect(shopPlanRows.get(DEST_SHOP).recordsUsed).toBe(1000000);
+    });
   });
 });

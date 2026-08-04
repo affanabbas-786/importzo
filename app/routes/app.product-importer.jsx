@@ -6,6 +6,7 @@ import { authenticate, apiVersion } from "../shopify.server";
 import prisma from "../db.server";
 import { shopifyFetch, shopifyGraphql } from "../lib/shopify-api.server";
 import { createProductWithVariants } from "../lib/product-variants.server";
+import { assertQuotaAvailable, recordUsageAndCheck } from "../lib/usage.server";
 import { parseCSV } from "../lib/csv-parser";
 import { smartMapColumns, PRODUCT_ALIASES, confidenceLevel, confidenceColor, templateFromMapping, applyMappingTemplate } from "../lib/smart-mapper";
 import { FileSourcePicker, AISummary, generateMappingSummary, generateImportResultSummary } from "../components/ui";
@@ -81,6 +82,20 @@ export const action = async ({ request }) => {
   const accessToken = session.accessToken;
   const version = apiVersion || "2025-10";
 
+  // Phase 5 — billing: refuse to start at all if this shop has already used
+  // its full monthly plan allowance.
+  const quotaGate = await assertQuotaAvailable({ prisma, shop: shopDomain });
+  if (!quotaGate.ok) {
+    return {
+      results: [{ row: 0, title: "", status: "error", error: quotaGate.message }],
+      successCount: 0, errorCount: 1, status: "failed", error: quotaGate.message,
+    };
+  }
+  // Flips true once the plan limit is hit mid-import; checked at the top of
+  // processProduct so the rest of the CSV is skipped rather than written
+  // past the cap.
+  let quotaExceeded = false;
+
   // Fetch default location for inventory quantity assignment
   let defaultLocationId = null;
   try {
@@ -121,6 +136,13 @@ export const action = async ({ request }) => {
   }
 
   async function processProduct(product, i) {
+    // Phase 5: once the plan limit is hit mid-import, stop creating new
+    // products — the rest of the CSV is reported as skipped rather than
+    // silently written past the cap.
+    if (quotaExceeded) {
+      return { row: i + 1, title: product.title, status: "error", error: "Skipped — plan limit reached (upgrade to continue)" };
+    }
+
     try {
       if (product.handle) {
         const existing = await findExistingProductByHandle(product.handle);
@@ -404,6 +426,10 @@ export const action = async ({ request }) => {
       const warningNote =
         (warnings.length > 0 ? " (" + warnings.join("; ") + ")" : "") +
         videoNote;
+
+      // Phase 5: a newly created product is a record.
+      const { limitReached } = await recordUsageAndCheck({ prisma, shop: shopDomain, count: 1 });
+      if (limitReached) quotaExceeded = true;
 
       return {
         row: i + 1,

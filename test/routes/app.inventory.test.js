@@ -8,11 +8,54 @@ vi.mock("../../app/shopify.server", () => ({
   apiVersion: "2025-10",
 }));
 
+// Phase 5: every inventory write now goes through usage.server.js's
+// assertQuotaAvailable/recordUsageAndCheck, which read and write
+// prisma.shopPlan. Modeled as an in-memory Map, cleared before every test
+// (see the top-level beforeEach below).
+const shopPlanRows = new Map();
 vi.mock("../../app/db.server", () => ({
-  default: { importJob: { create: (...args) => mockCreate(...args) } },
+  default: {
+    importJob: { create: (...args) => mockCreate(...args) },
+    shopPlan: {
+      upsert: vi.fn(async ({ where: { shop }, update, create }) => {
+        const existing = shopPlanRows.get(shop);
+        if (existing) { Object.assign(existing, update); return { ...existing }; }
+        const row = {
+          id: "plan-1", recordsUsed: 0, subscriptionId: null, subscriptionStatus: null,
+          shopOwnerEmail: null, uninstalledAt: null, createdAt: new Date(), updatedAt: new Date(), ...create,
+        };
+        shopPlanRows.set(shop, row);
+        return { ...row };
+      }),
+      update: vi.fn(async ({ where: { shop }, data }) => {
+        const row = shopPlanRows.get(shop);
+        if (!row) throw new Error("Record to update not found.");
+        const patch = { ...data };
+        if (patch.recordsUsed && typeof patch.recordsUsed === "object" && "increment" in patch.recordsUsed) {
+          patch.recordsUsed = (row.recordsUsed || 0) + patch.recordsUsed.increment;
+        }
+        Object.assign(row, patch);
+        return { ...row };
+      }),
+    },
+  },
 }));
 
 import { action, buildSkuSearchQuery } from "../../app/routes/app.inventory.jsx";
+
+const DEST_SHOP = "dest-shop.myshopify.com";
+
+function setShopPlan(data) {
+  shopPlanRows.set(DEST_SHOP, {
+    id: "plan-preset", shop: DEST_SHOP, tier: "free", recordsUsed: 0, usagePeriodStart: new Date(),
+    subscriptionId: null, subscriptionStatus: null, shopOwnerEmail: null, uninstalledAt: null,
+    createdAt: new Date(), updatedAt: new Date(), ...data,
+  });
+}
+
+beforeEach(() => {
+  shopPlanRows.clear();
+});
 
 const locationsResponse = jsonResponse({ data: { locations: { edges: [{ node: { id: "gid://shopify/Location/1", name: "Main Warehouse" } }] } } });
 
@@ -135,5 +178,66 @@ describe("app.inventory action", () => {
     expect(first.updatedCount).toBe(1);
     expect(second.updatedCount).toBe(1);
     expect(first.results[0].quantity).toBe(second.results[0].quantity);
+  });
+
+  describe("plan usage limits", () => {
+    it("refuses to import at all once the shop's monthly allowance is used up", async () => {
+      setShopPlan({ tier: "free", recordsUsed: 250 });
+      const req = mockActionRequest({ items: JSON.stringify([{ sku: "SKU-1", quantity: "10" }]), fileName: "inv.csv" });
+      const result = await action({ request: req });
+
+      expect(result.status).toBe("failed");
+      expect(result.errorCount).toBe(1);
+      expect(result.error).toMatch(/used all 250 records/i);
+      expect(fetchMock).not.toHaveBeenCalled(); // short-circuited before even fetching locations
+    });
+
+    it("increments usage for each SKU actually updated, but not for a not_found SKU", async () => {
+      fetchMock
+        .mockResolvedValueOnce(variantsResponse([{ id: "gid://shopify/ProductVariant/1", sku: "FOUND", inventoryItem: { id: "gid://shopify/InventoryItem/1" } }]))
+        .mockResolvedValueOnce(setQuantitiesResponse());
+      const items = [{ sku: "FOUND", quantity: "10" }, { sku: "MISSING", quantity: "5" }];
+      const req = mockActionRequest({ items: JSON.stringify(items), fileName: "inv.csv" });
+      const result = await action({ request: req });
+
+      expect(result.updatedCount).toBe(1);
+      expect(result.notFoundCount).toBe(1);
+      expect(shopPlanRows.get(DEST_SHOP).recordsUsed).toBe(1);
+    });
+
+    it("stops updating further rows once the plan limit is reached mid-import", async () => {
+      // 5 remaining (245 used of 250) matches WRITE_CONCURRENCY exactly, so
+      // batch 1 (5 rows, launched concurrently before any can flip the
+      // shared quota flag) lands exactly on the cap; batch 2 (2 more) only
+      // starts once batch 1 has fully resolved.
+      setShopPlan({ tier: "free", recordsUsed: 245 });
+      const items = Array.from({ length: 7 }, (_, i) => ({ sku: `SKU-${i + 1}`, quantity: "1" }));
+      fetchMock.mockResolvedValueOnce(variantsResponse(
+        items.map((it, i) => ({ id: `gid://shopify/ProductVariant/${i + 1}`, sku: it.sku, inventoryItem: { id: `gid://shopify/InventoryItem/${i + 1}` } })),
+      ));
+      // 7 writes will be attempted (one per SKU that's found); only the
+      // first 5 should actually be reached before the quota flag stops the rest.
+      for (let i = 0; i < 7; i++) fetchMock.mockResolvedValueOnce(setQuantitiesResponse());
+
+      const req = mockActionRequest({ items: JSON.stringify(items), fileName: "inv.csv" });
+      const result = await action({ request: req });
+
+      expect(shopPlanRows.get(DEST_SHOP).recordsUsed).toBe(250);
+      expect(result.updatedCount).toBe(5);
+      const quotaStopped = result.results.filter((r) => r.status === "error" && /plan limit reached/i.test(r.error));
+      expect(quotaStopped).toHaveLength(2);
+    });
+
+    it("never blocks an unlimited (Pro) plan", async () => {
+      setShopPlan({ tier: "pro", recordsUsed: 999999 });
+      fetchMock
+        .mockResolvedValueOnce(variantsResponse([{ id: "gid://shopify/ProductVariant/1", sku: "SKU-1", inventoryItem: { id: "gid://shopify/InventoryItem/1" } }]))
+        .mockResolvedValueOnce(setQuantitiesResponse());
+      const req = mockActionRequest({ items: JSON.stringify([{ sku: "SKU-1", quantity: "10" }]), fileName: "inv.csv" });
+      const result = await action({ request: req });
+
+      expect(result.updatedCount).toBe(1);
+      expect(shopPlanRows.get(DEST_SHOP).recordsUsed).toBe(1000000);
+    });
   });
 });

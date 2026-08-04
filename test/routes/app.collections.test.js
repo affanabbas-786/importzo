@@ -8,11 +8,55 @@ vi.mock("../../app/shopify.server", () => ({
   apiVersion: "2025-10",
 }));
 
+// Phase 5: every collection create now goes through
+// usage.server.js's assertQuotaAvailable/recordUsageAndCheck, which read
+// and write prisma.shopPlan. Modeled as an in-memory Map, cleared before
+// every test (see the top-level beforeEach below) so usage from one test
+// never leaks into the next.
+const shopPlanRows = new Map();
 vi.mock("../../app/db.server", () => ({
-  default: { importJob: { create: (...args) => mockCreate(...args) } },
+  default: {
+    importJob: { create: (...args) => mockCreate(...args) },
+    shopPlan: {
+      upsert: vi.fn(async ({ where: { shop }, update, create }) => {
+        const existing = shopPlanRows.get(shop);
+        if (existing) { Object.assign(existing, update); return { ...existing }; }
+        const row = {
+          id: "plan-1", recordsUsed: 0, subscriptionId: null, subscriptionStatus: null,
+          shopOwnerEmail: null, uninstalledAt: null, createdAt: new Date(), updatedAt: new Date(), ...create,
+        };
+        shopPlanRows.set(shop, row);
+        return { ...row };
+      }),
+      update: vi.fn(async ({ where: { shop }, data }) => {
+        const row = shopPlanRows.get(shop);
+        if (!row) throw new Error("Record to update not found.");
+        const patch = { ...data };
+        if (patch.recordsUsed && typeof patch.recordsUsed === "object" && "increment" in patch.recordsUsed) {
+          patch.recordsUsed = (row.recordsUsed || 0) + patch.recordsUsed.increment;
+        }
+        Object.assign(row, patch);
+        return { ...row };
+      }),
+    },
+  },
 }));
 
 import { action } from "../../app/routes/app.collections.jsx";
+
+const DEST_SHOP = "dest-shop.myshopify.com";
+
+function setShopPlan(data) {
+  shopPlanRows.set(DEST_SHOP, {
+    id: "plan-preset", shop: DEST_SHOP, tier: "free", recordsUsed: 0, usagePeriodStart: new Date(),
+    subscriptionId: null, subscriptionStatus: null, shopOwnerEmail: null, uninstalledAt: null,
+    createdAt: new Date(), updatedAt: new Date(), ...data,
+  });
+}
+
+beforeEach(() => {
+  shopPlanRows.clear();
+});
 
 function collectionCreateResponse(id, errors = []) {
   return jsonResponse({ data: { collectionCreate: { collection: errors.length ? null : { id: `gid://shopify/Collection/${id}` }, userErrors: errors } } });
@@ -130,5 +174,74 @@ describe("app.collections action", () => {
     expect(result.results[0]).toMatchObject({ status: "success", collectionId: "999" });
     expect(result.results[0].warning).toMatch(/already exists/i);
     expect(fetchMock).toHaveBeenCalledTimes(1); // only the existence check — no collectionCreate call
+  });
+
+  describe("plan usage limits", () => {
+    it("refuses to import at all once the shop's monthly allowance is used up", async () => {
+      setShopPlan({ tier: "free", recordsUsed: 250 });
+      const req = mockActionRequest({ collections: JSON.stringify([{ title: "Summer" }]), fileName: "c.csv" });
+      const result = await action({ request: req });
+
+      expect(result.status).toBe("failed");
+      expect(result.errorCount).toBe(1);
+      expect(result.results[0].error).toMatch(/used all 250 records/i);
+      expect(fetchMock).not.toHaveBeenCalled(); // short-circuited before touching Shopify
+    });
+
+    it("increments usage for each collection actually created", async () => {
+      fetchMock.mockImplementation(async (_url, opts) => {
+        const body = JSON.parse(opts.body);
+        if (body.query?.includes("collections(first: 1")) return noExistingCollectionResponse;
+        return collectionCreateResponse("created");
+      });
+      const collections = [{ title: "A" }, { title: "B" }];
+      const req = mockActionRequest({ collections: JSON.stringify(collections), fileName: "c.csv" });
+      await action({ request: req });
+
+      expect(shopPlanRows.get(DEST_SHOP).recordsUsed).toBe(2);
+    });
+
+    it("does not consume quota for a collection skipped because it already exists", async () => {
+      fetchMock.mockResolvedValueOnce(existingCollectionResponse("999"));
+      const req = mockActionRequest({ collections: JSON.stringify([{ title: "Already There" }]), fileName: "c.csv" });
+      await action({ request: req });
+
+      expect(shopPlanRows.get(DEST_SHOP)?.recordsUsed || 0).toBe(0);
+    });
+
+    it("stops creating further collections once the plan limit is reached mid-import", async () => {
+      // 5 remaining (245 used of 250) matches CONCURRENCY exactly, so batch 1
+      // (5 collections, all launched concurrently before any can flip the
+      // shared quota flag) lands exactly on the cap; batch 2 (2 more) only
+      // starts once batch 1 has fully resolved.
+      setShopPlan({ tier: "free", recordsUsed: 245 });
+      fetchMock.mockImplementation(async (_url, opts) => {
+        const body = JSON.parse(opts.body);
+        if (body.query?.includes("collections(first: 1")) return noExistingCollectionResponse;
+        return collectionCreateResponse("created");
+      });
+      const collections = Array.from({ length: 7 }, (_, i) => ({ title: `Collection ${i + 1}` }));
+      const req = mockActionRequest({ collections: JSON.stringify(collections), fileName: "c.csv" });
+      const result = await action({ request: req });
+
+      expect(shopPlanRows.get(DEST_SHOP).recordsUsed).toBe(250);
+      expect(result.successCount).toBe(5);
+      const quotaStopped = result.results.filter((r) => r.status === "error" && /plan limit reached/i.test(r.error));
+      expect(quotaStopped).toHaveLength(2);
+    });
+
+    it("never blocks an unlimited (Pro) plan", async () => {
+      setShopPlan({ tier: "pro", recordsUsed: 999999 });
+      fetchMock.mockImplementation(async (_url, opts) => {
+        const body = JSON.parse(opts.body);
+        if (body.query?.includes("collections(first: 1")) return noExistingCollectionResponse;
+        return collectionCreateResponse("created");
+      });
+      const req = mockActionRequest({ collections: JSON.stringify([{ title: "Summer" }]), fileName: "c.csv" });
+      const result = await action({ request: req });
+
+      expect(result.successCount).toBe(1);
+      expect(shopPlanRows.get(DEST_SHOP).recordsUsed).toBe(1000000);
+    });
   });
 });
