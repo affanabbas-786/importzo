@@ -28,6 +28,7 @@ export const SHOP_SCOPED_MODELS = Object.freeze([
   "importJob",
   "fieldMappingTemplate", // Phase 4 — saved CSV mappings, shop-owned config
   "aiIntegration", // Phase 4.4 — merchant's own encrypted LLM API key
+  "shopPlan", // Phase 5 — plan/usage + shopOwnerEmail (Agency eligibility signal)
   "session",
 ]);
 

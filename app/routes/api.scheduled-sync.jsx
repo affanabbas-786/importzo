@@ -15,6 +15,7 @@ import { encrypt } from "../utils/encryption.server";
 import { getSavedSourceStore } from "../lib/safe-db";
 import { computeNextRun, isValidFrequency, FREQUENCY } from "../lib/scheduler.server";
 import { enforcePolicy } from "../lib/rate-limit.server";
+import { getUsageStatus } from "../lib/usage.server";
 
 // Never select the token columns — see note above.
 const SAFE_FIELDS = {
@@ -52,6 +53,15 @@ export const action = async ({ request }) => {
   const intent = formData.get("intent");
 
   if (intent === "create") {
+    // Phase 5 — billing: scheduled sync is a Pro/Agency-only feature.
+    const planStatus = await getUsageStatus({ prisma, shop: session.shop });
+    if (!planStatus.scheduledSyncAllowed) {
+      return Response.json({
+        ok: false,
+        error: `Scheduled sync requires the Pro or Agency plan. You're currently on the ${planStatus.label} plan.`,
+      }, { status: 403 });
+    }
+
     const frequency = (formData.get("frequency") || FREQUENCY.DAILY).trim();
     if (!isValidFrequency(frequency)) {
       return Response.json({ ok: false, error: `Unsupported frequency "${frequency}"` }, { status: 400 });
@@ -116,6 +126,18 @@ export const action = async ({ request }) => {
 
     if (formData.has("enabled")) {
       const enabled = formData.get("enabled") === "true";
+      if (enabled) {
+        // Phase 5: re-enabling is also gated — a shop that downgraded while
+        // a schedule was disabled (e.g. for expired credentials) shouldn't
+        // be able to flip it back on without Pro/Agency.
+        const planStatus = await getUsageStatus({ prisma, shop: session.shop });
+        if (!planStatus.scheduledSyncAllowed) {
+          return Response.json({
+            ok: false,
+            error: `Scheduled sync requires the Pro or Agency plan. You're currently on the ${planStatus.label} plan.`,
+          }, { status: 403 });
+        }
+      }
       data.enabled = enabled;
       if (enabled) {
         // Re-enabling clears the disable state and the failure streak —

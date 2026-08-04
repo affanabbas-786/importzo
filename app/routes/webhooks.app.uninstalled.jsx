@@ -44,6 +44,19 @@ export const action = async ({ request }) => {
       // Table may not exist on an older deployment — non-fatal.
       console.warn(`[app/uninstalled] ${shop}: could not disable scheduled syncs:`, err?.message);
     }
+
+    // Phase 5: marks this shop's row as no longer installed so it drops out
+    // of Agency eligibility's "stores with Importzo installed" count for
+    // every other shop sharing its owner email (agency-eligibility.server.js
+    // filters on uninstalledAt: null) — without waiting for shop/redact,
+    // which doesn't hard-delete the row for another 48h. updateMany (not
+    // update) so a shop that uninstalls before ever creating a ShopPlan row
+    // is a silent no-op rather than a thrown "record not found".
+    try {
+      await db.shopPlan.updateMany({ where: { shop }, data: { uninstalledAt: new Date() } });
+    } catch (err) {
+      console.warn(`[app/uninstalled] ${shop}: could not mark shopPlan uninstalled:`, err?.message);
+    }
   }
 
   return new Response();

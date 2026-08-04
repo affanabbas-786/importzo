@@ -19,6 +19,18 @@ api_version = "2026-04"
   topics = [ "app/scopes_update" ]
   uri = "/webhooks/app/scopes_update"
 
+  # Phase 7 — billing audit. Fires whenever an AppSubscription's status
+  # changes (activated, cancelled, expired, frozen, declined), including
+  # changes made outside this app (Shopify's own billing settings). See
+  # webhooks.app_subscriptions.update.jsx for why this matters: without it,
+  # ShopPlan.tier only re-syncs the next time the merchant opens the
+  # Billing page. NOT YET COMMITTED — new webhook subscriptions take effect
+  # on next deploy/registration; flagged for your review alongside the rest
+  # of this audit.
+  [[webhooks.subscriptions]]
+  topics = [ "app_subscriptions/update" ]
+  uri = "/webhooks/app_subscriptions/update"
+
   [[webhooks.subscriptions]]
   compliance_topics = [ "customers/data_request" ]
   uri = "/webhooks/customers/data_request"

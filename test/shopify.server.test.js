@@ -7,6 +7,7 @@ vi.mock("@shopify/shopify-app-react-router/adapters/node", () => ({}));
 vi.mock("@shopify/shopify-app-react-router/server", () => ({
   ApiVersion: { October25: "2025-10" },
   AppDistribution: { AppStore: "app_store" },
+  BillingInterval: { OneTime: "ONE_TIME", Every30Days: "EVERY_30_DAYS", Annual: "ANNUAL", Usage: "USAGE" },
   shopifyApp: () => ({
     registerWebhooks: vi.fn(),
     addDocumentResponseHeaders: vi.fn(),

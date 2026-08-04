@@ -1,8 +1,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mockActionRequest } from "../../app/lib/test-helpers.js";
 
-const db = { schedules: [], jobs: [] };
+const db = { schedules: [], jobs: [], plans: new Map() };
 const SHOP = "dest-shop.myshopify.com";
+
+function setShopPlan(shop, data) {
+  db.plans.set(shop, {
+    id: "plan-preset", shop, tier: "free", recordsUsed: 0, usagePeriodStart: new Date(),
+    subscriptionId: null, subscriptionStatus: null, shopOwnerEmail: null, uninstalledAt: null,
+    createdAt: new Date(), updatedAt: new Date(), ...data,
+  });
+}
 
 vi.mock("../../app/shopify.server", () => ({
   authenticate: { admin: vi.fn(async () => ({ session: { shop: SHOP, accessToken: "dest-token" } })) },
@@ -42,6 +50,30 @@ vi.mock("../../app/db.server", () => ({
         const row = { id: `job-${db.jobs.length + 1}`, ...data };
         db.jobs.push(row);
         return row;
+      }),
+    },
+    // Phase 5: creating or re-enabling a schedule now checks
+    // usage.server.js's getUsageStatus, which reads/writes shopPlan.
+    // Defaults every shop to Pro in beforeEach below so the many
+    // existing tests here (about encryption, validation, defaults — not
+    // billing) don't incidentally start failing the new plan gate; the
+    // gate itself gets its own dedicated tests with an explicit Free plan.
+    shopPlan: {
+      upsert: vi.fn(async ({ where: { shop }, update, create }) => {
+        const existing = db.plans.get(shop);
+        if (existing) { Object.assign(existing, update); return { ...existing }; }
+        const row = {
+          id: "plan-1", recordsUsed: 0, subscriptionId: null, subscriptionStatus: null,
+          shopOwnerEmail: null, uninstalledAt: null, createdAt: new Date(), updatedAt: new Date(), ...create,
+        };
+        db.plans.set(shop, row);
+        return { ...row };
+      }),
+      update: vi.fn(async ({ where: { shop }, data }) => {
+        const row = db.plans.get(shop);
+        if (!row) throw new Error("Record to update not found.");
+        Object.assign(row, data);
+        return { ...row };
       }),
     },
   },
@@ -92,6 +124,8 @@ describe("api.scheduled-sync", () => {
     __resetRateLimitState();
     db.schedules = [];
     db.jobs = [];
+    db.plans = new Map();
+    setShopPlan(SHOP, { tier: "pro" }); // see the shopPlan mock comment above
     savedSourceStore.value = null;
     // encrypt() now throws without a valid key (Phase 3 fail-closed), and
     // enforces a 32-char minimum — so this fixture must be a realistic key,
@@ -263,5 +297,45 @@ describe("api.scheduled-sync", () => {
   it("400s on an unknown intent", async () => {
     const response = await action({ request: mockActionRequest({ intent: "bogus" }) });
     expect(response.status).toBe(400);
+  });
+
+  describe("plan gating (Phase 5)", () => {
+    it("refuses to create a schedule on Free", async () => {
+      setShopPlan(SHOP, { tier: "free" });
+      const response = await action({
+        request: mockActionRequest({ intent: "create", sourceShop: "source.myshopify.com", sourceToken: "src-token" }),
+      });
+      expect(response.status).toBe(403);
+      expect((await response.json()).error).toMatch(/requires the Pro or Agency plan/i);
+      expect(db.schedules).toHaveLength(0);
+    });
+
+    it("allows creating a schedule on Agency", async () => {
+      setShopPlan(SHOP, { tier: "agency" });
+      const response = await action({
+        request: mockActionRequest({ intent: "create", sourceShop: "source.myshopify.com", sourceToken: "src-token" }),
+      });
+      expect(response.status).toBe(200);
+      expect((await response.json()).ok).toBe(true);
+    });
+
+    it("refuses to re-enable a schedule on Free, leaving it disabled", async () => {
+      seedSchedule({ enabled: false, disabledReason: "Disabled after 3 consecutive failures" });
+      setShopPlan(SHOP, { tier: "free" });
+
+      const response = await action({ request: mockActionRequest({ intent: "update", id: "sched-existing", enabled: "true" }) });
+
+      expect(response.status).toBe(403);
+      expect(db.schedules[0].enabled).toBe(false); // untouched
+    });
+
+    it("still allows disabling a schedule on Free (only re-enabling is gated)", async () => {
+      seedSchedule({ enabled: true });
+      setShopPlan(SHOP, { tier: "free" });
+
+      const body = await (await action({ request: mockActionRequest({ intent: "update", id: "sched-existing", enabled: "false" }) })).json();
+
+      expect(body.schedule.enabled).toBe(false);
+    });
   });
 });

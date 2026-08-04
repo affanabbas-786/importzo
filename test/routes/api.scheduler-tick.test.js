@@ -1,6 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-const db = { schedules: [] };
+const db = { schedules: [], plans: new Map() };
+
+function setShopPlan(shop, data) {
+  db.plans.set(shop, {
+    id: "plan-preset", shop, tier: "free", recordsUsed: 0, usagePeriodStart: new Date(),
+    subscriptionId: null, subscriptionStatus: null, shopOwnerEmail: null, uninstalledAt: null,
+    createdAt: new Date(), updatedAt: new Date(), ...data,
+  });
+}
 
 vi.mock("../../app/db.server", () => ({
   default: {
@@ -15,6 +23,26 @@ vi.mock("../../app/db.server", () => ({
       }),
     },
     migrationJob: { findUnique: vi.fn(async () => null) },
+    // Phase 5: the tick's startJob wrapper checks getUsageStatus (scheduled
+    // sync is Pro/Agency-only) before starting a job.
+    shopPlan: {
+      upsert: vi.fn(async ({ where: { shop }, update, create }) => {
+        const existing = db.plans.get(shop);
+        if (existing) { Object.assign(existing, update); return { ...existing }; }
+        const row = {
+          id: "plan-1", recordsUsed: 0, subscriptionId: null, subscriptionStatus: null,
+          shopOwnerEmail: null, uninstalledAt: null, createdAt: new Date(), updatedAt: new Date(), ...create,
+        };
+        db.plans.set(shop, row);
+        return { ...row };
+      }),
+      update: vi.fn(async ({ where: { shop }, data }) => {
+        const row = db.plans.get(shop);
+        if (!row) throw new Error("Record to update not found.");
+        Object.assign(row, data);
+        return { ...row };
+      }),
+    },
   },
 }));
 
@@ -65,6 +93,7 @@ function seedDueSchedule(overrides = {}) {
 describe("api.scheduler-tick", () => {
   beforeEach(() => {
     db.schedules = [];
+    db.plans = new Map();
     startedJobs.length = 0;
     workerRuns.length = 0;
     process.env.SCHEDULER_SECRET = SECRET;
@@ -77,6 +106,10 @@ describe("api.scheduler-tick", () => {
   });
 
   it("runs due schedules and kicks off their workers", async () => {
+    // Phase 5: scheduled sync is Pro/Agency-only — a due schedule for a
+    // Free-tier shop is expected to be refused (see the billing-gate tests
+    // below), so the happy path needs a plan that actually allows it.
+    setShopPlan("dest.myshopify.com", { tier: "pro" });
     seedDueSchedule();
     const body = await (await action({ request: tickRequest() })).json();
 
@@ -84,6 +117,22 @@ describe("api.scheduler-tick", () => {
     expect(body.ran).toHaveLength(1);
     expect(startedJobs).toHaveLength(1);
     expect(workerRuns).toEqual(["job-1"]);
+  });
+
+  // Billing audit (Phase 7): a schedule left on a downgraded Free-tier shop
+  // must be disabled on the very first tick it's found due on, not left to
+  // silently fail for MAX_CONSECUTIVE_FAILURES ticks first.
+  it("disables a due schedule immediately (first tick) when its shop is on Free, with a clear reason", async () => {
+    setShopPlan("dest.myshopify.com", { tier: "free" });
+    const schedule = seedDueSchedule();
+
+    const body = await (await action({ request: tickRequest() })).json();
+
+    expect(body.ok).toBe(true);
+    expect(startedJobs).toHaveLength(0); // no job ever started against the ineligible shop
+    expect(schedule.enabled).toBe(false);
+    expect(schedule.disabledReason).toMatch(/requires the Pro or Agency plan/i);
+    expect(schedule.consecutiveFailures).toBe(1); // not accumulated toward MAX_CONSECUTIVE_FAILURES
   });
 
   it("401s on a wrong secret without running anything", async () => {

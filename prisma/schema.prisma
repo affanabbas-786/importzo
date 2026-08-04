@@ -261,3 +261,44 @@ model AiIntegration {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 5 — Billing (Shopify AppSubscription)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// One row per installed shop. The Shopify AppSubscription (created via
+// billing.request) is the actual billing record and source of truth for
+// whether a charge is active — this table is a local mirror so plan/usage
+// reads (every import/transfer route, every page load) don't need a live
+// Admin API call, plus the two things Shopify's billing API has no concept
+// of: monthly record usage, and the owner email used to detect the same
+// merchant across multiple installs for Agency eligibility. `tier`/
+// `subscriptionId`/`subscriptionStatus` are reconciled against Shopify via
+// billing.check() whenever the merchant opens the Billing page — see
+// app.billing.jsx. app.settings.jsx shows this same data read-only, without
+// re-reconciling, so it doesn't fire a live Admin API call on every load.
+model ShopPlan {
+  id             String   @id @default(cuid())
+  shop           String   @unique
+  tier           String   @default("free") // free | pro | agency — see plans.js
+  // From Admin GraphQL `shop { email }` — the same field this app already
+  // uses elsewhere (app.transfer.jsx) to identify a *source* store's owner.
+  // It's a contact/notification email, not a verified legal identity, so
+  // it's a best-available proxy for "who owns this store," not proof.
+  // Refreshed opportunistically (see agency-eligibility.server.js); never
+  // used for anything security-sensitive, only the Agency discount.
+  shopOwnerEmail String?
+  recordsUsed      Int      @default(0)
+  usagePeriodStart DateTime @default(now())
+  subscriptionId     String? // Shopify AppSubscription GID; null while on Free (Shopify has no $0 recurring charge)
+  subscriptionStatus String? // mirrors Shopify AppSubscription.status (ACTIVE, CANCELLED, ...)
+  // Soft marker set by webhooks.app.uninstalled — excluded from Agency
+  // eligibility counts ("stores with Importzo installed") without needing to
+  // delete the row immediately. The row itself is hard-deleted 48h later at
+  // shop/redact, same lifecycle as ScheduledSync (see shop-data.server.js).
+  uninstalledAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([shopOwnerEmail])
+}

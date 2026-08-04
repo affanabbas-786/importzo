@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   FREQUENCY, MAX_CONSECUTIVE_FAILURES, isValidFrequency, computeNextRun,
-  findDueSchedules, hasRunInFlight, runScheduledSyncs, disableForAuthFailure, isAuthError,
+  findDueSchedules, hasRunInFlight, runScheduledSyncs, disableForAuthFailure, isAuthError, disableForPlanRequirement,
 } from "./scheduler.server.js";
 
 function schedule(overrides = {}) {
@@ -278,5 +278,44 @@ describe("auth-failure handling", () => {
     const row = prisma.__rows()[0];
     expect(row.enabled).toBe(false);
     expect(row.disabledReason).toMatch(/no longer valid/i);
+  });
+});
+
+// Billing audit (Phase 7): a plan-requirement failure (e.g. scheduled sync
+// on a downgraded Free-tier shop) won't self-heal on retry, so it should
+// disable on the first failed tick — same reasoning as disableForAuthFailure,
+// just for a different permanent condition.
+describe("disableForPlanRequirement", () => {
+  it("disables immediately with the exact message passed in", async () => {
+    const prisma = fakePrisma({ schedules: [schedule()] });
+    const message = "Scheduled sync requires the Pro or Agency plan (currently on Free)";
+    const reason = await disableForPlanRequirement(prisma, "sched-1", message);
+
+    expect(reason).toBe(message);
+    const row = prisma.__rows()[0];
+    expect(row.enabled).toBe(false);
+    expect(row.disabledReason).toBe(message);
+    expect(row.lastError).toBe(message);
+  });
+
+  it("takes effect on the very first tick, not after MAX_CONSECUTIVE_FAILURES", async () => {
+    const s = schedule({ consecutiveFailures: 0 });
+    const prisma = fakePrisma({ schedules: [s] });
+    const startJob = vi.fn(async (sched) => {
+      const message = "Scheduled sync requires the Pro or Agency plan (currently on Free)";
+      await disableForPlanRequirement(prisma, sched.id, message);
+      throw new Error(message);
+    });
+
+    const results = await runScheduledSyncs({ prisma, startJob, now: () => new Date(s.nextRunAt.getTime() + 1000) });
+
+    // Disabled on attempt 1, not left to accumulate toward MAX_CONSECUTIVE_FAILURES.
+    const row = prisma.__rows()[0];
+    expect(row.enabled).toBe(false);
+    expect(row.disabledReason).toMatch(/requires the Pro or Agency plan/i);
+    // runScheduledSyncs' own catch still records the failed attempt for
+    // visibility, but must not clobber the reason disableForPlanRequirement
+    // already set.
+    expect(results.failed).toHaveLength(1);
   });
 });

@@ -157,6 +157,21 @@ export async function disableForAuthFailure(prisma, scheduleId, detail = "") {
   return reason;
 }
 
+// Billing audit (Phase 7) — same reasoning as disableForAuthFailure: a plan
+// downgrade below the tier that includes scheduled sync will never "fix
+// itself" on retry the way a transient API error might, so waiting for
+// MAX_CONSECUTIVE_FAILURES before disabling just leaves a schedule silently
+// failing (and the merchant in the dark about why) for up to that many
+// extra ticks — for a daily schedule, up to that many extra days. Callers
+// that detect the plan-gate has failed should disable immediately instead.
+export async function disableForPlanRequirement(prisma, scheduleId, message) {
+  await prisma.scheduledSync.update({
+    where: { id: scheduleId },
+    data: { enabled: false, disabledReason: message, lastError: message },
+  });
+  return message;
+}
+
 export function isAuthError(error) {
   const message = String(error?.message || error || "");
   return /\b401\b|\b403\b|unauthorized|forbidden|invalid.*token|token.*(expired|invalid)/i.test(message);
