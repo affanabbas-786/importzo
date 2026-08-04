@@ -3,6 +3,7 @@ import { useRouteError, Link } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
+import { LeafIcon } from "../components/decor";
 
 export const loader = async ({ request }) => {
   await authenticate.admin(request);
@@ -19,7 +20,9 @@ export default function ImportHub() {
       <div className="space-y-6 animate-fade-in">
         <div className="flex items-center gap-2.5">
           <img src="/logo.png" alt="Importzo" style={{ height: 40, width: "auto", objectFit: "contain" }} />
-          <span style={{ fontSize: 18, fontWeight: 600, color: P, fontFamily: F }}>Import</span>
+          <span style={{ fontSize: 18, fontWeight: 600, color: P, fontFamily: F }} className="flex items-center gap-1.5">
+            Import <LeafIcon size={14} />
+          </span>
         </div>
 
         {/* ── Hero: Full Store Import ── */}

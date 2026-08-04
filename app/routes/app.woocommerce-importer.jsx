@@ -7,6 +7,7 @@ import prisma from "../db.server";
 import { shopifyFetch, shopifyGraphql } from "../lib/shopify-api.server";
 import { createProductWithVariants } from "../lib/product-variants.server";
 import { assertQuotaAvailable, recordUsageAndCheck } from "../lib/usage.server";
+import { createAltTextGenerator } from "../lib/alt-text.server";
 import { parseCSV } from "../lib/csv-parser";
 import { smartMapColumns, confidenceLevel, templateFromMapping, applyMappingTemplate } from "../lib/smart-mapper";
 import {
@@ -15,6 +16,7 @@ import {
 } from "../lib/woocommerce-mapper";
 import { FileSourcePicker, AISummary, generateMappingSummary, generateImportResultSummary } from "../components/ui";
 import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
+import { loadPrefs } from "../lib/prefs";
 
 // ═══════════════════════════════════════════════════════════════════
 // Phase 4 — WooCommerce → Shopify cross-platform import.
@@ -48,6 +50,7 @@ export const action = async ({ request }) => {
     return { results: [], successCount: 0, errorCount: 1, status: "failed", error: "Invalid product data received" };
   }
   const fileName = formData.get("fileName");
+  const altTextAutoGenerate = formData.get("altTextAutoGenerate") === "true";
 
   const results = [];
   let successCount = 0;
@@ -70,6 +73,12 @@ export const action = async ({ request }) => {
   // processProduct so the rest of the CSV is skipped rather than written
   // past the cap.
   let quotaExceeded = false;
+
+  // Phase 6 — opt-in AI alt-text, resolved once for the whole import. See
+  // alt-text.server.js and the identical wiring in app.product-importer.jsx.
+  const altGen = altTextAutoGenerate
+    ? await createAltTextGenerator({ prisma, shop: shopDomain })
+    : { enabled: false };
 
   let defaultLocationId = null;
   try {
@@ -180,6 +189,12 @@ export const action = async ({ request }) => {
         const capped = validImages.slice(0, 250);
         if (validImages.length > 250) warnings.push(`${validImages.length} images found, capped to Shopify limit of 250`);
         if (capped.length > 0) {
+          // Phase 6: one alt-text generation per product, reused across all
+          // of its images — see the matching comment in app.product-importer.jsx.
+          let generatedAlt = null;
+          if (altGen.enabled) {
+            generatedAlt = await altGen.generate({ title: product.title, description: product.body_html });
+          }
           try {
             const imgRes = await shopifyFetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
               method: "POST",
@@ -191,7 +206,13 @@ export const action = async ({ request }) => {
                     mediaUserErrors { field message }
                   }
                 }`,
-                variables: { productId: productGid, media: capped.map((url) => ({ originalSource: url, mediaContentType: "IMAGE" })) },
+                variables: {
+                  productId: productGid,
+                  media: capped.map((url) => ({
+                    originalSource: url, mediaContentType: "IMAGE",
+                    ...(generatedAlt ? { alt: generatedAlt } : {}),
+                  })),
+                },
               }),
             });
             const imgData = await imgRes.json();
@@ -394,6 +415,7 @@ export default function WooCommerceImportPage() {
     const formData = new FormData();
     formData.append("products", JSON.stringify(products));
     formData.append("fileName", fileName);
+    formData.append("altTextAutoGenerate", String(loadPrefs().altTextAutoGenerate));
     fetcher.submit(formData, { method: "POST" });
   }, [csvHeaders, csvRows, mapping, fileName, fetcher]);
 

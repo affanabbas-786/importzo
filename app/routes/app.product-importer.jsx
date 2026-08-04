@@ -7,10 +7,12 @@ import prisma from "../db.server";
 import { shopifyFetch, shopifyGraphql } from "../lib/shopify-api.server";
 import { createProductWithVariants } from "../lib/product-variants.server";
 import { assertQuotaAvailable, recordUsageAndCheck } from "../lib/usage.server";
+import { createAltTextGenerator } from "../lib/alt-text.server";
 import { parseCSV } from "../lib/csv-parser";
 import { smartMapColumns, PRODUCT_ALIASES, confidenceLevel, confidenceColor, templateFromMapping, applyMappingTemplate } from "../lib/smart-mapper";
 import { FileSourcePicker, AISummary, generateMappingSummary, generateImportResultSummary } from "../components/ui";
 import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
+import { loadPrefs } from "../lib/prefs";
 
 // ═══════════════════════════════════════════════════════════════════
 // Shopify field definitions — dynamic images (no hardcoded limit)
@@ -73,6 +75,7 @@ export const action = async ({ request }) => {
     return { results: [], successCount: 0, errorCount: 1, status: "failed", error: "Invalid product data received" };
   }
   const fileName = formData.get("fileName");
+  const altTextAutoGenerate = formData.get("altTextAutoGenerate") === "true";
 
   const results = [];
   let successCount = 0;
@@ -95,6 +98,15 @@ export const action = async ({ request }) => {
   // processProduct so the rest of the CSV is skipped rather than written
   // past the cap.
   let quotaExceeded = false;
+
+  // Phase 6 — opt-in AI alt-text. Resolved ONCE for the whole import (not
+  // per product) — see alt-text.server.js for why. `enabled: false` when
+  // the toggle is off, no AI integration is configured, or (groq_builtin)
+  // there's no eligibility/budget left; every call site below just no-ops
+  // in that case, identical to the toggle being off.
+  const altGen = altTextAutoGenerate
+    ? await createAltTextGenerator({ prisma, shop: shopDomain })
+    : { enabled: false };
 
   // Fetch default location for inventory quantity assignment
   let defaultLocationId = null;
@@ -270,7 +282,19 @@ export const action = async ({ request }) => {
         }
         return gv;
       });
-      const mediaInputs = (productData.images || []).map((img) => ({ originalSource: img.src, mediaContentType: "IMAGE" }));
+      // Phase 6: one alt-text generation per product (not per image) — CSV
+      // images never carry alt text in this importer, and every image of
+      // the same product is reasonably described by the same alt text, so
+      // generating once and reusing it avoids N redundant AI calls for a
+      // product with N images.
+      let generatedAlt = null;
+      if (altGen.enabled && productData.images?.length > 0) {
+        generatedAlt = await altGen.generate({ title: productData.title, description: productData.body_html });
+      }
+      const mediaInputs = (productData.images || []).map((img) => ({
+        originalSource: img.src, mediaContentType: "IMAGE",
+        ...(generatedAlt ? { alt: generatedAlt } : {}),
+      }));
 
       let created;
       try {
@@ -942,6 +966,7 @@ export default function ImportPage() {
     const formData = new FormData();
     formData.append("products", JSON.stringify(products));
     formData.append("fileName", fileName);
+    formData.append("altTextAutoGenerate", String(loadPrefs().altTextAutoGenerate));
     fetcher.submit(formData, { method: "POST" });
   }, [getGroupedProducts, fileName, fetcher]);
 

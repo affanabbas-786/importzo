@@ -11,6 +11,8 @@ import { createLogBuffer, ACTION, ENTITY } from "./transfer-log.server.js";
 import { createBackup } from "./backup.server.js";
 import { actorFromRecord, describeActor } from "./audit.server.js";
 import { marketQueryFilter } from "./markets.server.js";
+import { assertQuotaAvailable, recordUsageAndCheck } from "./usage.server.js";
+import { createAltTextGenerator } from "./alt-text.server.js";
 
 const BATCH_SIZE = 250;     // products fetched per GQL page
 const CREATE_CONCURRENCY = 5; // parallel productCreate calls
@@ -220,7 +222,7 @@ function withMarketTag(tags, marketTag) {
 }
 
 async function transferOneProduct(src, ctx) {
-  const { targetShop, targetToken, sourceShop, sourceToken, version, conflictMode, marketTag } = ctx;
+  const { targetShop, targetToken, sourceShop, sourceToken, version, conflictMode, marketTag, altGen } = ctx;
   const srcId = src.id?.split("/").pop();
 
   if (src.isGiftCard || src.giftCard || src.gift_card) throw new Error("Gift card products cannot be transferred");
@@ -303,8 +305,14 @@ async function transferOneProduct(src, ctx) {
     product: productInput, optionNames, variants: normalizedVariants,
   });
 
-  // Images
-  const images = src.images?.edges ? src.images.edges.map((e) => ({ src: e.node?.url, alt: e.node?.altText })).filter((i) => i.src) : (src.images || []);
+  // Images. Phase 6: the source store's own alt text (when present) is
+  // always preserved as-is — AI generation only fills in images that have
+  // none, same rule as app.transfer.jsx's sync path.
+  let images = src.images?.edges ? src.images.edges.map((e) => ({ src: e.node?.url, alt: e.node?.altText })).filter((i) => i.src) : (src.images || []);
+  if (altGen?.enabled && images.some((i) => !i.alt)) {
+    const generatedAlt = await altGen.generate({ title: src.title, description: src.descriptionHtml });
+    if (generatedAlt) images = images.map((i) => (i.alt ? i : { ...i, alt: generatedAlt }));
+  }
   await uploadImages(targetShop, targetToken, gid, images, version);
 
   // Non-image media (video, 3D)
@@ -408,6 +416,14 @@ export async function runMigrationWorker(jobId) {
     } catch { marketPublicationIds = null; }
     const marketQuery = marketQueryFilter({ publicationIds: marketPublicationIds });
 
+    // Phase 6 — opt-in AI alt-text, resolved once per job run (not per
+    // product) — see alt-text.server.js. `job.altTextAutoGenerate` was
+    // snapshotted at job creation (api.migration-job.jsx), same reasoning
+    // as conflictMode below.
+    const altGen = job.altTextAutoGenerate
+      ? await createAltTextGenerator({ prisma, shop: job.shop })
+      : { enabled: false };
+
     const ctx = {
       targetShop: job.shop,
       targetToken: destToken,
@@ -416,6 +432,7 @@ export async function runMigrationWorker(jobId) {
       version: job.apiVersion,
       conflictMode: job.conflictMode,
       marketTag: job.sourceMarketHandle || null,
+      altGen,
     };
 
     await prisma.migrationJob.update({ where: { id: jobId }, data: { status: "RUNNING" } });
@@ -424,6 +441,22 @@ export async function runMigrationWorker(jobId) {
     // Declared before the backup step so backup warnings land in the same log
     // the rest of the job appends to.
     const errorLog = [];
+
+    // ── Phase 5: refuse to start at all if this shop (the destination —
+    // the one whose Importzo plan and usage this counts against) has
+    // already used its full monthly allowance. Checked before the backup
+    // step so a capped-out shop doesn't pay for an expensive snapshot on a
+    // job that can create zero records.
+    const quotaGate = await assertQuotaAvailable({ prisma, shop: job.shop });
+    if (!quotaGate.ok) {
+      console.warn(`[migration-worker] job=${jobId} REFUSED — ${quotaGate.message}`);
+      await prisma.migrationJob.update({
+        where: { id: jobId },
+        data: { status: "FAILED", errorLog: JSON.stringify([{ type: "quota", error: quotaGate.message }]) },
+      });
+      activeWorkers.delete(jobId);
+      return;
+    }
 
     // ── Phase 2: pre-transfer backup of the DESTINATION, before any write ──
     // Only taken once per job: a resumed job (process restart) must not
@@ -473,6 +506,11 @@ export async function runMigrationWorker(jobId) {
     let cursor = job.lastCursor || null;
     let processedDelta = 0;
     let failedDelta = 0;
+    // Phase 5: flips true the moment this shop's plan limit is hit mid-job.
+    // Products already in flight (CREATE_CONCURRENCY batches) still finish,
+    // but every product after that is skipped rather than created — "block
+    // mid-transfer" rather than silently writing past a capped plan.
+    let quotaExceeded = false;
 
     // Granular per-record log (Phase 2). Buffered so a 50k-product job doesn't
     // issue 50k INSERTs; best-effort so a logging failure can't abort the job.
@@ -520,6 +558,20 @@ export async function runMigrationWorker(jobId) {
           // Skip if already transferred (idempotency on resume)
           if (doneSet.has(srcId)) return;
 
+          // Phase 5: once the shop's plan limit is hit mid-job, stop creating
+          // new records. Logged like any other skip so the merchant sees
+          // exactly which products this transfer did NOT reach.
+          if (quotaExceeded) {
+            await logBuffer.add({
+              entityType: ENTITY.PRODUCT,
+              action: ACTION.SKIPPED,
+              sourceId: srcId,
+              title: src.title,
+              reason: "Skipped — plan limit reached (upgrade to continue)",
+            });
+            return;
+          }
+
           try {
             const { id: destId, gid: destGid, skipped, action, reason, metafieldErrors } = await transferOneProduct(src, ctx);
             doneSet.add(srcId);
@@ -535,6 +587,18 @@ export async function runMigrationWorker(jobId) {
             });
             processedDelta++;
             if (skipped) console.log(`[migration-worker] job=${jobId} skipped (conflict): ${src.title}`);
+            // Phase 5: only a real create/update consumes quota — a
+            // conflictMode=skip product (the destination already had it,
+            // untouched) is not a new record.
+            if (mappingAction === "created" || mappingAction === "updated") {
+              const { limitReached } = await recordUsageAndCheck({ prisma, shop: job.shop, count: 1 });
+              if (limitReached && !quotaExceeded) {
+                quotaExceeded = true;
+                const message = "Reached this store's monthly plan limit partway through the transfer — remaining products were skipped. Upgrade your plan to continue.";
+                console.warn(`[migration-worker] job=${jobId} ${message}`);
+                errorLog.push({ type: "quota", error: message });
+              }
+            }
             await logBuffer.add({
               entityType: ENTITY.PRODUCT,
               action: action || ACTION.CREATED,
@@ -594,6 +658,13 @@ export async function runMigrationWorker(jobId) {
             failedDelta = 0;
           }
         }
+      }
+
+      // Phase 5: quota was hit somewhere in this page — every remaining
+      // product in the page was already logged as skipped above. No point
+      // fetching further pages from Shopify just to skip those too.
+      if (quotaExceeded) {
+        hasMore = false;
       }
 
       // Advance cursor to end of this page

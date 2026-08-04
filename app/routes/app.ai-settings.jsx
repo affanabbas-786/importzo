@@ -1,22 +1,32 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
-import { useFetcher, useRouteError, Link } from "react-router";
+import { useFetcher, useLoaderData, useRouteError, Link } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
+import prisma from "../db.server";
+import { getUsageStatus } from "../lib/usage.server";
+import { builtInAiAllowed, AI_MONTHLY_CALL_CAP } from "../lib/plans.js";
 import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
 
 // ═══════════════════════════════════════════════════════════════════
 // Phase 4.4 — AI cleanup settings: bring-your-own LLM API key.
+// Phase 6 — adds Importzo's own built-in AI (Groq) as a third option,
+// gated to Pro/Agency with a shared monthly cap (see usage.server.js).
 //
-// Importzo never holds or bills a shared LLM key — each merchant pastes
-// their own Anthropic or OpenAI API key here, encrypted at rest
+// Importzo never holds or bills a shared LLM key for BYOK — each merchant
+// pastes their own Anthropic or OpenAI API key here, encrypted at rest
 // (ai-settings.server.js / encryption.server.js), used only to generate
 // SEO suggestions for their own store when they explicitly ask for one.
+// Built-in mode is the one exception: Importzo's own Groq credential,
+// capped and gated, for merchants who'd rather not manage their own key.
 // ═══════════════════════════════════════════════════════════════════
 
 export const loader = async ({ request }) => {
-  await authenticate.admin(request);
-  return null;
+  const { session } = await authenticate.admin(request);
+  // Read-only local snapshot, same reasoning as app.settings.jsx: no live
+  // Shopify API call on every page load, just what's already on file.
+  const usage = await getUsageStatus({ prisma, shop: session.shop });
+  return { builtInAiEligible: builtInAiAllowed(usage.tier), planLabel: usage.label };
 };
 
 const P = "#17320A";
@@ -24,6 +34,7 @@ const S = "#2E6316";
 const F = "'ImportzoFont', sans-serif";
 
 export default function AiSettingsPage() {
+  const { builtInAiEligible, planLabel } = useLoaderData();
   const shopify = useAppBridge();
   const dataFetcher = useFetcher();
   const actionFetcher = useFetcher();
@@ -64,13 +75,19 @@ export default function AiSettingsPage() {
   }, [actionFetcher.data, actionFetcher.state]);
 
   const handleSave = useCallback(() => {
+    const fd = new FormData();
+    fd.append("intent", "save");
+    fd.append("provider", provider);
+    if (provider === "groq_builtin") {
+      // No per-shop key or model to send — the shared credential and
+      // fixed model live server-side (see ai-settings.server.js).
+      actionFetcher.submit(fd, { method: "POST", action: "/api/ai-settings" });
+      return;
+    }
     if (!apiKey.trim()) {
       shopify.toast.show("Enter an API key", { isError: true });
       return;
     }
-    const fd = new FormData();
-    fd.append("intent", "save");
-    fd.append("provider", provider);
     fd.append("apiKey", apiKey);
     fd.append("model", model || suggestedModels[provider] || "");
     actionFetcher.submit(fd, { method: "POST", action: "/api/ai-settings" });
@@ -111,7 +128,11 @@ export default function AiSettingsPage() {
             <div className="mb-5 rounded-lg border border-green-200 bg-green-50/40 px-4 py-3 flex items-center justify-between gap-3 flex-wrap">
               <div>
                 <p className="text-sm font-medium text-gray-900">
-                  Connected: {integration.provider === "anthropic" ? "Anthropic (Claude)" : "OpenAI"}
+                  Connected: {
+                    integration.provider === "anthropic" ? "Anthropic (Claude)"
+                      : integration.provider === "openai" ? "OpenAI"
+                        : "Importzo built-in AI"
+                  }
                   {" "}&middot; {integration.model}
                 </p>
                 <p className="text-xs text-gray-500 mt-0.5">{integration.enabled ? "Enabled" : "Disabled"}</p>
@@ -132,19 +153,52 @@ export default function AiSettingsPage() {
           <div className="space-y-4">
             <div>
               <p className="text-sm font-medium text-gray-700 mb-2">Provider</p>
-              <div className="grid grid-cols-2 gap-2 max-w-sm">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 max-w-lg">
                 {[
                   { val: "anthropic", label: "Anthropic (Claude)" },
                   { val: "openai", label: "OpenAI" },
+                  {
+                    val: "groq_builtin",
+                    label: "Importzo built-in AI",
+                    sub: builtInAiEligible
+                      ? `Pro/Agency · ${AI_MONTHLY_CALL_CAP} suggestions/month included`
+                      : `Requires Pro or Agency (you're on ${planLabel})`,
+                    disabled: !builtInAiEligible,
+                  },
                 ].map((opt) => (
-                  <button key={opt.val} type="button" onClick={() => { setProvider(opt.val); setModel(""); }}
-                    className={`text-left p-3 rounded-lg border-2 transition-all ${provider === opt.val ? "border-green-700/40 bg-green-50/30" : "border-gray-200 bg-white hover:border-gray-300"}`}>
+                  <button
+                    key={opt.val}
+                    type="button"
+                    disabled={opt.disabled}
+                    onClick={() => { setProvider(opt.val); setModel(""); }}
+                    className={`text-left p-3 rounded-lg border-2 transition-all ${
+                      opt.disabled ? "border-gray-100 bg-gray-50 opacity-60 cursor-not-allowed"
+                        : provider === opt.val ? "border-green-700/40 bg-green-50/30" : "border-gray-200 bg-white hover:border-gray-300"
+                    }`}
+                  >
                     <p className="text-xs font-semibold text-gray-900">{opt.label}</p>
+                    {opt.sub && <p className="text-[10px] text-gray-500 mt-0.5">{opt.sub}</p>}
                   </button>
                 ))}
               </div>
+              {!builtInAiEligible && (
+                <p className="text-xs text-gray-500 mt-2">
+                  <Link to="/app/billing" className="font-semibold hover:underline" style={{ color: S }}>Upgrade to Pro or Agency</Link>
+                  {" "}to use Importzo&apos;s built-in AI instead of your own key.
+                </p>
+              )}
             </div>
 
+            {provider === "groq_builtin" ? (
+              <div className="max-w-sm rounded-lg px-4 py-3" style={{ background: "rgba(23,50,10,0.04)", border: "1px solid rgba(23,50,10,0.1)" }}>
+                <p className="text-xs text-gray-600 leading-relaxed">
+                  No key needed — Importzo runs these suggestions using its own AI credential. Shared across every
+                  built-in AI feature, capped at {AI_MONTHLY_CALL_CAP} suggestions/month per store. If you run out,
+                  you can switch to your own Anthropic or OpenAI key above at any time.
+                </p>
+              </div>
+            ) : (
+              <>
             <div className="max-w-sm">
               <label htmlFor="ai-api-key" className="text-sm font-medium text-gray-700 mb-1 block">API key</label>
               <input id="ai-api-key" type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)}
@@ -165,6 +219,8 @@ export default function AiSettingsPage() {
                 model name if you&apos;d rather use a higher-quality tier.
               </p>
             </div>
+              </>
+            )}
 
             <button type="button" onClick={handleSave} disabled={isSaving}
               style={{ background: P, color: "#fff", borderRadius: 8, fontWeight: 600, fontFamily: F }}

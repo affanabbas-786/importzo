@@ -6,6 +6,7 @@ import { authenticate, apiVersion } from "../shopify.server";
 import { shopifyGraphql } from "../lib/shopify-api.server";
 import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
 import { ErrorBanner } from "../components/ui";
+import { LeafIcon } from "../components/decor";
 
 // ═══════════════════════════════════════════════════════════════════
 // Server action
@@ -440,7 +441,9 @@ export default function ExportPage() {
         {/* Header */}
         <div className="flex items-center gap-2.5">
           <img src="/logo.png" alt="Importzo" style={{ height: 40, width: "auto", objectFit: "contain" }} />
-          <span style={{ fontSize: 18, fontWeight: 600, color: P, fontFamily: F }}>Export</span>
+          <span style={{ fontSize: 18, fontWeight: 600, color: P, fontFamily: F }} className="flex items-center gap-1.5">
+            Export <LeafIcon size={14} />
+          </span>
         </div>
 
         {/* ═══ HUB VIEW ═══ */}

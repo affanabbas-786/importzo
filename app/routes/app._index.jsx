@@ -1,5 +1,5 @@
 import PropTypes from "prop-types";
-import { useState, useCallback, Fragment } from "react";
+import { useState, useCallback, useEffect, Fragment } from "react";
 import { useLoaderData, useNavigation, useRouteError, Link } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
@@ -7,6 +7,8 @@ import prisma from "../db.server";
 import { BRAND, JOB_TYPE_CONFIG, JOB_STATUS_MAP } from "../lib/constants";
 import { SUPPORT_EMAIL, mailtoLink, openLiveChat } from "../lib/support";
 import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
+import { DecorativeBanner, LeafIcon, EmptyStateIllustration } from "../components/decor";
+import { COLORS } from "../lib/design-tokens";
 
 export const loader = async ({ request }) => {
   const { session } = await authenticate.admin(request);
@@ -96,10 +98,70 @@ function JobStatusBadge({ status }) {
 JobStatusBadge.propTypes = { status: PropTypes.string };
 
 // ── Expanded detail row ──
+// "Explain this error" \u2014 plain-language AI diagnosis of one failed row.
+// Zero decoration by design (per the design brief: error UI stays serious,
+// unambiguous, Polaris-plain) \u2014 a small text-link-style trigger, matching
+// the existing "Download CSV" link right above it, not a leaf-branded button.
+function ExplainErrorButton({ error, itemLabel, aiAvailable }) {
+  const [state, setState] = useState({ status: "idle" }); // idle | loading | done | error
+
+  if (!aiAvailable) return null;
+
+  async function handleExplain() {
+    setState({ status: "loading" });
+    try {
+      const fd = new FormData();
+      fd.append("error", error || "");
+      fd.append("itemLabel", itemLabel || "");
+      const res = await fetch("/api/ai-diagnose-error", { method: "POST", body: fd, credentials: "same-origin" });
+      const data = await res.json();
+      if (!data.ok) { setState({ status: "error", message: data.error }); return; }
+      setState({ status: "done", explanation: data.explanation });
+    } catch (err) {
+      setState({ status: "error", message: err.message });
+    }
+  }
+
+  if (state.status === "idle") {
+    return (
+      <button type="button" onClick={handleExplain} className="text-[11px] font-medium text-gray-500 hover:text-gray-700 underline underline-offset-2 flex-shrink-0">
+        Explain this error
+      </button>
+    );
+  }
+  if (state.status === "loading") {
+    return <span className="text-[11px] text-gray-400 flex-shrink-0">Explaining&hellip;</span>;
+  }
+  if (state.status === "error") {
+    return <span className="text-[11px] text-gray-400 flex-shrink-0" title={state.message}>Couldn&apos;t explain this error</span>;
+  }
+  return <p className="text-[11px] text-gray-600 mt-1 leading-relaxed">{state.explanation}</p>;
+}
+
+ExplainErrorButton.propTypes = {
+  error: PropTypes.string,
+  itemLabel: PropTypes.string,
+  aiAvailable: PropTypes.bool,
+};
+
 function DetailPanel({ job }) {
   const results = normalizeResults(job.results);
   const errors = results.filter((r) => r && (r.status === "error" || r.status === "not_found"));
   const successes = results.filter((r) => r && (r.status === "success" || r.status === "updated" || r.status === "created"));
+
+  // Whether this shop has any AI integration configured at all (BYOK or
+  // built-in) \u2014 checked once per opened panel; hides the "Explain this
+  // error" trigger entirely rather than showing a button that would just
+  // 400 for shops with no AI connected.
+  const [aiAvailable, setAiAvailable] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/ai-settings", { credentials: "same-origin" })
+      .then((r) => r.json())
+      .then((data) => { if (!cancelled) setAiAvailable(!!(data.ok && data.integration && data.integration.enabled)); })
+      .catch(() => { if (!cancelled) setAiAvailable(false); });
+    return () => { cancelled = true; };
+  }, []);
 
   return (
     <div className="px-6 py-4 bg-gray-50/70 border-t border-gray-100 space-y-3">
@@ -120,14 +182,17 @@ function DetailPanel({ job }) {
               Download CSV
             </button>
           </div>
-          <div className="max-h-[160px] overflow-auto">
+          <div className="max-h-[220px] overflow-auto">
             <table className="w-full">
               <tbody className="divide-y divide-red-50">
                 {errors.slice(0, 10).map((e, i) => (
                   <tr key={i}>
-                    <td className="px-4 py-1.5 text-xs text-gray-400 w-10">#{e.row}</td>
-                    <td className="px-4 py-1.5 text-xs font-medium text-gray-700 max-w-[140px] truncate">{e.title || e.sku || "\u2014"}</td>
-                    <td className="px-4 py-1.5 text-xs text-red-600 break-words">{e.error || "Not found"}</td>
+                    <td className="px-4 py-1.5 text-xs text-gray-400 w-10 align-top">#{e.row}</td>
+                    <td className="px-4 py-1.5 text-xs font-medium text-gray-700 max-w-[140px] truncate align-top">{e.title || e.sku || "\u2014"}</td>
+                    <td className="px-4 py-1.5 text-xs text-red-600 break-words align-top">
+                      {e.error || "Not found"}
+                      <ExplainErrorButton error={e.error || "Not found"} itemLabel={e.title || e.sku || ""} aiAvailable={aiAvailable} />
+                    </td>
                   </tr>
                 ))}
                 {errors.length > 10 && (
@@ -239,68 +304,73 @@ export default function Dashboard() {
   return (
     <s-page heading="Dashboard">
       <div className="space-y-6 animate-fade-in">
-        {/* ── Header ── */}
+        {/* ── Header (unchanged — logo/wordmark, not part of this design pass) ── */}
         <div className="flex items-center gap-3.5">
           <img src="/logo.png" alt="Importzo" style={{ height: 40, width: "auto", objectFit: "contain" }} />
           <span style={{ fontSize: 18, fontWeight: 600, color: primary, fontFamily: font }}>Dashboard</span>
         </div>
 
-        {/* ── 3 Primary Action Cards ── */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          <Link
-            to="/app/import"
-            className="group bg-white rounded-xl border border-gray-200 p-5 shadow-sm hover:shadow-lg transition-all duration-200 hover:-translate-y-1 flex items-start gap-4"
-          >
-            <div className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0 transition-colors" style={{ background: "rgba(23,50,10,0.08)", color: secondary }}>
-              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+        {/* ── Welcome banner + 3 Primary Action Cards (full decorative treatment) ── */}
+        <DecorativeBanner className="p-5 sm:p-6">
+          <p className="text-sm text-gray-600 mb-4 max-w-xl">
+            Welcome back — start an import, export your catalog, or move data between stores.
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <Link
+              to="/app/import"
+              className="group bg-white rounded-2xl border border-gray-200 p-5 shadow-sm hover:shadow-lg transition-all duration-200 hover:-translate-y-1 flex items-start gap-4"
+            >
+              <div className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0 transition-colors" style={{ background: "rgba(23,50,10,0.08)", color: secondary }}>
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+                </svg>
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-semibold text-gray-900" style={{ fontFamily: font }}>Import Data</p>
+                <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">Products, collections, inventory &amp; more</p>
+              </div>
+              <svg className="w-4 h-4 text-gray-300 group-hover:text-gray-500 mt-0.5 flex-shrink-0 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
               </svg>
-            </div>
-            <div className="min-w-0 flex-1">
-              <p className="text-sm font-semibold text-gray-900" style={{ fontFamily: font }}>Import Data</p>
-              <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">Products, collections, inventory &amp; more</p>
-            </div>
-            <svg className="w-4 h-4 text-gray-300 group-hover:text-gray-500 mt-0.5 flex-shrink-0 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
-            </svg>
-          </Link>
+            </Link>
 
-          <Link
-            to="/app/export"
-            className="group bg-white rounded-xl border border-gray-200 p-5 shadow-sm hover:shadow-lg transition-all duration-200 hover:-translate-y-1 flex items-start gap-4"
-          >
-            <div className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: "rgba(23,50,10,0.08)", color: secondary }}>
-              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12M12 16.5V3" />
+            <Link
+              to="/app/export"
+              className="group bg-white rounded-2xl border border-gray-200 p-5 shadow-sm hover:shadow-lg transition-all duration-200 hover:-translate-y-1 flex items-start gap-4"
+            >
+              <div className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: "rgba(23,50,10,0.08)", color: secondary }}>
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12M12 16.5V3" />
+                </svg>
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-semibold text-gray-900" style={{ fontFamily: font }}>Export Data</p>
+                <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">Download your store data as CSV</p>
+              </div>
+              <svg className="w-4 h-4 text-gray-300 group-hover:text-gray-500 mt-0.5 flex-shrink-0 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
               </svg>
-            </div>
-            <div className="min-w-0 flex-1">
-              <p className="text-sm font-semibold text-gray-900" style={{ fontFamily: font }}>Export Data</p>
-              <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">Download your store data as CSV</p>
-            </div>
-            <svg className="w-4 h-4 text-gray-300 group-hover:text-gray-500 mt-0.5 flex-shrink-0 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
-            </svg>
-          </Link>
+            </Link>
 
-          <Link
-            to="/app/transfer"
-            className="group bg-white rounded-xl border border-gray-200 p-5 shadow-sm hover:shadow-lg transition-all duration-200 hover:-translate-y-1 flex items-start gap-4"
-          >
-            <div className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: "rgba(23,50,10,0.08)", color: secondary }}>
-              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 21L3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5" />
+            <Link
+              to="/app/transfer"
+              className="group bg-white rounded-2xl border border-gray-200 p-5 shadow-sm hover:shadow-lg transition-all duration-200 hover:-translate-y-1 flex items-start gap-4"
+            >
+              <div className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: "rgba(23,50,10,0.08)", color: secondary }}>
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 21L3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5" />
+                </svg>
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-semibold text-gray-900" style={{ fontFamily: font }}>Transfer Store</p>
+                <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">Move data between Shopify stores</p>
+              </div>
+              <svg className="w-4 h-4 text-gray-300 group-hover:text-gray-500 mt-0.5 flex-shrink-0 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
               </svg>
-            </div>
-            <div className="min-w-0 flex-1">
-              <p className="text-sm font-semibold text-gray-900" style={{ fontFamily: font }}>Transfer Store</p>
-              <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">Move data between Shopify stores</p>
-            </div>
-            <svg className="w-4 h-4 text-gray-300 group-hover:text-gray-500 mt-0.5 flex-shrink-0 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
-            </svg>
-          </Link>
-        </div>
+            </Link>
+          </div>
+        </DecorativeBanner>
 
         {/* ── Summary Stats ── */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -329,7 +399,10 @@ export default function Dashboard() {
         {/* ── Recent Activity ── */}
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
           <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
-            <h2 className="text-base font-semibold text-gray-900" style={{ fontFamily: font }}>Recent Activity</h2>
+            <h2 className="text-base font-semibold text-gray-900 flex items-center gap-1.5" style={{ fontFamily: font }}>
+              <LeafIcon size={14} />
+              Recent Activity
+            </h2>
             {imports.length > 0 && (
               <Link to="/app/activity" className="text-xs font-medium hover:underline" style={{ color: secondary }}>View all</Link>
             )}
@@ -337,11 +410,7 @@ export default function Dashboard() {
 
           {imports.length === 0 ? (
             <div className="p-12 text-center">
-              <div className="w-16 h-16 bg-gray-50 rounded-full flex items-center justify-center mx-auto mb-4">
-                <svg className="w-8 h-8 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4" />
-                </svg>
-              </div>
+              <EmptyStateIllustration size={88} className="mx-auto mb-4" />
               <p className="text-sm font-medium text-gray-700 mb-1">No activity yet</p>
               <p className="text-xs text-gray-400 mb-5">Import your first CSV file to get started.</p>
               <Link
@@ -471,38 +540,64 @@ export default function Dashboard() {
           )}
         </div>
 
-        {/* ── Need Help? Support card ── */}
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5 sm:p-6">
-          <div className="flex items-start gap-4 flex-wrap">
-            <div
-              className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0"
-              style={{ background: "rgba(23,50,10,0.08)", color: secondary }}
-            >
-              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827v.75M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9 5.25h.008v.008H12v-.008z" />
-              </svg>
+        {/* ── Quick Tips (full decorative treatment) ── */}
+        <DecorativeBanner cornerPosition="bottom-right" className="p-5 sm:p-6">
+          <h2 className="text-base font-semibold text-gray-900 flex items-center gap-1.5 mb-3" style={{ fontFamily: font }}>
+            <LeafIcon size={14} />
+            Quick Tips
+          </h2>
+          <ul className="space-y-2.5">
+            {[
+              "Use Dry Run mode before a real transfer to preview exactly what would change, with nothing written yet.",
+              "Scheduled Sync is available on the Pro and Agency plans — see Billing to upgrade.",
+              "Save a CSV column mapping as a template from any importer so you don't have to remap it next time.",
+            ].map((tip) => (
+              <li key={tip} className="flex items-start gap-2.5 text-sm text-gray-700">
+                <LeafIcon size={14} className="mt-0.5 flex-shrink-0" color={COLORS.leafDeep} />
+                <span>{tip}</span>
+              </li>
+            ))}
+          </ul>
+        </DecorativeBanner>
+
+        {/* ── System Status + Need Help (compact, side by side) ── */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          {/* Static reassurance element — no real monitoring backend. */}
+          <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5 flex items-center gap-3">
+            <span className="relative flex h-2.5 w-2.5 flex-shrink-0">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
+              <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-green-500" />
+            </span>
+            <div>
+              <p className="text-sm font-semibold text-gray-900" style={{ fontFamily: font }}>All systems operational</p>
+              <p className="text-xs text-gray-400 mt-0.5">Importzo services are running normally.</p>
             </div>
-            <div className="flex-1 min-w-[200px]">
-              <p className="text-sm font-semibold text-gray-900" style={{ fontFamily: font }}>Need help?</p>
-              <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">
-                Our team is here — email us, open a live chat, or report an issue. We reply fast.
+          </div>
+
+          {/* Need Help? — dark green, contrasting the light cards around it. */}
+          <div className="rounded-xl p-5 flex items-center gap-4 flex-wrap" style={{ background: primary }}>
+            <div className="flex-1 min-w-[160px]">
+              <p className="text-sm font-semibold text-white" style={{ fontFamily: font }}>Need help?</p>
+              <p className="text-xs mt-0.5 leading-relaxed" style={{ color: "rgba(255,255,255,0.7)" }}>
+                We reply fast — email or live chat.
               </p>
             </div>
             <div className="flex items-center gap-2 flex-wrap">
               <a
                 href={mailtoLink("Importzo — I need help")}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 transition-colors"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors"
+                style={{ background: "rgba(255,255,255,0.12)", color: "#fff" }}
               >
                 <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75" />
                 </svg>
-                Email Support
+                Email
               </a>
               <button
                 type="button"
                 onClick={openLiveChat}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg text-white hover:brightness-110 transition-all shadow-sm"
-                style={{ background: primary }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors"
+                style={{ background: "#fff", color: primary }}
               >
                 <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12.76c0 1.6 1.123 2.994 2.707 3.227 1.068.157 2.148.279 3.238.364.466.037.893.281 1.153.671l1.72 2.58a.75.75 0 001.248 0l1.72-2.58a2.25 2.25 0 011.152-.67c1.09-.086 2.17-.208 3.238-.365 1.585-.233 2.708-1.626 2.708-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0012 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018z" />
@@ -510,10 +605,10 @@ export default function Dashboard() {
                 Live Chat
               </button>
             </div>
+            <p className="text-[11px] w-full" style={{ color: "rgba(255,255,255,0.55)" }}>
+              Direct email: <a href={mailtoLink()} className="font-medium hover:underline text-white">{SUPPORT_EMAIL}</a>
+            </p>
           </div>
-          <p className="text-[11px] text-gray-400 mt-4">
-            Direct email: <a href={mailtoLink()} className="font-medium hover:underline" style={{ color: secondary }}>{SUPPORT_EMAIL}</a>
-          </p>
         </div>
       </div>
     </s-page>

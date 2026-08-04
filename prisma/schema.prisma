@@ -113,6 +113,11 @@ model MigrationJob {
   sourceMarketId                 String?
   sourceMarketHandle             String?
   sourceMarketPublicationIds     String? // JSON array of publication GIDs, or null
+  // Phase 6 — opt-in AI alt-text for images copied without any. Snapshotted
+  // here (same reasoning as conflictMode above) so a resumed worker applies
+  // the same choice the merchant made at job creation, not whatever the
+  // shop's preference happens to be by the time it resumes.
+  altTextAutoGenerate Boolean @default(false)
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 }
@@ -297,6 +302,14 @@ model ShopPlan {
   // delete the row immediately. The row itself is hard-deleted 48h later at
   // shop/redact, same lifecycle as ScheduledSync (see shop-data.server.js).
   uninstalledAt DateTime?
+  // Built-in AI (Groq) usage — separate counter from recordsUsed above.
+  // Shared across all built-in-AI features (SEO cleanup, alt-text, duplicate
+  // detection, error diagnosis) combined, not per-feature, so a merchant
+  // can't get 500 calls on each. BYOK (bring-your-own-key via AiIntegration)
+  // usage is never counted here — only the built-in Groq path costs Importzo
+  // anything. Resets monthly on the same cadence as recordsUsed.
+  aiCallsUsed        Int      @default(0)
+  aiUsagePeriodStart DateTime @default(now())
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

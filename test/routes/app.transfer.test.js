@@ -6,18 +6,87 @@ vi.mock("../../app/shopify.server", () => ({
   apiVersion: "2025-10",
 }));
 
-vi.mock("../../app/db.server", () => ({
-  default: {
-    transferSession: { findUnique: vi.fn() },
-    sourceStore: { findUnique: vi.fn(), upsert: vi.fn() },
-    importJob: { create: vi.fn() },
-  },
+vi.mock("../../app/db.server", () => {
+  // Phase 5: every write-producing intent now goes through
+  // usage.server.js's assertQuotaAvailable/recordUsageAndCheck, both of
+  // which read/write prisma.shopPlan. Modeled here the same way the rest of
+  // this fake models Prisma — an in-memory Map, exposed via
+  // __getShopPlanRows so quota-specific tests can pre-seed or inspect a
+  // shop's plan without needing a real database.
+  const shopPlanRows = new Map();
+  return {
+    default: {
+      transferSession: { findUnique: vi.fn() },
+      sourceStore: { findUnique: vi.fn(), upsert: vi.fn() },
+      importJob: { create: vi.fn() },
+      shopPlan: {
+        upsert: vi.fn(async ({ where: { shop }, update, create }) => {
+          const existing = shopPlanRows.get(shop);
+          if (existing) { Object.assign(existing, update); return { ...existing }; }
+          const row = {
+            id: "plan-1", recordsUsed: 0, aiCallsUsed: 0, subscriptionId: null, subscriptionStatus: null,
+            shopOwnerEmail: null, uninstalledAt: null, createdAt: new Date(), updatedAt: new Date(), ...create,
+          };
+          shopPlanRows.set(shop, row);
+          return { ...row };
+        }),
+        update: vi.fn(async ({ where: { shop }, data }) => {
+          const row = shopPlanRows.get(shop);
+          if (!row) throw new Error("Record to update not found.");
+          const patch = { ...data };
+          if (patch.recordsUsed && typeof patch.recordsUsed === "object" && "increment" in patch.recordsUsed) {
+            patch.recordsUsed = (row.recordsUsed || 0) + patch.recordsUsed.increment;
+          }
+          if (patch.aiCallsUsed && typeof patch.aiCallsUsed === "object" && "increment" in patch.aiCallsUsed) {
+            patch.aiCallsUsed = (row.aiCallsUsed || 0) + patch.aiCallsUsed.increment;
+          }
+          Object.assign(row, patch);
+          return { ...row };
+        }),
+      },
+      __getShopPlanRows: () => shopPlanRows,
+    },
+  };
+});
+
+const createAltTextGeneratorMock = vi.fn();
+vi.mock("../../app/lib/alt-text.server", () => ({
+  createAltTextGenerator: (...args) => createAltTextGeneratorMock(...args),
+}));
+
+const getAiIntegrationForUseMock = vi.fn();
+vi.mock("../../app/lib/ai-settings.server", () => ({
+  getAiIntegrationForUse: (...args) => getAiIntegrationForUseMock(...args),
+}));
+
+const detectSimilarProductsMock = vi.fn();
+vi.mock("../../app/lib/ai-provider.server", () => ({
+  detectSimilarProducts: (...args) => detectSimilarProductsMock(...args),
 }));
 
 import { action } from "../../app/routes/app.transfer.jsx";
+import dbMock from "../../app/db.server";
 
 const SOURCE_SHOP = "source-shop.myshopify.com";
 const DEST_SHOP = "dest-shop.myshopify.com";
+
+function setShopPlan(data) {
+  dbMock.__getShopPlanRows().set(DEST_SHOP, {
+    id: "plan-preset", shop: DEST_SHOP, tier: "free", recordsUsed: 0, usagePeriodStart: new Date(),
+    aiCallsUsed: 0, aiUsagePeriodStart: new Date(),
+    subscriptionId: null, subscriptionStatus: null, shopOwnerEmail: null, uninstalledAt: null,
+    createdAt: new Date(), updatedAt: new Date(), ...data,
+  });
+}
+
+// Phase 5: the mocked db module (and its shopPlan Map) is shared across
+// every describe block in this file. Every write-producing intent now
+// touches it, so it must reset before EVERY test here, not just the ones in
+// the "plan usage limits" block below — otherwise earlier describe blocks'
+// product/page/file creations leak into later tests' usage counts.
+beforeEach(() => {
+  dbMock.__getShopPlanRows().clear();
+});
 
 const emptyEdges = (field) => jsonResponse({ data: { [field]: { edges: [], pageInfo: { hasNextPage: false } } } });
 
@@ -525,6 +594,396 @@ describe("app.transfer action — transfer-theme idempotency", () => {
     expect(result.skipped).toBe(true);
     expect(result.newThemeId).toBe(999);
     expect(result.message).toMatch(/already exists/i);
+    // Phase 5: skipping because the theme already exists is not a new record.
+    expect(dbMock.__getShopPlanRows().get(DEST_SHOP)?.recordsUsed || 0).toBe(0);
+  });
+});
+
+// Phase 5 — billing: every write-producing intent enforces the shop's
+// monthly plan limit. The underlying quota engine (rollover, limit math) is
+// unit-tested in app/lib/usage.server.test.js; these tests cover the wiring
+// into this route specifically — the pre-check gate, what counts as a
+// record per intent, and the mid-transfer stop.
+describe("app.transfer action — plan usage limits", () => {
+  beforeEach(() => {
+    global.fetch = vi.fn();
+    dbMock.__getShopPlanRows().clear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function sourceProduct(id, overrides = {}) {
+    return {
+      id: `gid://shopify/Product/${id}`, title: `Product ${id}`, handle: `product-${id}`,
+      descriptionHtml: "", vendor: "", productType: "", tags: [], status: "ACTIVE", publishedAt: "2024-01-01",
+      options: [], images: { edges: [] }, variants: { edges: [] },
+      ...overrides,
+    };
+  }
+
+  function makeProductTransferFetch(sourceProducts, { existingByHandle = null } = {}) {
+    return vi.fn(async (url, opts) => {
+      const body = opts?.body ? JSON.parse(opts.body) : {};
+      const query = body.query || "";
+      if (query.includes("productsCount")) return jsonResponse({ data: { productsCount: { count: sourceProducts.length } } });
+      if (query.includes("query SourceProducts")) return jsonResponse({ data: { products: { edges: sourceProducts.map((p) => ({ cursor: p.id, node: p })), pageInfo: { hasNextPage: false } } } });
+      if (query.includes("query FindProduct")) return jsonResponse({ data: { products: { edges: existingByHandle ? [{ node: existingByHandle }] : [] } } });
+      if (query.includes("mutation ProductVariantsBulkCreate")) return jsonResponse({ data: { productVariantsBulkCreate: { productVariants: [], userErrors: [] } } });
+      if (query.includes("mutation ProductCreate")) return jsonResponse({ data: { productCreate: { product: { id: `gid://shopify/Product/new-${Math.floor(Math.random() * 1e9)}` }, userErrors: [] } } });
+      if (query.includes("mutation ProductUpdate")) return jsonResponse({ data: { productUpdate: { product: { id: existingByHandle?.id }, userErrors: [] } } });
+      if (query.includes("productCreateMedia")) return jsonResponse({ data: { productCreateMedia: { media: [], mediaUserErrors: [] } } });
+      if (query.includes("query ProductMedia")) return jsonResponse({ data: { product: { media: { nodes: [] } } } });
+      if (query.includes("query Metafields")) return jsonResponse({ data: { product: { metafields: { edges: [] } } } });
+      if (query.includes("mutation MetafieldsSet")) return jsonResponse({ data: { metafieldsSet: { metafields: [], userErrors: [] } } });
+      throw new Error(`Unexpected fetch in quota test: ${query.slice(0, 100)}`);
+    });
+  }
+
+  it("refuses to start transfer-products at all once the shop's monthly allowance is used up", async () => {
+    setShopPlan({ tier: "free", recordsUsed: 250 });
+    global.fetch = vi.fn(async () => { throw new Error("must not reach Shopify"); });
+
+    const req = mockActionRequest({ intent: "transfer-products", sourceUrl: SOURCE_SHOP, sourceToken: "src-token", conflictMode: "create" });
+    const result = await action({ request: req });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/used all 250 records/i);
+    expect(result.error).toMatch(/upgrade/i);
+  });
+
+  it("increments usage for each standalone product actually created", async () => {
+    global.fetch = makeProductTransferFetch([sourceProduct(1), sourceProduct(2)]);
+    const req = mockActionRequest({ intent: "transfer-products", sourceUrl: SOURCE_SHOP, sourceToken: "src-token", conflictMode: "create" });
+    const result = await action({ request: req });
+
+    expect(result.ok).toBe(true);
+    expect(dbMock.__getShopPlanRows().get(DEST_SHOP).recordsUsed).toBe(2);
+  });
+
+  it("does not consume quota for a product skipped due to conflictMode=skip", async () => {
+    const existing = { id: "gid://shopify/Product/existing-1", handle: "product-1" };
+    global.fetch = makeProductTransferFetch([sourceProduct(1)], { existingByHandle: existing });
+    const req = mockActionRequest({ intent: "transfer-products", sourceUrl: SOURCE_SHOP, sourceToken: "src-token", conflictMode: "skip" });
+    await action({ request: req });
+
+    expect(dbMock.__getShopPlanRows().get(DEST_SHOP)?.recordsUsed || 0).toBe(0);
+  });
+
+  it("stops creating further standalone products once the plan limit is reached mid-transfer", async () => {
+    // 10 remaining (240 used of 250) exactly matches the batch size, so
+    // batch 1 (10 products, all launched concurrently before any of them
+    // can flip the shared quota flag) lands exactly on the cap; batch 2 (2
+    // more) only starts once batch 1 has fully resolved.
+    setShopPlan({ tier: "free", recordsUsed: 240 });
+    const products = Array.from({ length: 12 }, (_, i) => sourceProduct(i + 1));
+    global.fetch = makeProductTransferFetch(products);
+
+    const req = mockActionRequest({ intent: "transfer-products", sourceUrl: SOURCE_SHOP, sourceToken: "src-token", conflictMode: "create" });
+    const result = await action({ request: req });
+
+    expect(dbMock.__getShopPlanRows().get(DEST_SHOP).recordsUsed).toBe(250);
+    const succeeded = result.results.filter((r) => r.status === "success");
+    const quotaStopped = result.results.filter((r) => r.status === "error" && /plan limit reached/i.test(r.error));
+    expect(succeeded).toHaveLength(10);
+    expect(quotaStopped).toHaveLength(2);
+  });
+
+  it("counts the collection itself as a record, separately from the products transferred into it", async () => {
+    global.fetch = vi.fn(async (url, opts) => {
+      const body = opts?.body ? JSON.parse(opts.body) : {};
+      const query = body.query || "";
+      if (query.includes("mutation CollectionCreate")) return jsonResponse({ data: { collectionCreate: { collection: { id: "gid://shopify/Collection/new-1" }, userErrors: [] } } });
+      if (query.includes("query SourceCollectionProducts")) return jsonResponse({ data: { collection: { products: { edges: [{ cursor: "1", node: sourceProduct(1) }], pageInfo: { hasNextPage: false } } } } });
+      if (query.includes("mutation CollectionAddProducts")) return jsonResponse({ data: { collectionAddProducts: { job: { id: "1", done: true }, userErrors: [] } } });
+      if (query.includes("query Metafields")) return jsonResponse({ data: { collection: { metafields: { edges: [] } }, product: { metafields: { edges: [] } } } });
+      if (query.includes("mutation MetafieldsSet")) return jsonResponse({ data: { metafieldsSet: { metafields: [], userErrors: [] } } });
+      if (query.includes("mutation ProductCreate")) return jsonResponse({ data: { productCreate: { product: { id: "gid://shopify/Product/new-1" }, userErrors: [] } } });
+      if (query.includes("mutation ProductVariantsBulkCreate")) return jsonResponse({ data: { productVariantsBulkCreate: { productVariants: [], userErrors: [] } } });
+      if (query.includes("productCreateMedia")) return jsonResponse({ data: { productCreateMedia: { media: [], mediaUserErrors: [] } } });
+      if (query.includes("query ProductMedia")) return jsonResponse({ data: { product: { media: { nodes: [] } } } });
+      throw new Error(`Unexpected fetch: ${query.slice(0, 100)}`);
+    });
+
+    const collection = { id: "1", title: "Summer", type: "custom" };
+    const req = mockActionRequest({ intent: "transfer", sourceUrl: SOURCE_SHOP, sourceToken: "src-token", collection: JSON.stringify(collection), conflictMode: "create" });
+    const result = await action({ request: req });
+
+    expect(result.ok).toBe(true);
+    // 1 collection + 1 product = 2 records.
+    expect(dbMock.__getShopPlanRows().get(DEST_SHOP).recordsUsed).toBe(2);
+  });
+
+  it("counts pages/blogs/menus/files created by transfer-content in one batched increment", async () => {
+    global.fetch = makeContentTransferFetch({
+      sourceFiles: [{ filename: "hero.jpg", originalSource: `https://${SOURCE_SHOP}/cdn/shop/files/hero.jpg` }],
+    });
+    const req = mockActionRequest({ intent: "transfer-content", sourceUrl: SOURCE_SHOP, sourceToken: "src-token" });
+    const result = await action({ request: req });
+
+    expect(result.ok).toBe(true);
+    // Only the one file was actually created (pages/blogs/menus were empty).
+    expect(dbMock.__getShopPlanRows().get(DEST_SHOP).recordsUsed).toBe(1);
+  });
+
+  it("does not record usage for a transfer-content dry run", async () => {
+    global.fetch = makeContentTransferFetch({
+      sourceFiles: [{ filename: "hero.jpg", originalSource: `https://${SOURCE_SHOP}/cdn/shop/files/hero.jpg` }],
+    });
+    const req = mockActionRequest({ intent: "transfer-content", sourceUrl: SOURCE_SHOP, sourceToken: "src-token", dryRun: "true" });
+    await action({ request: req });
+
+    expect(dbMock.__getShopPlanRows().get(DEST_SHOP)?.recordsUsed || 0).toBe(0);
+  });
+
+  it("never blocks an unlimited (Pro) plan, and does not stop mid-transfer", async () => {
+    setShopPlan({ tier: "pro", recordsUsed: 500000 });
+    const products = Array.from({ length: 5 }, (_, i) => sourceProduct(i + 1));
+    global.fetch = makeProductTransferFetch(products);
+
+    const req = mockActionRequest({ intent: "transfer-products", sourceUrl: SOURCE_SHOP, sourceToken: "src-token", conflictMode: "create" });
+    const result = await action({ request: req });
+
+    expect(result.ok).toBe(true);
+    expect(result.results.every((r) => r.status === "success")).toBe(true);
+    expect(dbMock.__getShopPlanRows().get(DEST_SHOP).recordsUsed).toBe(500005);
+  });
+});
+
+// Phase 6 — opt-in AI alt-text for images copied without any. The
+// source-store's own alt text, when present, always wins; generation only
+// fills in the gap. Covers createProductOnTarget's image-mapping fix.
+describe("app.transfer action — AI alt-text (Phase 6)", () => {
+  beforeEach(() => {
+    global.fetch = vi.fn();
+    dbMock.__getShopPlanRows().clear();
+    createAltTextGeneratorMock.mockReset().mockResolvedValue({ enabled: false });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function sourceProduct(id, overrides = {}) {
+    return {
+      id: `gid://shopify/Product/${id}`, title: `Product ${id}`, handle: `product-${id}`,
+      descriptionHtml: "", vendor: "", productType: "", tags: [], status: "ACTIVE", publishedAt: "2024-01-01",
+      options: [], images: { edges: [] }, variants: { edges: [] },
+      ...overrides,
+    };
+  }
+
+  function makeProductTransferFetch(sourceProducts) {
+    return vi.fn(async (url, opts) => {
+      const body = opts?.body ? JSON.parse(opts.body) : {};
+      const query = body.query || "";
+      if (query.includes("productsCount")) return jsonResponse({ data: { productsCount: { count: sourceProducts.length } } });
+      if (query.includes("query SourceProducts")) return jsonResponse({ data: { products: { edges: sourceProducts.map((p) => ({ cursor: p.id, node: p })), pageInfo: { hasNextPage: false } } } });
+      if (query.includes("query FindProduct")) return jsonResponse({ data: { products: { edges: [] } } });
+      if (query.includes("mutation ProductVariantsBulkCreate")) return jsonResponse({ data: { productVariantsBulkCreate: { productVariants: [], userErrors: [] } } });
+      if (query.includes("mutation ProductCreate")) return jsonResponse({ data: { productCreate: { product: { id: `gid://shopify/Product/new-${Math.floor(Math.random() * 1e9)}` }, userErrors: [] } } });
+      if (query.includes("productCreateMedia")) return jsonResponse({ data: { productCreateMedia: { media: [], mediaUserErrors: [] } } });
+      if (query.includes("query ProductMedia")) return jsonResponse({ data: { product: { media: { nodes: [] } } } });
+      if (query.includes("query Metafields")) return jsonResponse({ data: { product: { metafields: { edges: [] } } } });
+      if (query.includes("mutation MetafieldsSet")) return jsonResponse({ data: { metafieldsSet: { metafields: [], userErrors: [] } } });
+      throw new Error(`Unexpected fetch in alt-text test: ${query.slice(0, 100)}`);
+    });
+  }
+
+  function findMediaCall(fetchFn) {
+    return fetchFn.mock.calls.find(([, opts]) => JSON.parse(opts.body).query.includes("productCreateMedia"));
+  }
+
+  it("never creates a generator when the toggle is off", async () => {
+    global.fetch = makeProductTransferFetch([sourceProduct(1, { images: { edges: [{ node: { url: "https://example.com/a.jpg", altText: null } }] } } )]);
+    const req = mockActionRequest({ intent: "transfer-products", sourceUrl: SOURCE_SHOP, sourceToken: "src-token", conflictMode: "create", altTextAutoGenerate: "false" });
+    await action({ request: req });
+    expect(createAltTextGeneratorMock).not.toHaveBeenCalled();
+  });
+
+  it("generates alt text for an image that has none, using the source product's title/description", async () => {
+    createAltTextGeneratorMock.mockResolvedValue({ enabled: true, generate: vi.fn(async () => "A red ceramic mug") });
+    global.fetch = makeProductTransferFetch([
+      sourceProduct(1, { title: "Red Mug", descriptionHtml: "Ceramic", images: { edges: [{ node: { url: "https://example.com/a.jpg", altText: null } }] } }),
+    ]);
+    const req = mockActionRequest({ intent: "transfer-products", sourceUrl: SOURCE_SHOP, sourceToken: "src-token", conflictMode: "create", altTextAutoGenerate: "true" });
+    const result = await action({ request: req });
+
+    expect(result.ok).toBe(true);
+    const mediaCall = findMediaCall(global.fetch);
+    const sentMedia = JSON.parse(mediaCall[1].body).variables.media;
+    expect(sentMedia[0].alt).toBe("A red ceramic mug");
+  });
+
+  it("preserves the source store's own alt text and never calls the generator when every image already has one", async () => {
+    createAltTextGeneratorMock.mockResolvedValue({ enabled: true, generate: vi.fn(async () => "should not be used") });
+    global.fetch = makeProductTransferFetch([
+      sourceProduct(1, { images: { edges: [{ node: { url: "https://example.com/a.jpg", altText: "Original alt text" } }] } }),
+    ]);
+    const req = mockActionRequest({ intent: "transfer-products", sourceUrl: SOURCE_SHOP, sourceToken: "src-token", conflictMode: "create", altTextAutoGenerate: "true" });
+    await action({ request: req });
+
+    const mediaCall = findMediaCall(global.fetch);
+    const sentMedia = JSON.parse(mediaCall[1].body).variables.media;
+    expect(sentMedia[0].alt).toBe("Original alt text");
+    const gen = await createAltTextGeneratorMock.mock.results[0].value;
+    expect(gen.generate).not.toHaveBeenCalled();
+  });
+
+  it("fills in only the images missing alt text, leaving existing alt text on others untouched", async () => {
+    createAltTextGeneratorMock.mockResolvedValue({ enabled: true, generate: vi.fn(async () => "Generated alt") });
+    global.fetch = makeProductTransferFetch([
+      sourceProduct(1, { images: { edges: [
+        { node: { url: "https://example.com/a.jpg", altText: "Has alt already" } },
+        { node: { url: "https://example.com/b.jpg", altText: null } },
+      ] } }),
+    ]);
+    const req = mockActionRequest({ intent: "transfer-products", sourceUrl: SOURCE_SHOP, sourceToken: "src-token", conflictMode: "create", altTextAutoGenerate: "true" });
+    await action({ request: req });
+
+    const mediaCall = findMediaCall(global.fetch);
+    const sentMedia = JSON.parse(mediaCall[1].body).variables.media;
+    expect(sentMedia.find((m) => m.originalSource.endsWith("a.jpg")).alt).toBe("Has alt already");
+    expect(sentMedia.find((m) => m.originalSource.endsWith("b.jpg")).alt).toBe("Generated alt");
+  });
+
+  it("does not fail the transfer when the generator returns nothing (best-effort)", async () => {
+    createAltTextGeneratorMock.mockResolvedValue({ enabled: true, generate: vi.fn(async () => null) });
+    global.fetch = makeProductTransferFetch([
+      sourceProduct(1, { images: { edges: [{ node: { url: "https://example.com/a.jpg", altText: null } }] } } ),
+    ]);
+    const req = mockActionRequest({ intent: "transfer-products", sourceUrl: SOURCE_SHOP, sourceToken: "src-token", conflictMode: "create", altTextAutoGenerate: "true" });
+    const result = await action({ request: req });
+
+    expect(result.ok).toBe(true);
+    const mediaCall = findMediaCall(global.fetch);
+    const sentMedia = JSON.parse(mediaCall[1].body).variables.media;
+    expect(sentMedia[0].alt).toBeUndefined();
+  });
+});
+
+// Phase 6 — fuzzy duplicate detection, dry-run preview only. Advisory: it
+// never blocks or changes what a real (non-dry-run) transfer does — only
+// annotates dry-run rows with `similarTo` for the merchant to see.
+describe("app.transfer action — duplicate detection (Phase 6, dry-run only)", () => {
+  beforeEach(() => {
+    global.fetch = vi.fn();
+    dbMock.__getShopPlanRows().clear();
+    getAiIntegrationForUseMock.mockReset().mockResolvedValue(null);
+    detectSimilarProductsMock.mockReset();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function sourceProduct(id, overrides = {}) {
+    return {
+      id: `gid://shopify/Product/${id}`, title: `Product ${id}`, handle: `product-${id}`,
+      descriptionHtml: "", vendor: "", productType: "", tags: [], status: "ACTIVE", publishedAt: "2024-01-01",
+      options: [], images: { edges: [] }, variants: { edges: [] },
+      ...overrides,
+    };
+  }
+
+  function makeDryRunFetch({ sourceProducts, existingTitles = [] }) {
+    return vi.fn(async (url, opts) => {
+      const body = opts?.body ? JSON.parse(opts.body) : {};
+      const query = body.query || "";
+      if (query.includes("productsCount")) return jsonResponse({ data: { productsCount: { count: sourceProducts.length } } });
+      if (query.includes("query SourceProducts")) return jsonResponse({ data: { products: { edges: sourceProducts.map((p) => ({ cursor: p.id, node: p })), pageInfo: { hasNextPage: false } } } });
+      if (query.includes("query ExistingProductTitles")) return jsonResponse({ data: { products: { edges: existingTitles.map((title) => ({ node: { title } })) } } });
+      throw new Error(`Unexpected fetch in duplicate-detection test: ${query.slice(0, 100)}`);
+    });
+  }
+
+  it("never checks for duplicates when no AI integration is configured", async () => {
+    global.fetch = makeDryRunFetch({ sourceProducts: [sourceProduct(1)], existingTitles: ["Product 1"] });
+    const req = mockActionRequest({ intent: "transfer-products", sourceUrl: SOURCE_SHOP, sourceToken: "src-token", dryRun: "true" });
+    const result = await action({ request: req });
+
+    expect(result.results.every((r) => !r.similarTo)).toBe(true);
+    expect(detectSimilarProductsMock).not.toHaveBeenCalled();
+  });
+
+  it("flags a likely duplicate returned by the provider on the matching dry-run row", async () => {
+    getAiIntegrationForUseMock.mockResolvedValue({ provider: "openai", apiKey: "sk-test", model: "gpt-4o-mini" });
+    detectSimilarProductsMock.mockResolvedValue({ ok: true, matches: [{ incomingTitle: "Blue Tee", existingTitle: "Blue T-Shirt" }] });
+    global.fetch = makeDryRunFetch({
+      sourceProducts: [sourceProduct(1, { title: "Blue Tee" }), sourceProduct(2, { title: "Red Hat" })],
+      existingTitles: ["Blue T-Shirt", "Green Scarf"],
+    });
+    const req = mockActionRequest({ intent: "transfer-products", sourceUrl: SOURCE_SHOP, sourceToken: "src-token", dryRun: "true" });
+    const result = await action({ request: req });
+
+    const blueTee = result.results.find((r) => r.title === "Blue Tee");
+    const redHat = result.results.find((r) => r.title === "Red Hat");
+    expect(blueTee.similarTo).toBe("Blue T-Shirt");
+    expect(redHat.similarTo).toBeUndefined();
+  });
+
+  it("never runs the check when the destination store has no products at all", async () => {
+    getAiIntegrationForUseMock.mockResolvedValue({ provider: "openai", apiKey: "sk-test", model: "gpt-4o-mini" });
+    global.fetch = makeDryRunFetch({ sourceProducts: [sourceProduct(1)], existingTitles: [] });
+    const req = mockActionRequest({ intent: "transfer-products", sourceUrl: SOURCE_SHOP, sourceToken: "src-token", dryRun: "true" });
+    await action({ request: req });
+
+    expect(detectSimilarProductsMock).not.toHaveBeenCalled();
+  });
+
+  it("never blocks or fails the dry-run preview when the similarity check itself fails", async () => {
+    getAiIntegrationForUseMock.mockResolvedValue({ provider: "openai", apiKey: "sk-test", model: "gpt-4o-mini" });
+    detectSimilarProductsMock.mockResolvedValue({ ok: false, error: "provider outage" });
+    global.fetch = makeDryRunFetch({ sourceProducts: [sourceProduct(1)], existingTitles: ["Product 1"] });
+    const req = mockActionRequest({ intent: "transfer-products", sourceUrl: SOURCE_SHOP, sourceToken: "src-token", dryRun: "true" });
+    const result = await action({ request: req });
+
+    expect(result.ok).toBe(true);
+    expect(result.results.every((r) => !r.similarTo)).toBe(true);
+  });
+
+  it("gates groq_builtin on tier/quota and records one shared call on success, distinct from a raised exception", async () => {
+    getAiIntegrationForUseMock.mockResolvedValue({ provider: "groq_builtin", apiKey: "gsk", model: "llama-3.1-8b-instant" });
+    detectSimilarProductsMock.mockResolvedValue({ ok: true, matches: [] });
+    setShopPlan({ tier: "pro", aiCallsUsed: 3 });
+    global.fetch = makeDryRunFetch({ sourceProducts: [sourceProduct(1)], existingTitles: ["Product 1"] });
+    const req = mockActionRequest({ intent: "transfer-products", sourceUrl: SOURCE_SHOP, sourceToken: "src-token", dryRun: "true" });
+    await action({ request: req });
+
+    expect(dbMock.__getShopPlanRows().get(DEST_SHOP).aiCallsUsed).toBe(4);
+  });
+
+  it("skips the check for groq_builtin when the shared budget is exhausted, without erroring", async () => {
+    getAiIntegrationForUseMock.mockResolvedValue({ provider: "groq_builtin", apiKey: "gsk", model: "llama-3.1-8b-instant" });
+    setShopPlan({ tier: "pro", aiCallsUsed: 500 });
+    global.fetch = makeDryRunFetch({ sourceProducts: [sourceProduct(1)], existingTitles: ["Product 1"] });
+    const req = mockActionRequest({ intent: "transfer-products", sourceUrl: SOURCE_SHOP, sourceToken: "src-token", dryRun: "true" });
+    const result = await action({ request: req });
+
+    expect(result.ok).toBe(true);
+    expect(detectSimilarProductsMock).not.toHaveBeenCalled();
+  });
+
+  it("never runs during a real (non-dry-run) transfer", async () => {
+    getAiIntegrationForUseMock.mockResolvedValue({ provider: "openai", apiKey: "sk-test", model: "gpt-4o-mini" });
+    global.fetch = vi.fn(async (url, opts) => {
+      const body = opts?.body ? JSON.parse(opts.body) : {};
+      const query = body.query || "";
+      if (query.includes("productsCount")) return jsonResponse({ data: { productsCount: { count: 1 } } });
+      if (query.includes("query SourceProducts")) return jsonResponse({ data: { products: { edges: [{ cursor: "1", node: sourceProduct(1) }], pageInfo: { hasNextPage: false } } } });
+      if (query.includes("query FindProduct")) return jsonResponse({ data: { products: { edges: [] } } });
+      if (query.includes("mutation ProductCreate")) return jsonResponse({ data: { productCreate: { product: { id: "gid://shopify/Product/new-1" }, userErrors: [] } } });
+      if (query.includes("productCreateMedia")) return jsonResponse({ data: { productCreateMedia: { media: [], mediaUserErrors: [] } } });
+      if (query.includes("query ProductMedia")) return jsonResponse({ data: { product: { media: { nodes: [] } } } });
+      if (query.includes("query Metafields")) return jsonResponse({ data: { product: { metafields: { edges: [] } } } });
+      throw new Error(`Unexpected fetch: ${query.slice(0, 100)}`);
+    });
+    const req = mockActionRequest({ intent: "transfer-products", sourceUrl: SOURCE_SHOP, sourceToken: "src-token", conflictMode: "create" });
+    await action({ request: req });
+
+    expect(detectSimilarProductsMock).not.toHaveBeenCalled();
+    expect(getAiIntegrationForUseMock).not.toHaveBeenCalled();
   });
 });
 

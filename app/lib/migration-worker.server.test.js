@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { jsonResponse } from "./test-helpers.js";
 
+const createAltTextGeneratorMock = vi.fn();
+vi.mock("./alt-text.server.js", () => ({
+  createAltTextGenerator: (...args) => createAltTextGeneratorMock(...args),
+}));
+
 // ── Fake Prisma: enough of MigrationJob + ProductMapping + TransferLogEntry
 //    to drive the worker and assert on final state, without touching a real DB.
 //    TransferLogEntry must be modelled here: createLogBuffer deliberately
@@ -13,8 +18,36 @@ function createFakePrisma(initialJob) {
   const logEntries = [];
 
   const backups = [];
+  // Phase 5: shopPlan defaults to Free (via usage.server.js's own default —
+  // this fake doesn't hardcode a tier) with plenty of headroom for tests
+  // that don't care about quota (none of them create anywhere near 250
+  // products). Quota-specific tests pre-seed via __setShopPlan.
+  const shopPlans = new Map();
 
   return {
+    shopPlan: {
+      upsert: vi.fn(async ({ where: { shop }, update, create }) => {
+        const existing = shopPlans.get(shop);
+        if (existing) { Object.assign(existing, update); return { ...existing }; }
+        const row = {
+          id: `plan-${shopPlans.size + 1}`, recordsUsed: 0, subscriptionId: null,
+          subscriptionStatus: null, shopOwnerEmail: null, uninstalledAt: null,
+          createdAt: new Date(), updatedAt: new Date(), ...create,
+        };
+        shopPlans.set(shop, row);
+        return { ...row };
+      }),
+      update: vi.fn(async ({ where: { shop }, data }) => {
+        const row = shopPlans.get(shop);
+        if (!row) throw new Error("Record to update not found.");
+        const patch = { ...data };
+        if (patch.recordsUsed && typeof patch.recordsUsed === "object" && "increment" in patch.recordsUsed) {
+          patch.recordsUsed = (row.recordsUsed || 0) + patch.recordsUsed.increment;
+        }
+        Object.assign(row, patch);
+        return { ...row };
+      }),
+    },
     transferLogEntry: {
       createMany: vi.fn(async ({ data }) => {
         logEntries.push(...data);
@@ -60,6 +93,14 @@ function createFakePrisma(initialJob) {
     __getMappings: () => mappings,
     __getLogEntries: () => logEntries,
     __getBackups: () => backups,
+    __getShopPlan: (shop) => shopPlans.get(shop),
+    __setShopPlan: (shop, data) => {
+      shopPlans.set(shop, {
+        id: "plan-preset", shop, tier: "free", recordsUsed: 0, usagePeriodStart: new Date(),
+        subscriptionId: null, subscriptionStatus: null, shopOwnerEmail: null, uninstalledAt: null,
+        createdAt: new Date(), updatedAt: new Date(), ...data,
+      });
+    },
   };
 }
 
@@ -93,14 +134,14 @@ function baseJob(overrides = {}) {
   };
 }
 
-function productNode(id, { handle = `p-${id}`, title = `Product ${id}`, isGiftCard = false, variants = { edges: [] }, options = [] } = {}) {
+function productNode(id, { handle = `p-${id}`, title = `Product ${id}`, isGiftCard = false, variants = { edges: [] }, options = [], images = { edges: [] } } = {}) {
   return {
     id: `gid://shopify/Product/${id}`,
     title, handle,
     descriptionHtml: "", vendor: "", productType: "", tags: [], status: "ACTIVE", publishedAt: "2024-01-01",
     isGiftCard,
     options,
-    images: { edges: [] },
+    images,
     variants,
   };
 }
@@ -112,7 +153,7 @@ function productsPageResponse(nodes, hasNextPage = false, endCursor = null) {
 const emptyMediaResponse = jsonResponse({ data: { product: { media: { nodes: [] } } } });
 const emptyMetafieldsResponse = (resourceKey) => jsonResponse({ data: { [resourceKey]: { metafields: { edges: [] } } } });
 
-function makeFetch({ productPages, findProductByHandleResult = null, productCreateHandler, productUpdateHandler, variantsBulkCreateHandler, metafieldsHandler, onSourceProductsQuery, backupProducts = [] } = {}) {
+function makeFetch({ productPages, findProductByHandleResult = null, productCreateHandler, productUpdateHandler, variantsBulkCreateHandler, metafieldsHandler, mediaCreateHandler, onSourceProductsQuery, backupProducts = [] } = {}) {
   let pageCallIndex = 0;
   return vi.fn(async (url, opts) => {
     const body = opts?.body ? JSON.parse(opts.body) : {};
@@ -150,6 +191,10 @@ function makeFetch({ productPages, findProductByHandleResult = null, productCrea
       if (productUpdateHandler) return productUpdateHandler(body);
       return jsonResponse({ data: { productUpdate: { product: { id: body.variables?.input?.id }, userErrors: [] } } });
     }
+    if (query.includes("mutation productCreateMedia")) {
+      if (mediaCreateHandler) return mediaCreateHandler(body);
+      return jsonResponse({ data: { productCreateMedia: { media: (body.variables?.media || []).map((_, i) => ({ id: `gid://shopify/MediaImage/${i}` })), mediaUserErrors: [] } } });
+    }
     if (query.includes("query ProductMedia")) return emptyMediaResponse;
     if (query.includes("query Metafields")) {
       // The query embeds the resource type as a literal field name, e.g. "product(id: $id)".
@@ -168,6 +213,7 @@ function makeFetch({ productPages, findProductByHandleResult = null, productCrea
 describe("runMigrationWorker", () => {
   beforeEach(() => {
     global.fetch = vi.fn();
+    createAltTextGeneratorMock.mockReset().mockResolvedValue({ enabled: false });
   });
 
   afterEach(() => {
@@ -1000,6 +1046,164 @@ describe("runMigrationWorker", () => {
       const entry = fakePrisma.__getLogEntries().find((e) => e.entityType === "product");
       expect(entry).toBeDefined();
       expect(entry.action).toBe("created");
+    });
+  });
+
+  // ── Phase 5: billing — monthly record usage limits ──
+  describe("plan usage limits", () => {
+    it("refuses to start the job at all when the shop has already used its full monthly allowance", async () => {
+      fakePrisma = createFakePrisma(baseJob());
+      fakePrisma.__setShopPlan(DEST_SHOP, { tier: "free", recordsUsed: 250 });
+      let anyMutationCalled = false;
+      global.fetch = vi.fn(async (url, opts) => {
+        const query = JSON.parse(opts.body).query || "";
+        if (query.includes("mutation") || query.includes("query SourceProducts") || query.includes("query BackupProducts")) anyMutationCalled = true;
+        throw new Error(`should not reach Shopify at all: ${query.slice(0, 60)}`);
+      });
+
+      await runMigrationWorker("job-1");
+
+      const job = fakePrisma.__getJob("job-1");
+      expect(job.status).toBe("FAILED");
+      expect(job.errorLog).toMatch(/used all 250 records/i);
+      expect(job.errorLog).toMatch(/upgrade/i);
+      expect(anyMutationCalled).toBe(false); // short-circuited before any Shopify call, including the backup
+      expect(fakePrisma.__getMappings()).toHaveLength(0);
+      expect(fakePrisma.__getBackups()).toHaveLength(0);
+    });
+
+    it("increments usage for a created product but not for one skipped due to an existing handle", async () => {
+      fakePrisma = createFakePrisma(baseJob({ conflictMode: "skip" }));
+      global.fetch = makeFetch({
+        productPages: [{ nodes: [productNode(1, { handle: "existing-handle" })], hasNextPage: false }],
+        findProductByHandleResult: { id: "gid://shopify/Product/existing-999", handle: "existing-handle" },
+      });
+
+      await runMigrationWorker("job-1");
+
+      expect(fakePrisma.__getShopPlan(DEST_SHOP).recordsUsed).toBe(0);
+    });
+
+    it("does not consume quota for a product that fails to create", async () => {
+      fakePrisma = createFakePrisma(baseJob());
+      global.fetch = makeFetch({
+        productPages: [{ nodes: [productNode(1), productNode(2)], hasNextPage: false }],
+        productCreateHandler: (body) => {
+          if (body.variables.product.handle === "p-1") {
+            return jsonResponse({ data: { productCreate: { product: null, userErrors: [{ field: ["title"], message: "Title can't be blank" }] } } });
+          }
+          return jsonResponse({ data: { productCreate: { product: { id: "gid://shopify/Product/new-2" }, userErrors: [] } } });
+        },
+      });
+
+      await runMigrationWorker("job-1");
+
+      // Only the one that actually succeeded counted — the failure is free.
+      expect(fakePrisma.__getShopPlan(DEST_SHOP).recordsUsed).toBe(1);
+    });
+
+    it("never enforces or is blocked by a limit on an unlimited (Pro) plan, even with heavy prior usage", async () => {
+      fakePrisma = createFakePrisma(baseJob());
+      fakePrisma.__setShopPlan(DEST_SHOP, { tier: "pro", recordsUsed: 999999 });
+      global.fetch = makeFetch({ productPages: [{ nodes: [productNode(1)], hasNextPage: false }] });
+
+      await runMigrationWorker("job-1");
+
+      const job = fakePrisma.__getJob("job-1");
+      expect(job.status).toBe("COMPLETED");
+      expect(job.processedProducts).toBe(1);
+      // Usage still tracked for display purposes even though it's never enforced.
+      expect(fakePrisma.__getShopPlan(DEST_SHOP).recordsUsed).toBe(1000000);
+    });
+
+    it("stops creating further products once the plan limit is reached mid-transfer, skipping the rest with a clear reason", async () => {
+      fakePrisma = createFakePrisma(baseJob());
+      // 5 remaining (245 used of 250) exactly matches CREATE_CONCURRENCY, so
+      // the first batch of 5 products fully proceeds (all 5 already started
+      // concurrently before any of them can flip the quota flag) and lands
+      // exactly on the cap; the second batch (2 more) starts only after the
+      // first fully resolves, by which point the cap has been hit.
+      fakePrisma.__setShopPlan(DEST_SHOP, { tier: "free", recordsUsed: 245 });
+      const nodes = Array.from({ length: 7 }, (_, i) => productNode(i + 1));
+      global.fetch = makeFetch({ productPages: [{ nodes, hasNextPage: false }] });
+
+      await runMigrationWorker("job-1");
+
+      const job = fakePrisma.__getJob("job-1");
+      expect(job.status).toBe("COMPLETED"); // a mid-job quota stop is not a job failure
+      expect(job.processedProducts).toBe(5);
+      expect(fakePrisma.__getShopPlan(DEST_SHOP).recordsUsed).toBe(250);
+
+      const quotaSkips = fakePrisma.__getLogEntries().filter((e) => e.reason === "Skipped — plan limit reached (upgrade to continue)");
+      expect(quotaSkips).toHaveLength(2);
+      expect(quotaSkips.every((e) => e.action === "skipped")).toBe(true);
+
+      expect(job.errorLog).toMatch(/monthly plan limit/i);
+    });
+  });
+
+  // Phase 6 — opt-in AI alt-text for images copied without any, on the real
+  // (non-dry-run) async transfer path. Source alt text, when present,
+  // always wins — generation only fills the gap. `job.altTextAutoGenerate`
+  // is snapshotted onto the job at creation (api.migration-job.jsx).
+  describe("AI alt-text (Phase 6)", () => {
+    it("never creates a generator when the job's flag is off", async () => {
+      fakePrisma = createFakePrisma(baseJob({ altTextAutoGenerate: false }));
+      global.fetch = makeFetch({ productPages: [{ nodes: [productNode(1, { images: { edges: [{ node: { url: "https://example.com/a.jpg", altText: null } }] } } )], hasNextPage: false }] });
+
+      await runMigrationWorker("job-1");
+
+      expect(createAltTextGeneratorMock).not.toHaveBeenCalled();
+    });
+
+    it("generates alt text for an image with none, from the source product's title/description", async () => {
+      fakePrisma = createFakePrisma(baseJob({ altTextAutoGenerate: true }));
+      createAltTextGeneratorMock.mockResolvedValue({ enabled: true, generate: vi.fn(async () => "A red ceramic mug") });
+      let sentMedia = null;
+      global.fetch = makeFetch({
+        productPages: [{ nodes: [productNode(1, { title: "Red Mug", images: { edges: [{ node: { url: "https://example.com/a.jpg", altText: null } }] } })], hasNextPage: false }],
+        mediaCreateHandler: (body) => {
+          sentMedia = body.variables.media;
+          return jsonResponse({ data: { productCreateMedia: { media: [{ id: "gid://shopify/MediaImage/1" }], mediaUserErrors: [] } } });
+        },
+      });
+
+      await runMigrationWorker("job-1");
+
+      expect(fakePrisma.__getJob("job-1").status).toBe("COMPLETED");
+      expect(sentMedia).toEqual([{ originalSource: "https://example.com/a.jpg", mediaContentType: "IMAGE", alt: "A red ceramic mug" }]);
+    });
+
+    it("preserves the source store's own alt text and never calls the generator when every image already has one", async () => {
+      fakePrisma = createFakePrisma(baseJob({ altTextAutoGenerate: true }));
+      const generate = vi.fn(async () => "should not be used");
+      createAltTextGeneratorMock.mockResolvedValue({ enabled: true, generate });
+      let sentMedia = null;
+      global.fetch = makeFetch({
+        productPages: [{ nodes: [productNode(1, { images: { edges: [{ node: { url: "https://example.com/a.jpg", altText: "Original alt text" } }] } })], hasNextPage: false }],
+        mediaCreateHandler: (body) => {
+          sentMedia = body.variables.media;
+          return jsonResponse({ data: { productCreateMedia: { media: [{ id: "gid://shopify/MediaImage/1" }], mediaUserErrors: [] } } });
+        },
+      });
+
+      await runMigrationWorker("job-1");
+
+      expect(sentMedia[0].alt).toBe("Original alt text");
+      expect(generate).not.toHaveBeenCalled();
+    });
+
+    it("does not fail the product when generation returns nothing (best-effort)", async () => {
+      fakePrisma = createFakePrisma(baseJob({ altTextAutoGenerate: true }));
+      createAltTextGeneratorMock.mockResolvedValue({ enabled: true, generate: vi.fn(async () => null) });
+      global.fetch = makeFetch({
+        productPages: [{ nodes: [productNode(1, { images: { edges: [{ node: { url: "https://example.com/a.jpg", altText: null } }] } })], hasNextPage: false }],
+      });
+
+      await runMigrationWorker("job-1");
+
+      expect(fakePrisma.__getJob("job-1").status).toBe("COMPLETED");
+      expect(fakePrisma.__getJob("job-1").failedProducts).toBe(0);
     });
   });
 });

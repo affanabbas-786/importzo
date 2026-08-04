@@ -41,6 +41,11 @@ vi.mock("../../app/db.server", () => ({
   },
 }));
 
+const createAltTextGeneratorMock = vi.fn();
+vi.mock("../../app/lib/alt-text.server", () => ({
+  createAltTextGenerator: (...args) => createAltTextGeneratorMock(...args),
+}));
+
 import { action } from "../../app/routes/app.product-importer.jsx";
 
 const DEST_SHOP = "dest-shop.myshopify.com";
@@ -70,6 +75,7 @@ describe("app.product-importer action", () => {
 
   beforeEach(() => {
     mockCreate.mockReset().mockResolvedValue({});
+    createAltTextGeneratorMock.mockReset().mockResolvedValue({ enabled: false });
     fetchMock = vi.fn();
     global.fetch = fetchMock;
     // First call in every run is the default-location lookup.
@@ -117,6 +123,80 @@ describe("app.product-importer action", () => {
 
     expect(result.successCount).toBe(1);
     expect(fetchMock).toHaveBeenCalledTimes(3); // location + productCreate + productCreateMedia
+    // Alt-text toggle wasn't sent — generator must never even be resolved.
+    expect(createAltTextGeneratorMock).not.toHaveBeenCalled();
+  });
+
+  describe("Phase 6 — AI alt-text auto-generation", () => {
+    it("does not attach alt text when the toggle is off (default)", async () => {
+      fetchMock
+        .mockResolvedValueOnce(productCreateResponse("222"))
+        .mockResolvedValueOnce(jsonResponse({ data: { productCreateMedia: { media: [], mediaUserErrors: [] } } }));
+      const req = mockActionRequest({
+        products: JSON.stringify([{ title: "Mug", images: ["https://example.com/a.jpg"] }]),
+        fileName: "p.csv", altTextAutoGenerate: "false",
+      });
+      await action({ request: req });
+
+      expect(createAltTextGeneratorMock).not.toHaveBeenCalled();
+      const mediaCall = fetchMock.mock.calls[2];
+      const sent = JSON.parse(mediaCall[1].body);
+      expect(sent.variables.media[0]).not.toHaveProperty("alt");
+    });
+
+    it("attaches AI-generated alt text to every image when the toggle is on and a generator is available", async () => {
+      createAltTextGeneratorMock.mockResolvedValue({
+        enabled: true,
+        generate: vi.fn(async () => "A cozy ceramic mug in matte white"),
+      });
+      fetchMock
+        .mockResolvedValueOnce(productCreateResponse("222"))
+        .mockResolvedValueOnce(jsonResponse({ data: { productCreateMedia: { media: [], mediaUserErrors: [] } } }));
+      const req = mockActionRequest({
+        products: JSON.stringify([{ title: "Mug", body_html: "Ceramic mug", images: ["https://example.com/a.jpg", "https://example.com/b.jpg"] }]),
+        fileName: "p.csv", altTextAutoGenerate: "true",
+      });
+      const result = await action({ request: req });
+
+      expect(result.successCount).toBe(1);
+      const mediaCall = fetchMock.mock.calls[2];
+      const sent = JSON.parse(mediaCall[1].body);
+      // Same alt text reused across both images of the product — one
+      // generation call per product, not per image.
+      expect(sent.variables.media).toEqual([
+        { originalSource: "https://example.com/a.jpg", mediaContentType: "IMAGE", alt: "A cozy ceramic mug in matte white" },
+        { originalSource: "https://example.com/b.jpg", mediaContentType: "IMAGE", alt: "A cozy ceramic mug in matte white" },
+      ]);
+    });
+
+    it("does not fail the import when alt-text generation returns nothing (best-effort)", async () => {
+      createAltTextGeneratorMock.mockResolvedValue({ enabled: true, generate: vi.fn(async () => null) });
+      fetchMock
+        .mockResolvedValueOnce(productCreateResponse("222"))
+        .mockResolvedValueOnce(jsonResponse({ data: { productCreateMedia: { media: [], mediaUserErrors: [] } } }));
+      const req = mockActionRequest({
+        products: JSON.stringify([{ title: "Mug", images: ["https://example.com/a.jpg"] }]),
+        fileName: "p.csv", altTextAutoGenerate: "true",
+      });
+      const result = await action({ request: req });
+
+      expect(result.successCount).toBe(1);
+      const sent = JSON.parse(fetchMock.mock.calls[2][1].body);
+      expect(sent.variables.media[0]).not.toHaveProperty("alt");
+    });
+
+    it("never calls the generator for a product with no images", async () => {
+      createAltTextGeneratorMock.mockResolvedValue({ enabled: true, generate: vi.fn(async () => "alt") });
+      fetchMock.mockResolvedValueOnce(productCreateResponse("222"));
+      const req = mockActionRequest({
+        products: JSON.stringify([{ title: "No Image Product" }]),
+        fileName: "p.csv", altTextAutoGenerate: "true",
+      });
+      await action({ request: req });
+
+      const gen = await createAltTextGeneratorMock.mock.results[0].value;
+      expect(gen.generate).not.toHaveBeenCalled();
+    });
   });
 
   it("processes rows out of a fully-sequential loop (bounded concurrency) while preserving row order", async () => {

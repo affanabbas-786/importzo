@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   getAiIntegrationPublic, getAiIntegrationForUse, saveAiIntegration,
   setAiIntegrationEnabled, deleteAiIntegration, PROVIDERS, SUGGESTED_MODELS,
+  BUILT_IN_PROVIDER, BUILT_IN_MODEL, ALL_PROVIDERS,
 } from "./ai-settings.server.js";
 
 function fakePrisma() {
@@ -172,5 +173,74 @@ describe("PROVIDERS / SUGGESTED_MODELS", () => {
     for (const p of PROVIDERS) {
       expect(SUGGESTED_MODELS[p]).toBeTruthy();
     }
+  });
+
+  it("ALL_PROVIDERS includes the built-in provider alongside BYOK", () => {
+    expect(ALL_PROVIDERS).toContain(BUILT_IN_PROVIDER);
+    expect(ALL_PROVIDERS).toEqual([...PROVIDERS, BUILT_IN_PROVIDER]);
+  });
+});
+
+describe("groq_builtin (Phase 6 — built-in AI)", () => {
+  let originalEncryptionKey, originalGroqKey;
+  beforeEach(() => {
+    originalEncryptionKey = process.env.ENCRYPTION_KEY;
+    process.env.ENCRYPTION_KEY = "test-encryption-key-long-enough-to-pass-validation-0123456789";
+    originalGroqKey = process.env.GROQ_API_KEY;
+    process.env.GROQ_API_KEY = "gsk_shared_test_key";
+  });
+  afterEach(() => {
+    if (originalEncryptionKey === undefined) delete process.env.ENCRYPTION_KEY;
+    else process.env.ENCRYPTION_KEY = originalEncryptionKey;
+    if (originalGroqKey === undefined) delete process.env.GROQ_API_KEY;
+    else process.env.GROQ_API_KEY = originalGroqKey;
+  });
+
+  it("saves a built-in selection without requiring an apiKey argument", async () => {
+    const prisma = fakePrisma();
+    const result = await saveAiIntegration({ prisma, shop: SHOP, provider: BUILT_IN_PROVIDER });
+    expect(result.ok).toBe(true);
+    expect(result.integration).toEqual({ provider: BUILT_IN_PROVIDER, model: BUILT_IN_MODEL, enabled: true, updatedAt: expect.any(Date) });
+  });
+
+  it("resolves the shared GROQ_API_KEY from env for use, never a per-shop stored secret", async () => {
+    const prisma = fakePrisma();
+    await saveAiIntegration({ prisma, shop: SHOP, provider: BUILT_IN_PROVIDER });
+    const forUse = await getAiIntegrationForUse({ prisma, shop: SHOP });
+    expect(forUse).toEqual({ provider: BUILT_IN_PROVIDER, apiKey: "gsk_shared_test_key", model: BUILT_IN_MODEL });
+  });
+
+  it("never surfaces the placeholder stored apiKey in the public view", async () => {
+    const prisma = fakePrisma();
+    await saveAiIntegration({ prisma, shop: SHOP, provider: BUILT_IN_PROVIDER });
+    const pub = await getAiIntegrationPublic({ prisma, shop: SHOP });
+    expect(pub).not.toHaveProperty("apiKey");
+  });
+
+  it("switching from BYOK to built-in replaces the row (one integration per shop)", async () => {
+    const prisma = fakePrisma();
+    await saveAiIntegration({ prisma, shop: SHOP, provider: "anthropic", apiKey: "sk-ant-1" });
+    await saveAiIntegration({ prisma, shop: SHOP, provider: BUILT_IN_PROVIDER });
+
+    expect(prisma.__rows.size).toBe(1);
+    const forUse = await getAiIntegrationForUse({ prisma, shop: SHOP });
+    expect(forUse.provider).toBe(BUILT_IN_PROVIDER);
+  });
+
+  it("switching from built-in back to BYOK replaces the row cleanly", async () => {
+    const prisma = fakePrisma();
+    await saveAiIntegration({ prisma, shop: SHOP, provider: BUILT_IN_PROVIDER });
+    await saveAiIntegration({ prisma, shop: SHOP, provider: "openai", apiKey: "sk-openai-1" });
+
+    const forUse = await getAiIntegrationForUse({ prisma, shop: SHOP });
+    expect(forUse.provider).toBe("openai");
+    expect(forUse.apiKey).toBe("sk-openai-1");
+  });
+
+  it("respects the enabled/disabled toggle the same as BYOK", async () => {
+    const prisma = fakePrisma();
+    await saveAiIntegration({ prisma, shop: SHOP, provider: BUILT_IN_PROVIDER });
+    await setAiIntegrationEnabled({ prisma, shop: SHOP, enabled: false });
+    expect(await getAiIntegrationForUse({ prisma, shop: SHOP })).toBeNull();
   });
 });

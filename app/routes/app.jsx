@@ -38,6 +38,7 @@ export default function App() {
         <s-link href="/app/export">Export</s-link>
         <s-link href="/app/transfer">Transfer Store</s-link>
         <s-link href="/app/activity">Activity</s-link>
+        <s-link href="/app/billing">Billing</s-link>
         <s-link href="/app/settings">Settings</s-link>
       </s-app-nav>
       <Outlet />

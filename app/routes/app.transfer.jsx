@@ -20,6 +20,11 @@ import { saveThemeZip, deleteThemeZipLater } from "../lib/theme-zip.server";
 import { shopifyFetch as sharedShopifyFetch, shopifyGraphql as sharedShopifyGraphql } from "../lib/shopify-api.server";
 import { createProductWithVariants } from "../lib/product-variants.server";
 import { listMarkets } from "../lib/markets.server";
+import { assertQuotaAvailable, recordUsageAndCheck, assertAiQuotaAvailable, recordAiUsage } from "../lib/usage.server";
+import { createAltTextGenerator } from "../lib/alt-text.server";
+import { getAiIntegrationForUse } from "../lib/ai-settings.server";
+import { detectSimilarProducts } from "../lib/ai-provider.server";
+import { LeafIcon } from "../components/decor";
 
 // ═══════════════════════════════════════════════════════════════════
 // Server
@@ -46,6 +51,30 @@ export const action = async ({ request }) => {
   const version = apiVersion || "2025-10";
   const THEME_API_VERSION = version;
   const rid = formData.get("rid") || "";
+
+  // Phase 5 — billing: refuse to start any write-producing intent at all if
+  // this shop has already used its full monthly plan allowance. Checked once
+  // here rather than per-intent since it applies identically to all four.
+  // `quotaExceeded` is shared (closed over) by every helper/intent below —
+  // only one intent ever runs per request, so a single flag is enough to let
+  // a batch loop stop starting new work once the cap is hit mid-transfer.
+  const WRITE_INTENTS = new Set(["transfer", "transfer-products", "transfer-theme", "transfer-content"]);
+  let quotaExceeded = false;
+  if (WRITE_INTENTS.has(intent)) {
+    const quotaGate = await assertQuotaAvailable({ prisma, shop: targetShop });
+    if (!quotaGate.ok) {
+      return { intent, rid, ok: false, error: quotaGate.message };
+    }
+  }
+
+  // Phase 6 — opt-in AI alt-text for images copied without any (the source
+  // store's own alt text, when present, is always preferred and this is
+  // never called for it — see createProductOnTarget below). Resolved once
+  // per request, not per product — see alt-text.server.js.
+  const altTextAutoGenerate = formData.get("altTextAutoGenerate") === "true";
+  const altGen = altTextAutoGenerate && WRITE_INTENTS.has(intent)
+    ? await createAltTextGenerator({ prisma, shop: targetShop })
+    : { enabled: false };
 
   // Helper: get source credentials — checks active TransferSession first, then falls
   // back to form data or saved SourceStore (legacy / direct-token flow).
@@ -281,6 +310,23 @@ export const action = async ({ request }) => {
     } catch { return null; }
   }
 
+  // Phase 6 — fuzzy duplicate detection (dry-run preview only, never on a
+  // real write). Single page, capped at the same MAX_TITLES_PER_LIST the AI
+  // prompt itself caps to — see ai-provider.server.js — so there's no point
+  // fetching more than would ever be sent.
+  async function fetchExistingProductTitles(limit = 200) {
+    try {
+      const data = await shopifyGraphql(targetShop, targetToken, `#graphql
+        query ExistingProductTitles($first: Int!) {
+          products(first: $first) { edges { node { title } } }
+        }`, { first: limit });
+      return (data?.products?.edges || []).map((e) => e.node?.title).filter(Boolean);
+    } catch (err) {
+      console.warn(`[importzo] fetchExistingProductTitles failed: ${err.message}`);
+      return [];
+    }
+  }
+
   // Helper: update an existing product on target store
   async function updateProductOnTarget(existingGid, src) {
     const tags = Array.isArray(src.tags) ? src.tags : (typeof src.tags === "string" ? src.tags.split(",").map((t) => t.trim()).filter(Boolean) : []);
@@ -321,7 +367,11 @@ export const action = async ({ request }) => {
           return { id: existing.id.split("/").pop(), gid: existing.id, warnings: ["Skipped — product already exists"], skipped: true };
         }
         if (conflictMode === "overwrite") {
-          return await updateProductOnTarget(existing.id, src);
+          const updated = await updateProductOnTarget(existing.id, src);
+          // Phase 5: an overwrite is a real record, same as a create.
+          const { limitReached } = await recordUsageAndCheck({ prisma, shop: targetShop, count: 1 });
+          if (limitReached) quotaExceeded = true;
+          return updated;
         }
       }
     }
@@ -382,10 +432,16 @@ export const action = async ({ request }) => {
       product: productInput, optionNames, variants: normalizedVariants,
     });
 
-    // Images — handle both GraphQL edges format and REST src format
-    const images = src.images?.edges
-      ? src.images.edges.map((e) => ({ src: e.node?.url })).filter((i) => i.src)
+    // Images — handle both GraphQL edges format and REST src format. The
+    // source store's own alt text (when present) is always preserved as-is
+    // — AI generation (Phase 6) only fills in images that have none.
+    let images = src.images?.edges
+      ? src.images.edges.map((e) => ({ src: e.node?.url, alt: e.node?.altText || undefined })).filter((i) => i.src)
       : (src.images || []);
+    if (altGen.enabled && images.some((i) => !i.alt)) {
+      const generatedAlt = await altGen.generate({ title: src.title, description: src.descriptionHtml });
+      if (generatedAlt) images = images.map((i) => (i.alt ? i : { ...i, alt: generatedAlt }));
+    }
     const imageResult = await uploadProductImagesToTarget(productGid, images);
     if (imageResult.total && imageResult.uploaded < imageResult.total) {
       warnings.push(`Images copied ${imageResult.uploaded}/${imageResult.total}`);
@@ -405,6 +461,10 @@ export const action = async ({ request }) => {
       const mfResult = await copyProductMetafieldsToTarget(sourceShopForMedia, sourceTokenForMedia, srcId, productGid);
       if (mfResult.warnings.length) warnings.push(...mfResult.warnings.slice(0, 5));
     }
+
+    // Phase 5: a newly created product is a record.
+    const { limitReached } = await recordUsageAndCheck({ prisma, shop: targetShop, count: 1 });
+    if (limitReached) quotaExceeded = true;
 
     return { id: productLegacyId, gid: productGid, warnings };
   }
@@ -1211,6 +1271,24 @@ export const action = async ({ request }) => {
     const failed = flat.filter((r) => r.status === "error").length;
     const warnings = flat.filter((r) => r.status === "warning" || (r.warnings && r.warnings.length)).length;
 
+    // Phase 5: count only genuinely created/updated objects — NOT the
+    // `success`/`warning` stat above, which folds in rollup entries
+    // (fileResult, menuResult) that report status "success" even when they
+    // moved zero real objects (e.g. a store with no menus at all still
+    // yields one "menus: success, 0 copied" entry). Pages/blogs/articles
+    // have no such rollup — one flat entry IS one real object — but
+    // files/menus need their own `copied` count instead of their status.
+    // This whole helper runs to completion in a single request/response
+    // cycle, so there's no natural per-item checkpoint to stop early —
+    // usage is recorded once, in a batch, after the fact.
+    const contentRecords =
+      flat.filter((r) => ["page", "policy-page", "blog", "article"].includes(r.type) && (r.status === "success" || r.status === "warning")).length
+      + (fileResult.copied || 0)
+      + (menuResult.copied || 0);
+    if (!dryRun && contentRecords > 0) {
+      await recordUsageAndCheck({ prisma, shop: targetShop, count: contentRecords });
+    }
+
     return { intent: "transfer-content", rid, ok: failed === 0, total, success, failed, warnings, results };
   }
 
@@ -1550,6 +1628,13 @@ export const action = async ({ request }) => {
 
       out.newCollectionId = newColId;
 
+      // Phase 5: the collection itself is a record, separate from the
+      // products transferred into it below.
+      {
+        const { limitReached } = await recordUsageAndCheck({ prisma, shop: targetShop, count: 1 });
+        if (limitReached) quotaExceeded = true;
+      }
+
       try {
         const mfResult = await copyGraphqlMetafields({
           sourceShop: sourceUrl, sourceToken,
@@ -1564,6 +1649,16 @@ export const action = async ({ request }) => {
       // Parallel transfer: batches of 10
       const TRANSFER_BATCH = 10;
       for (let _bi = 0; _bi < sourceProducts.length; _bi += TRANSFER_BATCH) {
+        // Phase 5: once the plan limit is hit mid-transfer, stop creating new
+        // products — the rest of this batch and any later ones are reported
+        // as skipped rather than silently attempted.
+        if (quotaExceeded) {
+          out.products.push(...sourceProducts.slice(_bi).map((src) => ({
+            sourceId: src.id.split("/").pop(), title: src.title, status: "error",
+            error: "Skipped — plan limit reached (upgrade to continue)", warnings: [],
+          })));
+          break;
+        }
         const batch = sourceProducts.slice(_bi, _bi + TRANSFER_BATCH);
         const batchOut = await Promise.all(batch.map(async (src) => {
           const pr = { sourceId: src.id.split("/").pop(), title: src.title, status: "success", error: null, warnings: [] };
@@ -1648,13 +1743,63 @@ export const action = async ({ request }) => {
       }
 
       if (dryRun) {
-        return { intent: "transfer-products", rid, ok: true, total: allProducts.length, transferred: productsToTransfer.length, results: productsToTransfer.map((p) => ({ title: p.title, status: "dry-run" })) };
+        // Phase 6 — fuzzy duplicate detection, advisory only: never blocks
+        // or changes the preview, just annotates rows with a
+        // `similarTo` hint the merchant can act on (skip / create anyway /
+        // merge). Runs automatically whenever this shop has an AI
+        // integration configured — dry-run is already an explicit opt-in
+        // action, and nothing is written either way, so there's no
+        // separate toggle for this the way there is for alt-text
+        // generation (which runs on real writes).
+        const similarByTitle = new Map();
+        try {
+          const integration = await getAiIntegrationForUse({ prisma, shop: targetShop });
+          if (integration) {
+            let allowed = true;
+            if (integration.provider === "groq_builtin") {
+              const gate = await assertAiQuotaAvailable({ prisma, shop: targetShop });
+              allowed = gate.ok;
+            }
+            if (allowed) {
+              const existingTitles = await fetchExistingProductTitles();
+              if (existingTitles.length) {
+                const result = await detectSimilarProducts({
+                  provider: integration.provider, apiKey: integration.apiKey, model: integration.model,
+                  incomingTitles: productsToTransfer.map((p) => p.title), existingTitles,
+                });
+                if (result.ok) {
+                  if (integration.provider === "groq_builtin") await recordAiUsage({ prisma, shop: targetShop });
+                  for (const m of result.matches) similarByTitle.set(m.incomingTitle, m.existingTitle);
+                }
+              }
+            }
+          }
+        } catch (err) {
+          // Best-effort — a failed similarity check must never break the
+          // dry-run preview itself.
+          console.warn(`[importzo] duplicate detection failed: ${err.message}`);
+        }
+
+        return {
+          intent: "transfer-products", rid, ok: true, total: allProducts.length, transferred: productsToTransfer.length,
+          results: productsToTransfer.map((p) => ({
+            title: p.title, status: "dry-run",
+            ...(similarByTitle.has(p.title) ? { similarTo: similarByTitle.get(p.title) } : {}),
+          })),
+        };
       }
 
       const results = [];
       // Parallel transfer: batches of 10
       const TRANSFER_BATCH = 10;
       for (let _bi = 0; _bi < productsToTransfer.length; _bi += TRANSFER_BATCH) {
+        // Phase 5: see the matching comment in the "transfer" intent above.
+        if (quotaExceeded) {
+          results.push(...productsToTransfer.slice(_bi).map((src) => ({
+            title: src.title, status: "error", error: "Skipped — plan limit reached (upgrade to continue)",
+          })));
+          break;
+        }
         const batch = productsToTransfer.slice(_bi, _bi + TRANSFER_BATCH);
         const batchOut = await Promise.all(batch.map(async (src) => {
           try {
@@ -1884,6 +2029,11 @@ export const action = async ({ request }) => {
 
       // Keep the ZIP available long enough for any delayed Shopify fetches, then clean up.
       await deleteThemeZipLater(zipId, zipToken);
+
+      // Phase 5: a whole theme transfer is one record — there's no
+      // meaningful sub-unit to count (the assets that make it up aren't
+      // separately addressable "records" the way products/pages are).
+      await recordUsageAndCheck({ prisma, shop: targetShop, count: 1 });
 
       return {
         intent: "transfer-theme",
@@ -2145,6 +2295,7 @@ export default function StoreTransferPage() {
         fd.append("skipCollectionProducts", selectedModules.has("collections") ? "true" : "false");
         fd.append("dryRun", "true");
         fd.append("conflictMode", conflictMode);
+        fd.append("altTextAutoGenerate", String(loadPrefs().altTextAutoGenerate));
         fd.append("rid", nextRid());
         if (sessionIdRef.current) fd.append("sessionId", sessionIdRef.current);
         fetcher.submit(fd, { method: "POST" });
@@ -2153,6 +2304,7 @@ export default function StoreTransferPage() {
         setLoadingMsg("Starting product transfer...");
         const fd = new FormData();
         fd.append("conflictMode", conflictMode);
+        fd.append("altTextAutoGenerate", String(loadPrefs().altTextAutoGenerate));
         if (selectedMarketId) fd.append("marketId", selectedMarketId);
         if (sessionIdRef.current) fd.append("sessionId", sessionIdRef.current);
         fetch("/api/migration-job", { method: "POST", body: fd, credentials: "same-origin" })
@@ -2335,6 +2487,7 @@ export default function StoreTransferPage() {
       fd.append("collection", JSON.stringify(d.collections[0]));
       fd.append("dryRun", String(dryRun));
       fd.append("conflictMode", conflictMode);
+      fd.append("altTextAutoGenerate", String(loadPrefs().altTextAutoGenerate));
       fd.append("rid", nextRid());
       if (sessionIdRef.current) fd.append("sessionId", sessionIdRef.current);
       fetcher.submit(fd, { method: "POST" });
@@ -2358,6 +2511,7 @@ export default function StoreTransferPage() {
         fd.append("collection", JSON.stringify(next));
         fd.append("dryRun", String(dryRun));
         fd.append("conflictMode", conflictMode);
+        fd.append("altTextAutoGenerate", String(loadPrefs().altTextAutoGenerate));
         fd.append("rid", nextRid());
         if (sessionIdRef.current) fd.append("sessionId", sessionIdRef.current);
         fetcher.submit(fd, { method: "POST" });
@@ -2742,7 +2896,9 @@ export default function StoreTransferPage() {
         {/* Header */}
         <div className="flex items-center gap-2.5">
           <img src="/logo.png" alt="Importzo" style={{ height: 40, width: "auto", objectFit: "contain" }} />
-          <span style={{ fontSize: 18, fontWeight: 600, color: P, fontFamily: F }}>Transfer Store</span>
+          <span style={{ fontSize: 18, fontWeight: 600, color: P, fontFamily: F }} className="flex items-center gap-1.5">
+            Transfer Store <LeafIcon size={14} />
+          </span>
         </div>
 
         {/* ── Direction banner — makes source/destination unambiguous ── */}
@@ -3497,6 +3653,26 @@ export default function StoreTransferPage() {
                           <span className="text-xs text-red-600 truncate max-w-[200px]">{p.error}</span>
                         </div>
                       ))}
+                    </div>
+                  )}
+
+                  {/* Phase 6 — fuzzy duplicate warnings (dry-run preview only, advisory).
+                      Never blocks the transfer; the merchant decides skip / create anyway / merge
+                      themselves via conflictMode or by editing the source before running for real. */}
+                  {key === "products" && dryRun && transferResults.products?.results?.some((p) => p.similarTo) && (
+                    <div className="border-t border-amber-100 bg-amber-50/40">
+                      <div className="px-6 py-2 text-xs font-semibold text-amber-700">
+                        Possible duplicates — looks similar to a product already in this store
+                      </div>
+                      <div className="divide-y divide-amber-100 max-h-[200px] overflow-auto">
+                        {transferResults.products.results.filter((p) => p.similarTo).map((p, i) => (
+                          <div key={i} className="px-6 py-2 flex items-center gap-3 text-sm">
+                            <svg className="w-4 h-4 text-amber-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" /></svg>
+                            <span className="text-gray-900 truncate flex-1">{p.title}</span>
+                            <span className="text-xs text-amber-700 truncate max-w-[220px]">looks like &quot;{p.similarTo}&quot;</span>
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   )}
 

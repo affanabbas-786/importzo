@@ -33,6 +33,7 @@ export const action = async ({ request }) => {
   const targetToken = session.accessToken;
   const version = apiVersion || "2025-10";
   const conflictMode = (formData.get("conflictMode") || "skip").trim();
+  const altTextAutoGenerate = formData.get("altTextAutoGenerate") === "true";
 
   // Resolve source credentials (session-based or saved SourceStore)
   let sourceShop = "";
@@ -121,6 +122,7 @@ export const action = async ({ request }) => {
       destToken: encrypt(targetToken),
       apiVersion: version,
       conflictMode,
+      altTextAutoGenerate,
       status: "PENDING",
       ...actor,
       ...marketFields,

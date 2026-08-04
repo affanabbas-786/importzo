@@ -18,6 +18,12 @@ export const DEFAULT_PREFS = Object.freeze({
   autoDownloadErrorReports: true,
   notifyOnComplete: true,        // browser notification when job finishes
   notifySound: false,            // play a sound on completion
+  // Phase 6 — opt-in, defaults off. Sent as a form field with each
+  // import/transfer submission (see app.product-importer.jsx,
+  // app.woocommerce-importer.jsx, app.transfer.jsx); the server only
+  // acts on it if the shop also has an AI integration configured
+  // (alt-text.server.js) — this toggle alone can't spend anything.
+  altTextAutoGenerate: false,
 });
 
 function safeParse(raw) {

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { jsonResponse, buildFormData } from "../../app/lib/test-helpers.js";
 
-const db = { integrations: [] };
+const db = { integrations: [], plans: new Map() };
 const SHOP = "dest-shop.myshopify.com";
 
 vi.mock("../../app/shopify.server", () => ({
@@ -9,10 +9,43 @@ vi.mock("../../app/shopify.server", () => ({
   apiVersion: "2025-10",
 }));
 
+function setShopPlan(shop, data) {
+  db.plans.set(shop, {
+    id: "plan-preset", shop, tier: "free", recordsUsed: 0, usagePeriodStart: new Date(),
+    aiCallsUsed: 0, aiUsagePeriodStart: new Date(),
+    subscriptionId: null, subscriptionStatus: null, shopOwnerEmail: null, uninstalledAt: null,
+    createdAt: new Date(), updatedAt: new Date(), ...data,
+  });
+}
+
 vi.mock("../../app/db.server", () => ({
   default: {
     aiIntegration: {
       findUnique: vi.fn(async ({ where: { shop } }) => db.integrations.find((i) => i.shop === shop) || null),
+    },
+    // Phase 6: built-in-AI (groq_builtin) calls are tier/quota-gated the
+    // same way scheduled sync and record quota are — see usage.server.js.
+    shopPlan: {
+      upsert: vi.fn(async ({ where: { shop }, update, create }) => {
+        const existing = db.plans.get(shop);
+        if (existing) { Object.assign(existing, update); return { ...existing }; }
+        const row = {
+          id: "plan-1", recordsUsed: 0, aiCallsUsed: 0, subscriptionId: null, subscriptionStatus: null,
+          shopOwnerEmail: null, uninstalledAt: null, createdAt: new Date(), updatedAt: new Date(), ...create,
+        };
+        db.plans.set(shop, row);
+        return { ...row };
+      }),
+      update: vi.fn(async ({ where: { shop }, data }) => {
+        const row = db.plans.get(shop);
+        if (!row) throw new Error("Record to update not found.");
+        const patch = { ...data };
+        if (patch.aiCallsUsed && typeof patch.aiCallsUsed === "object" && "increment" in patch.aiCallsUsed) {
+          patch.aiCallsUsed = (row.aiCallsUsed || 0) + patch.aiCallsUsed.increment;
+        }
+        Object.assign(row, patch);
+        return { ...row };
+      }),
     },
   },
 }));
@@ -31,6 +64,7 @@ describe("api.ai-enhance", () => {
 
   beforeEach(() => {
     db.integrations = [];
+    db.plans = new Map();
     generateSeoCopyMock.mockReset();
     __resetRateLimitState();
     global.fetch = vi.fn();
@@ -112,6 +146,76 @@ describe("api.ai-enhance", () => {
       const response = await action({ request: req });
       expect(response.status).toBe(400);
       expect(generateSeoCopyMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("intent=suggest — groq_builtin (Phase 6)", () => {
+    it("refuses a Free-tier shop before ever calling the provider", async () => {
+      seedIntegration({ provider: "groq_builtin", apiKey: encrypt("built-in"), model: "llama-3.1-8b-instant" });
+      setShopPlan(SHOP, { tier: "free" });
+
+      const req = { method: "POST", formData: async () => buildFormData({ intent: "suggest", productId: "123" }) };
+      const response = await action({ request: req });
+
+      expect(response.status).toBe(403);
+      expect((await response.json()).error).toMatch(/requires the Pro or Agency plan/i);
+      expect(generateSeoCopyMock).not.toHaveBeenCalled();
+    });
+
+    it("refuses once the shared 500-call monthly budget is exhausted", async () => {
+      seedIntegration({ provider: "groq_builtin", apiKey: encrypt("built-in"), model: "llama-3.1-8b-instant" });
+      setShopPlan(SHOP, { tier: "pro", aiCallsUsed: 500 });
+
+      const req = { method: "POST", formData: async () => buildFormData({ intent: "suggest", productId: "123" }) };
+      const response = await action({ request: req });
+
+      expect(response.status).toBe(403);
+      expect((await response.json()).error).toMatch(/used all 500 built-in AI suggestions/i);
+      expect(generateSeoCopyMock).not.toHaveBeenCalled();
+    });
+
+    it("allows an eligible shop with budget remaining, and records one call on success", async () => {
+      seedIntegration({ provider: "groq_builtin", apiKey: encrypt("built-in"), model: "llama-3.1-8b-instant" });
+      setShopPlan(SHOP, { tier: "agency", aiCallsUsed: 10 });
+      global.fetch.mockResolvedValueOnce(jsonResponse({
+        data: { product: { id: "gid://shopify/Product/123", title: "T", descriptionHtml: "D" } },
+      }));
+      generateSeoCopyMock.mockResolvedValue({ ok: true, title: "New Title", description: "New description" });
+
+      const req = { method: "POST", formData: async () => buildFormData({ intent: "suggest", productId: "123" }) };
+      const response = await action({ request: req });
+
+      expect(response.status).toBe(200);
+      const call = generateSeoCopyMock.mock.calls[0][0];
+      expect(call.provider).toBe("groq_builtin");
+      expect(db.plans.get(SHOP).aiCallsUsed).toBe(11);
+    });
+
+    it("does not spend a call when the provider call fails", async () => {
+      seedIntegration({ provider: "groq_builtin", apiKey: encrypt("built-in"), model: "llama-3.1-8b-instant" });
+      setShopPlan(SHOP, { tier: "pro", aiCallsUsed: 10 });
+      global.fetch.mockResolvedValueOnce(jsonResponse({
+        data: { product: { id: "gid://shopify/Product/123", title: "T", descriptionHtml: "D" } },
+      }));
+      generateSeoCopyMock.mockResolvedValue({ ok: false, error: "provider outage" });
+
+      const req = { method: "POST", formData: async () => buildFormData({ intent: "suggest", productId: "123" }) };
+      await action({ request: req });
+
+      expect(db.plans.get(SHOP).aiCallsUsed).toBe(10); // unchanged
+    });
+
+    it("never touches ShopPlan for a plain BYOK (anthropic/openai) suggestion", async () => {
+      seedIntegration(); // anthropic, from the default seedIntegration()
+      global.fetch.mockResolvedValueOnce(jsonResponse({
+        data: { product: { id: "gid://shopify/Product/123", title: "T", descriptionHtml: "D" } },
+      }));
+      generateSeoCopyMock.mockResolvedValue({ ok: true, title: "New Title", description: "New description" });
+
+      const req = { method: "POST", formData: async () => buildFormData({ intent: "suggest", productId: "123" }) };
+      await action({ request: req });
+
+      expect(db.plans.size).toBe(0); // no ShopPlan row ever created/read for a BYOK call
     });
   });
 

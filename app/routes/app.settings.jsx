@@ -1,16 +1,24 @@
 import PropTypes from "prop-types";
 import { useEffect, useState } from "react";
-import { useRouteError, Link } from "react-router";
+import { useLoaderData, useRouteError, Link } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
+import prisma from "../db.server";
+import { getUsageStatus } from "../lib/usage.server";
 import { BRAND } from "../lib/constants";
 import { SUPPORT_EMAIL, mailtoLink, openLiveChat } from "../lib/support";
 import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
 import { DEFAULT_PREFS, loadPrefs, savePrefs, resetPrefs, canPersist } from "../lib/prefs";
+import { DecorativeBanner, DecorativeCorner, LeafIcon } from "../components/decor";
 
 export const loader = async ({ request }) => {
-  await authenticate.admin(request);
-  return null;
+  const { session } = await authenticate.admin(request);
+  // Read-only local snapshot — no Shopify API call and no reconciliation
+  // against the actual AppSubscription (that's app.billing.jsx's job, run
+  // there so it doesn't fire on every Settings page load). Good enough for
+  // a summary card that links out to manage the subscription itself.
+  const usage = await getUsageStatus({ prisma, shop: session.shop });
+  return { usage };
 };
 
 const { primary: P, secondary: S, font: F } = BRAND;
@@ -81,6 +89,7 @@ Toggle.propTypes = {
 };
 
 export default function SettingsPage() {
+  const { usage } = useLoaderData();
   const [prefs, setPrefs] = useState(DEFAULT_PREFS);
   const [savedFlash, setSavedFlash] = useState(false);
   const [storageAvailable, setStorageAvailable] = useState(true);
@@ -113,21 +122,64 @@ export default function SettingsPage() {
       backAction={JSON.stringify({ content: "Dashboard", url: "/app" })}
     >
       <div className="space-y-6 animate-fade-in">
-        {/* ── Header ── */}
-        <div className="flex items-center gap-2.5">
-          <img src="/logo.png" alt="Importzo" style={{ height: 40, width: "auto", objectFit: "contain" }} />
-          <span style={{ fontSize: 18, fontWeight: 600, color: P, fontFamily: F }}>Settings</span>
-          {savedFlash && (
-            <span className="ml-auto text-xs font-medium px-2 py-1 rounded-full" style={{ background: "rgba(46,99,22,0.1)", color: S }}>
-              Saved
-            </span>
-          )}
+        {/* ── Header (logo/wordmark unchanged; faint page-level corner accent behind it) ── */}
+        <div className="relative overflow-hidden rounded-2xl -m-2 p-2">
+          <DecorativeCorner position="top-right" size={130} className="opacity-30" />
+          <div className="relative flex items-center gap-2.5">
+            <img src="/logo.png" alt="Importzo" style={{ height: 40, width: "auto", objectFit: "contain" }} />
+            <span style={{ fontSize: 18, fontWeight: 600, color: P, fontFamily: F }}>Settings</span>
+            {savedFlash && (
+              <span className="ml-auto text-xs font-medium px-2 py-1 rounded-full" style={{ background: "rgba(46,99,22,0.1)", color: S }}>
+                Saved
+              </span>
+            )}
+          </div>
         </div>
+
+        {/* ── Plan & Usage ── */}
+        <section className="space-y-4">
+          <div>
+            <h2 className="text-base font-semibold text-gray-900 flex items-center gap-1.5" style={{ fontFamily: F }}>
+              <LeafIcon size={14} />
+              Plan &amp; Usage
+            </h2>
+            <p className="text-sm text-gray-500 mt-0.5">Manage your subscription and see this month&apos;s record usage.</p>
+          </div>
+          <Link
+            to="/app/billing"
+            className="group flex items-start gap-4 p-5 rounded-xl border border-gray-200 bg-white shadow-sm hover:shadow-md hover:-translate-y-0.5 hover:border-gray-300 transition-all text-left w-full block"
+          >
+            <div className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: "rgba(23,50,10,0.08)", color: S }}>
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 8.25h19.5M2.25 9h19.5m-16.5 5.25h6m-6 2.25h3M3.75 19.5h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5z" />
+              </svg>
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-semibold text-gray-900" style={{ fontFamily: F }}>
+                {usage.label} plan
+                {!usage.isUnlimited && (
+                  <span className="font-normal text-gray-500"> — {usage.used.toLocaleString()} / {usage.limit.toLocaleString()} records this month</span>
+                )}
+                {usage.isUnlimited && <span className="font-normal text-gray-500"> — unlimited records</span>}
+              </p>
+              <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">
+                View plans, upgrade, or manage your subscription.
+              </p>
+              <span className="mt-2 inline-flex items-center gap-1 text-xs font-semibold group-hover:gap-1.5 transition-all" style={{ color: S }}>
+                Go to Billing
+                <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}><path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" /></svg>
+              </span>
+            </div>
+          </Link>
+        </section>
 
         {/* ── Import & Transfer defaults ── */}
         <section className="space-y-4">
           <div>
-            <h2 className="text-base font-semibold text-gray-900" style={{ fontFamily: F }}>Import &amp; Transfer defaults</h2>
+            <h2 className="text-base font-semibold text-gray-900 flex items-center gap-1.5" style={{ fontFamily: F }}>
+              <LeafIcon size={14} />
+              Import &amp; Transfer defaults
+            </h2>
             <p className="text-sm text-gray-500 mt-0.5">
               These defaults are applied every time you start a new import or store transfer. You can still override them per job.
             </p>
@@ -191,6 +243,19 @@ export default function SettingsPage() {
             <Toggle checked={!!prefs.autoDownloadErrorReports} onChange={(v) => update({ autoDownloadErrorReports: v })} />
           </div>
 
+          {/* AI alt-text auto-generation — opt-in, off by default */}
+          <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5 flex items-center gap-4">
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-semibold text-gray-900">Auto-generate image alt text</p>
+              <p className="text-xs text-gray-500 mt-1">
+                During import and transfer, use AI to write alt text for product images that don&apos;t have any yet,
+                based on the product&apos;s title and description. Requires an AI integration —{" "}
+                <Link to="/app/ai-settings" className="font-medium hover:underline" style={{ color: S }}>connect one in AI SEO Cleanup</Link>.
+              </p>
+            </div>
+            <Toggle checked={!!prefs.altTextAutoGenerate} onChange={(v) => update({ altTextAutoGenerate: v })} />
+          </div>
+
           <div className="flex items-center gap-3 flex-wrap">
             <button
               type="button"
@@ -214,7 +279,10 @@ export default function SettingsPage() {
         {/* ── AI SEO Cleanup ── */}
         <section className="space-y-4">
           <div>
-            <h2 className="text-base font-semibold text-gray-900" style={{ fontFamily: F }}>AI SEO Cleanup</h2>
+            <h2 className="text-base font-semibold text-gray-900 flex items-center gap-1.5" style={{ fontFamily: F }}>
+              <LeafIcon size={14} />
+              AI SEO Cleanup
+            </h2>
             <p className="text-sm text-gray-500 mt-0.5">Optional, bring-your-own-key AI title/description suggestions after import.</p>
           </div>
           <Link
@@ -242,7 +310,10 @@ export default function SettingsPage() {
         {/* ── Notifications ── */}
         <section className="space-y-4">
           <div>
-            <h2 className="text-base font-semibold text-gray-900" style={{ fontFamily: F }}>Notifications</h2>
+            <h2 className="text-base font-semibold text-gray-900 flex items-center gap-1.5" style={{ fontFamily: F }}>
+              <LeafIcon size={14} />
+              Notifications
+            </h2>
             <p className="text-sm text-gray-500 mt-0.5">Get notified when imports and transfers finish.</p>
           </div>
 
@@ -292,7 +363,10 @@ export default function SettingsPage() {
         <section className="space-y-4">
           <div className="flex items-end justify-between gap-4">
             <div>
-              <h2 className="text-base font-semibold text-gray-900" style={{ fontFamily: F }}>Help &amp; Support</h2>
+              <h2 className="text-base font-semibold text-gray-900 flex items-center gap-1.5" style={{ fontFamily: F }}>
+                <LeafIcon size={14} />
+                Help &amp; Support
+              </h2>
               <p className="text-sm text-gray-500 mt-0.5">Talk to a real human — usually within a few hours.</p>
             </div>
           </div>
@@ -339,23 +413,25 @@ export default function SettingsPage() {
           </div>
 
           {/* Contact summary card */}
-          <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5 flex items-center gap-4 flex-wrap">
-            <div
-              className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0"
-              style={{ background: "rgba(23,50,10,0.08)", color: P }}
-            >
-              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827v.75M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9 5.25h.008v.008H12v-.008z" />
-              </svg>
+          <DecorativeBanner cornerPosition="bottom-right" className="p-5">
+            <div className="flex items-center gap-4 flex-wrap">
+              <div
+                className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 bg-white"
+                style={{ color: P }}
+              >
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827v.75M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9 5.25h.008v.008H12v-.008z" />
+                </svg>
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-gray-900">Direct contact</p>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Email us anytime at{" "}
+                  <a href={mailtoLink()} className="font-semibold" style={{ color: S }}>{SUPPORT_EMAIL}</a>
+                </p>
+              </div>
             </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-semibold text-gray-900">Direct contact</p>
-              <p className="text-xs text-gray-500 mt-0.5">
-                Email us anytime at{" "}
-                <a href={mailtoLink()} className="font-semibold" style={{ color: S }}>{SUPPORT_EMAIL}</a>
-              </p>
-            </div>
-          </div>
+          </DecorativeBanner>
         </section>
 
         {/* ── Attribution ── */}

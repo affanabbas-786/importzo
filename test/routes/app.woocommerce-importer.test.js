@@ -41,6 +41,11 @@ vi.mock("../../app/db.server", () => ({
   },
 }));
 
+const createAltTextGeneratorMock = vi.fn();
+vi.mock("../../app/lib/alt-text.server", () => ({
+  createAltTextGenerator: (...args) => createAltTextGeneratorMock(...args),
+}));
+
 import { action } from "../../app/routes/app.woocommerce-importer.jsx";
 
 const DEST_SHOP = "dest-shop.myshopify.com";
@@ -70,6 +75,7 @@ describe("app.woocommerce-importer action", () => {
 
   beforeEach(() => {
     mockCreate.mockReset().mockResolvedValue({});
+    createAltTextGeneratorMock.mockReset().mockResolvedValue({ enabled: false });
     fetchMock = vi.fn();
     global.fetch = fetchMock;
     fetchMock.mockResolvedValueOnce(jsonResponse({ data: { locations: { edges: [{ node: { id: "gid://shopify/Location/1" } }] } } }));
@@ -147,6 +153,24 @@ describe("app.woocommerce-importer action", () => {
 
     expect(result.successCount).toBe(1);
     expect(fetchMock).toHaveBeenCalledTimes(4); // location + productCreate + variantsBulkCreate + productCreateMedia
+    expect(createAltTextGeneratorMock).not.toHaveBeenCalled();
+  });
+
+  it("attaches AI-generated alt text to images when the toggle is on and a generator is available", async () => {
+    createAltTextGeneratorMock.mockResolvedValue({ enabled: true, generate: vi.fn(async () => "A sturdy ceramic mug") });
+    fetchMock
+      .mockResolvedValueOnce(productCreateResponse("334"))
+      .mockResolvedValueOnce(variantsBulkCreateResponse(1))
+      .mockResolvedValueOnce(jsonResponse({ data: { productCreateMedia: { media: [], mediaUserErrors: [] } } }));
+    const req = mockActionRequest({
+      products: JSON.stringify([{ title: "Mug", body_html: "Ceramic", images: ["https://example.com/a.jpg"], variants: [{ price: "9.99" }] }]),
+      fileName: "woo.csv", altTextAutoGenerate: "true",
+    });
+    const result = await action({ request: req });
+
+    expect(result.successCount).toBe(1);
+    const sent = JSON.parse(fetchMock.mock.calls[3][1].body);
+    expect(sent.variables.media[0]).toEqual({ originalSource: "https://example.com/a.jpg", mediaContentType: "IMAGE", alt: "A sturdy ceramic mug" });
   });
 
   it("idempotency: skips creating a product when one with the same handle already exists", async () => {

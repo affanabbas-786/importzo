@@ -14,6 +14,7 @@ import { shopifyGraphql } from "../lib/shopify-api.server";
 import { getAiIntegrationForUse } from "../lib/ai-settings.server";
 import { generateSeoCopy } from "../lib/ai-provider.server";
 import { withPolicy } from "../lib/rate-limit.server";
+import { assertAiQuotaAvailable, recordAiUsage } from "../lib/usage.server";
 
 const PRODUCT_FIELDS_QUERY = `#graphql
   query AiEnhanceProduct($id: ID!) {
@@ -61,6 +62,14 @@ export const action = async ({ request }) => {
         }, { status: 400 });
       }
 
+      // Built-in (Groq) is tier-gated + shares a monthly cap with every
+      // other built-in-AI feature — BYOK (anthropic/openai) skips this
+      // entirely, since it's the merchant's own key/cost.
+      if (integration.provider === "groq_builtin") {
+        const quotaGate = await assertAiQuotaAvailable({ prisma, shop: session.shop });
+        if (!quotaGate.ok) return Response.json({ ok: false, error: quotaGate.message }, { status: 403 });
+      }
+
       let product;
       try {
         const data = await shopifyGraphql(session.shop, session.accessToken, PRODUCT_FIELDS_QUERY, { id: gid }, version);
@@ -77,6 +86,12 @@ export const action = async ({ request }) => {
         product,
       });
       if (!result.ok) return Response.json({ ok: false, error: result.error }, { status: 502 });
+
+      // Only a successful built-in call spends quota — a failed provider
+      // call (bad prompt, provider outage) must not cost the shop a credit.
+      if (integration.provider === "groq_builtin") {
+        await recordAiUsage({ prisma, shop: session.shop });
+      }
 
       return Response.json({
         ok: true,
