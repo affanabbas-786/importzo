@@ -4,8 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Importzo – Free Shopify Store Migration App | Clone Stores in Minutes</title>
-<meta name="description" content="Transfer products, themes, pages, blogs, menus, and metafields between Shopify stores instantly. No CSV needed. Free plan available. Install Importzo today.">
-<meta name="keywords" content="shopify store migration, clone shopify store, transfer shopify products, shopify store cloner, matrixify alternative, shopify store transfer app">
+<meta name="description" content="Clone and migrate Shopify stores in minutes — multi-store expansion, staging, backups, regional launches. Plus bulk CSV import/export. Free plan available.">
+<meta name="keywords" content="shopify store migration, clone shopify store, transfer shopify products, shopify store cloner, matrixify alternative, shopify store transfer app, shopify bulk import export">
 <link rel="canonical" href="https://importzo.dazzletech.co">
 <meta name="robots" content="index, follow">
 <meta name="author" content="Dazzle Tech LLC">
@@ -14,14 +14,14 @@
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://importzo.dazzletech.co">
 <meta property="og:title" content="Importzo – Free Shopify Store Migration App | Clone Stores in Minutes">
-<meta property="og:description" content="Transfer products, themes, pages, blogs, menus, and metafields between Shopify stores instantly. No CSV needed. Free plan available.">
+<meta property="og:description" content="Clone and migrate Shopify stores in minutes — multi-store expansion, staging, backups, regional launches. Plus bulk CSV import/export. Free plan available.">
 <meta property="og:image" content="https://importzo.dazzletech.co/og-image.png">
 <meta property="og:site_name" content="Importzo">
 
 <!-- Twitter Card -->
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Importzo – Free Shopify Store Migration App | Clone Stores in Minutes">
-<meta name="twitter:description" content="Transfer products, themes, pages, blogs, menus, and metafields between Shopify stores instantly. No CSV needed. Free plan available.">
+<meta name="twitter:description" content="Clone and migrate Shopify stores in minutes — multi-store expansion, staging, backups, regional launches. Plus bulk CSV import/export. Free plan available.">
 <meta name="twitter:image" content="https://importzo.dazzletech.co/og-image.png">
 
 <!-- JSON-LD: WebSite -->
@@ -50,14 +50,31 @@
   "name": "Importzo",
   "applicationCategory": "BusinessApplication",
   "operatingSystem": "Web",
-  "description": "Transfer products, themes, pages, blogs, menus, and metafields between Shopify stores instantly. No CSV needed. Free plan available.",
+  "description": "Clone and migrate Shopify stores directly, or bulk import/export via CSV. Transfer products, themes, pages, blogs, menus, and metafields between stores. Free plan available.",
   "url": "https://apps.shopify.com/importzo",
-  "offers": {
-    "@type": "Offer",
-    "price": "0",
-    "priceCurrency": "USD",
-    "description": "Free plan available — no credit card required"
-  },
+  "offers": [
+    {
+      "@type": "Offer",
+      "name": "Free",
+      "price": "0",
+      "priceCurrency": "USD",
+      "description": "1 store, 250 records/month — no credit card required"
+    },
+    {
+      "@type": "Offer",
+      "name": "Pro",
+      "price": "15",
+      "priceCurrency": "USD",
+      "description": "Unlimited records plus scheduled sync"
+    },
+    {
+      "@type": "Offer",
+      "name": "Agency",
+      "price": "10",
+      "priceCurrency": "USD",
+      "description": "Everything in Pro, discounted per store, for merchants running 3+ stores"
+    }
+  ],
   "aggregateRating": {
     "@type": "AggregateRating",
     "ratingValue": "5.0",
@@ -108,7 +125,7 @@
       "name": "Is there a free way to migrate a Shopify store?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "Yes. Importzo offers a free plan with no credit card required. You can migrate products, collections, and other store data at no cost. The free plan is available immediately after installing Importzo from the Shopify App Store."
+        "text": "Yes. Importzo offers a free plan with no credit card required, covering 1 store and 250 records a month. You can migrate products, collections, and other store data at no cost. The free plan is available immediately after installing Importzo from the Shopify App Store."
       }
     },
     {
@@ -124,7 +141,7 @@
       "name": "Does Importzo work without CSV files?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "Yes. Importzo works entirely without CSV files. It connects directly to the Shopify Admin API of both stores and transfers data in real time — no exports, no imports, no formatting issues. This is why Importzo can transfer themes, media files, and navigation menus, which CSV-based tools cannot handle."
+        "text": "For store-to-store cloning, yes — Importzo connects directly to the Shopify Admin API of both stores and transfers data in real time, no exports or imports required. Importzo also supports traditional CSV bulk import/export separately, for merchants who specifically want to work from spreadsheets."
       }
     },
     {
@@ -145,18 +162,18 @@
     },
     {
       "@type": "Question",
-      "name": "How do I copy products from one Shopify store to another?",
+      "name": "Is it safe to run a store migration with Importzo?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "Install Importzo on both Shopify stores, then use the Transfer Store feature to connect them with a session code. You can choose to transfer all products or select specific categories. All variants, images, pricing, inventory levels, metafields, and product metadata will be copied automatically."
+        "text": "Yes. Every transfer to a destination store takes an automatic backup first, with one-click restore if anything needs to be undone. You can also run a full dry-run preview that shows exactly what would change before anything is written, and roll back a completed transfer within a time window afterward."
       }
     },
     {
       "@type": "Question",
-      "name": "Does Importzo transfer blog posts and pages?",
+      "name": "What does Importzo cost?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "Yes. Importzo transfers all blog posts, blog articles, and online store pages between Shopify stores. This includes page content, SEO metadata, tags, publication status, and article images — everything needed to recreate your content exactly in the new store."
+        "text": "Importzo has three plans: Free ($0, 1 store, 250 records/month), Pro ($15/month, unlimited records plus scheduled sync), and Agency ($10/month per store, everything in Pro at a discount, for merchants running 3 or more stores with Importzo installed). No credit card is required for the Free plan."
       }
     }
   ]
@@ -195,12 +212,21 @@
 </script>
 
 <style>
+/* ─── Font (same brand face the app uses for headings) ─────────── */
+@font-face {
+  font-family: 'ImportzoFont';
+  src: url('/myfonts.ttf') format('truetype');
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
+
 /* ─── Reset & Base ──────────────────────────────────────────── */
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 html{scroll-behavior:smooth;-webkit-text-size-adjust:100%}
 body{
-  background:#0a0f0a;
-  color:#e8f5e0;
+  background:var(--bg);
+  color:var(--text);
   font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,'Helvetica Neue',Arial,sans-serif;
   line-height:1.65;
   overflow-x:hidden;
@@ -208,69 +234,76 @@ body{
 }
 img{max-width:100%;display:block}
 a{color:inherit;text-decoration:none}
+h1,h2,h3{font-family:'ImportzoFont',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
 
-/* ─── CSS Variables ─────────────────────────────────────────── */
+/* ─── CSS Variables — same palette as the app (design-tokens.js) ─ */
 :root{
-  --bg:#0a0f0a;
-  --bg-card:#0d180d;
-  --bg-card2:#101c10;
-  --bg-card3:#111e11;
-  --green:#4aad1e;
-  --green-l:#72e040;
-  --green-xl:#a8f060;
-  --green-glow:rgba(114,224,64,.14);
-  --green-border:rgba(114,224,64,.18);
-  --green-border2:rgba(114,224,64,.35);
-  --text:#e8f5e0;
-  --text-muted:#7a9a7a;
-  --text-dim:#4a6a4a;
-  --r:12px;
+  --bg:#FBFAF6;
+  --bg-card:#ffffff;
+  --bg-warm:#F4F8EF;
+  --primary:#17320A;
+  --secondary:#2E6316;
+  --leaf-light:#E8F1E2;
+  --leaf-mid:#BFDCAE;
+  --leaf-deep:#4C7A34;
+  --text:#1c2a17;
+  --text-muted:#5b6b54;
+  --text-dim:#8a9a83;
+  --border:#e4ead9;
+  --r:16px;
   --rl:20px;
   --max:1160px;
-  --grad:linear-gradient(135deg,#4aad1e 0%,#72e040 100%);
+  --grad:linear-gradient(135deg,#17320A 0%,#2E6316 100%);
+  --shadow:0 1px 2px rgba(23,50,10,.05), 0 4px 16px rgba(23,50,10,.06);
+  --shadow-lg:0 4px 10px rgba(23,50,10,.06), 0 16px 32px rgba(23,50,10,.10);
 }
 
 /* ─── Utility ───────────────────────────────────────────────── */
 .container{max-width:var(--max);margin:0 auto;padding:0 24px}
 .gradient-text{
-  background:linear-gradient(90deg,#72e040,#a8f060);
+  background:linear-gradient(90deg,#17320A,#2E6316);
   -webkit-background-clip:text;-webkit-text-fill-color:transparent;
   background-clip:text
 }
 .tag{
   display:inline-flex;align-items:center;gap:6px;
-  padding:4px 12px;border-radius:100px;
-  font-size:12px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;
-  background:var(--green-glow);border:1px solid var(--green-border2);
-  color:var(--green-l)
+  padding:5px 13px;border-radius:100px;
+  font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;
+  background:var(--leaf-light);border:1px solid var(--leaf-mid);
+  color:var(--secondary)
 }
 .section-label{text-align:center;margin-bottom:16px}
+
+/* ─── Decorative leaf accents ───────────────────────────────── */
+.leaf-corner{position:absolute;pointer-events:none;z-index:0}
+.leaf-shape{fill:var(--leaf-mid)}
 
 /* ─── Buttons ───────────────────────────────────────────────── */
 .btn-primary{
   display:inline-flex;align-items:center;gap:8px;
   padding:15px 30px;background:var(--grad);
-  color:#081008;font-weight:700;font-size:15px;border-radius:10px;
+  color:#fff;font-weight:700;font-size:15px;border-radius:10px;
   text-decoration:none;border:none;cursor:pointer;
   transition:transform .18s,box-shadow .18s;
-  white-space:nowrap
+  white-space:nowrap;box-shadow:var(--shadow)
 }
-.btn-primary:hover{transform:translateY(-2px);box-shadow:0 10px 36px rgba(114,224,64,.38)}
+.btn-primary:hover{transform:translateY(-2px);box-shadow:0 10px 28px rgba(23,50,10,.22)}
 .btn-primary:active{transform:translateY(0)}
 .btn-secondary{
   display:inline-flex;align-items:center;gap:8px;
-  padding:15px 30px;background:transparent;
-  color:var(--green-l);font-weight:600;font-size:15px;border-radius:10px;
+  padding:15px 30px;background:#fff;
+  color:var(--primary);font-weight:600;font-size:15px;border-radius:10px;
   text-decoration:none;
-  border:1px solid var(--green-border2);cursor:pointer;
+  border:1px solid var(--border);cursor:pointer;
   transition:background .18s,border-color .18s;
   white-space:nowrap
 }
-.btn-secondary:hover{background:var(--green-glow);border-color:var(--green-l)}
+.btn-secondary:hover{background:var(--leaf-light);border-color:var(--leaf-mid)}
 
 /* ─── Fade-in on scroll ─────────────────────────────────────── */
-.fade-up{opacity:0;transform:translateY(28px);transition:opacity .55s ease,transform .55s ease}
+.fade-up{opacity:0;transform:translateY(24px);transition:opacity .55s ease,transform .55s ease}
 .fade-up.visible{opacity:1;transform:none}
+@media (prefers-reduced-motion:reduce){.fade-up{opacity:1;transform:none;transition:none}}
 
 /* ─── Header ────────────────────────────────────────────────── */
 header{
@@ -279,21 +312,14 @@ header{
   transition:background .25s,border-color .25s,backdrop-filter .25s;
 }
 header.scrolled{
-  background:rgba(10,15,10,.88);
-  backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
-  border-bottom:1px solid var(--green-border)
+  background:rgba(251,250,246,.92);
+  backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  border-bottom:1px solid var(--border)
 }
-.header-inner{
-  display:flex;align-items:center;justify-content:space-between;gap:16px
-}
-.logo{
-  display:flex;align-items:center;gap:10px;
-  font-size:18px;font-weight:800;letter-spacing:-.02em;color:var(--text)
-}
+.header-inner{display:flex;align-items:center;justify-content:space-between;gap:16px}
 nav{display:flex;align-items:center;gap:28px}
 nav a{font-size:14px;font-weight:500;color:var(--text-muted);transition:color .15s}
-nav a:hover{color:var(--green-l)}
-.header-cta{display:flex;align-items:center;gap:12px}
+nav a:hover{color:var(--secondary)}
 @media(max-width:768px){
   nav{display:none}
   .btn-primary{padding:11px 18px;font-size:13px}
@@ -301,379 +327,195 @@ nav a:hover{color:var(--green-l)}
 
 /* ─── Hero ──────────────────────────────────────────────────── */
 .hero{
-  min-height:100vh;
+  min-height:92vh;
   display:flex;flex-direction:column;justify-content:center;
-  padding:120px 0 80px;
-  position:relative;overflow:hidden
+  padding:120px 0 72px;
+  position:relative;overflow:hidden;
+  background:linear-gradient(180deg,var(--bg-warm) 0%,var(--bg) 60%);
 }
-.hero::before{
-  content:'';position:absolute;top:-200px;left:50%;transform:translateX(-50%);
-  width:900px;height:900px;border-radius:50%;
-  background:radial-gradient(circle,rgba(74,173,30,.1) 0%,transparent 70%);
-  pointer-events:none
-}
-.hero-grid{
-  display:grid;grid-template-columns:1fr 1fr;gap:64px;align-items:center
-}
+.hero-grid{display:grid;grid-template-columns:1.05fr .95fr;gap:64px;align-items:center;position:relative;z-index:1}
 .hero-eyebrow{margin-bottom:20px}
 .hero h1{
-  font-size:clamp(36px,5vw,62px);
-  font-weight:900;
-  line-height:1.08;
-  letter-spacing:-.03em;
-  margin-bottom:24px
+  font-size:clamp(34px,4.6vw,56px);
+  font-weight:700;
+  line-height:1.12;
+  letter-spacing:-.02em;
+  margin-bottom:22px;
+  color:var(--primary)
 }
-.hero-sub{
-  font-size:18px;color:var(--text-muted);line-height:1.7;
-  max-width:520px;margin-bottom:36px
-}
+.hero-sub{font-size:18px;color:var(--text-muted);line-height:1.7;max-width:540px;margin-bottom:16px}
+.hero-sub2{font-size:14px;color:var(--text-dim);max-width:540px;margin-bottom:32px}
 .hero-ctas{display:flex;flex-wrap:wrap;gap:14px;align-items:center}
 .hero-note{margin-top:20px;font-size:13px;color:var(--text-dim)}
-.hero-note span{color:var(--green-l)}
+.hero-note b{color:var(--secondary);font-weight:600}
 
 /* ─── Hero Diagram ──────────────────────────────────────────── */
 .diagram-wrap{
   display:flex;align-items:center;justify-content:center;
-  padding:32px;
-  background:var(--bg-card);
-  border:1px solid var(--green-border);
-  border-radius:var(--rl);
-  position:relative;overflow:hidden
-}
-.diagram-wrap::before{
-  content:'';position:absolute;inset:0;
-  background:radial-gradient(ellipse at center,var(--green-glow) 0%,transparent 70%);
-  pointer-events:none
+  padding:32px;background:var(--bg-card);
+  border:1px solid var(--border);border-radius:var(--rl);
+  position:relative;overflow:hidden;box-shadow:var(--shadow-lg)
 }
 .diagram{display:flex;align-items:center;gap:0;width:100%;justify-content:center}
 .d-store{
   display:flex;flex-direction:column;align-items:center;gap:10px;
   padding:20px 16px;border-radius:var(--r);
-  border:1px solid var(--green-border);background:var(--bg-card3);
+  border:1px solid var(--border);background:var(--bg-warm);
   min-width:110px;position:relative;z-index:1
 }
 .d-store-icon{
   width:44px;height:44px;border-radius:10px;
-  background:var(--green-glow);border:1px solid var(--green-border2);
-  display:flex;align-items:center;justify-content:center
+  background:var(--leaf-light);border:1px solid var(--leaf-mid);
+  display:flex;align-items:center;justify-content:center;color:var(--secondary)
 }
 .d-store-label{font-size:13px;font-weight:700;color:var(--text);text-align:center}
 .d-store-tags{display:flex;flex-direction:column;gap:4px;margin-top:4px}
-.d-tag{
-  font-size:10px;padding:2px 8px;border-radius:4px;
-  background:rgba(114,224,64,.08);color:var(--text-muted);
-  text-align:center;white-space:nowrap
-}
-
-/* Animated path */
-.d-path{
-  flex:1;height:40px;position:relative;overflow:hidden;
-  display:flex;align-items:center;min-width:40px
-}
-.d-path-line{
-  width:100%;height:1px;
-  background:linear-gradient(90deg,var(--green-border2),transparent);
-  position:absolute
-}
-.d-path.reverse .d-path-line{
-  background:linear-gradient(90deg,transparent,var(--green-border2))
-}
-.d-arrow{position:absolute;right:2px;color:var(--green-l);font-size:14px}
+.d-tag{font-size:10px;padding:2px 8px;border-radius:4px;background:var(--leaf-light);color:var(--text-muted);text-align:center;white-space:nowrap}
+.d-path{flex:1;height:40px;position:relative;overflow:hidden;display:flex;align-items:center;min-width:40px}
+.d-path-line{width:100%;height:1px;background:linear-gradient(90deg,var(--leaf-mid),transparent);position:absolute}
+.d-path.reverse .d-path-line{background:linear-gradient(90deg,transparent,var(--leaf-mid))}
+.d-arrow{position:absolute;right:2px;color:var(--secondary);font-size:14px}
 .d-path.reverse .d-arrow{right:auto;left:2px;transform:scaleX(-1)}
-
-@keyframes packet-move{
-  0%{left:0;opacity:0}
-  5%{opacity:1}
-  90%{opacity:1}
-  100%{left:calc(100% - 8px);opacity:0}
-}
-.d-packet{
-  position:absolute;
-  width:8px;height:8px;border-radius:50%;
-  background:var(--green-l);
-  box-shadow:0 0 10px var(--green-l),0 0 20px rgba(114,224,64,.5);
-  top:50%;transform:translateY(-50%);
-  animation:packet-move 2.2s ease-in-out infinite
-}
+@keyframes packet-move{0%{left:0;opacity:0}5%{opacity:1}90%{opacity:1}100%{left:calc(100% - 8px);opacity:0}}
+.d-packet{position:absolute;width:8px;height:8px;border-radius:50%;background:var(--secondary);box-shadow:0 0 8px rgba(46,99,22,.5);top:50%;transform:translateY(-50%);animation:packet-move 2.2s ease-in-out infinite}
 .d-packet:nth-child(2){animation-delay:.7s}
 .d-packet:nth-child(3){animation-delay:1.4s}
-
-/* Importzo Hub */
-.d-hub{
-  display:flex;flex-direction:column;align-items:center;gap:8px;
-  padding:20px 20px;border-radius:var(--r);
-  border:1.5px solid var(--green-border2);
-  background:var(--bg-card3);
-  position:relative;z-index:1;min-width:120px
-}
-@keyframes hub-pulse{
-  0%,100%{box-shadow:0 0 20px rgba(114,224,64,.25),inset 0 0 20px rgba(114,224,64,.05)}
-  50%{box-shadow:0 0 40px rgba(114,224,64,.45),inset 0 0 30px rgba(114,224,64,.12)}
-}
+.d-hub{display:flex;flex-direction:column;align-items:center;gap:8px;padding:20px;border-radius:var(--r);border:1.5px solid var(--leaf-mid);background:var(--leaf-light);position:relative;z-index:1;min-width:120px}
+@keyframes hub-pulse{0%,100%{box-shadow:0 0 0 rgba(46,99,22,0)}50%{box-shadow:0 0 24px rgba(46,99,22,.18)}}
 .d-hub{animation:hub-pulse 2.5s ease-in-out infinite}
-.d-hub-icon{
-  width:48px;height:48px;border-radius:12px;
-  background:var(--grad);
-  display:flex;align-items:center;justify-content:center
-}
-.d-hub-label{
-  font-size:13px;font-weight:800;color:var(--green-l);
-  letter-spacing:.04em;text-transform:uppercase
-}
+.d-hub-icon{width:48px;height:48px;border-radius:12px;background:var(--grad);display:flex;align-items:center;justify-content:center}
+.d-hub-label{font-size:13px;font-weight:800;color:var(--secondary);letter-spacing:.04em;text-transform:uppercase}
 .d-hub-sub{font-size:10px;color:var(--text-muted)}
-
-@keyframes ticker-fade{
-  0%,100%{opacity:0;transform:translateY(6px)}
-  15%,85%{opacity:1;transform:none}
-}
-.d-ticker{
-  font-size:10px;color:var(--green-l);
-  animation:ticker-fade 3s ease-in-out infinite;
-  text-align:center
-}
-
+@keyframes ticker-fade{0%,100%{opacity:0;transform:translateY(6px)}15%,85%{opacity:1;transform:none}}
+.d-ticker{font-size:10px;color:var(--secondary);animation:ticker-fade 3s ease-in-out infinite;text-align:center}
 @media(max-width:900px){
-  .hero-grid{grid-template-columns:1fr;gap:48px}
-  .hero-sub{max-width:100%}
+  .hero-grid{grid-template-columns:1fr;gap:44px}
+  .hero-sub,.hero-sub2{max-width:100%}
   .diagram{flex-direction:column;gap:12px}
   .d-path{width:40px;height:60px;flex-direction:column}
-  .d-path-line{width:1px;height:100%;background:linear-gradient(180deg,var(--green-border2),transparent);top:0;left:50%;transform:translateX(-50%)}
-  .d-packet{
-    left:50%;transform:translate(-50%,0);top:0;
-    animation:packet-move-v 2.2s ease-in-out infinite
-  }
+  .d-path-line{width:1px;height:100%;background:linear-gradient(180deg,var(--leaf-mid),transparent);top:0;left:50%;transform:translateX(-50%)}
+  .d-packet{left:50%;transform:translate(-50%,0);top:0;animation:packet-move-v 2.2s ease-in-out infinite}
   .d-packet:nth-child(2){animation-delay:.7s}
   .d-packet:nth-child(3){animation-delay:1.4s}
-  @keyframes packet-move-v{
-    0%{top:0;opacity:0}5%{opacity:1}90%{opacity:1}100%{top:calc(100% - 8px);opacity:0}
-  }
+  @keyframes packet-move-v{0%{top:0;opacity:0}5%{opacity:1}90%{opacity:1}100%{top:calc(100% - 8px);opacity:0}}
   .d-arrow{right:auto;bottom:2px;top:auto;transform:rotate(90deg)}
 }
 
-/* ─── Proof Bar ─────────────────────────────────────────────── */
-.proof-bar{
-  border-top:1px solid var(--green-border);
-  border-bottom:1px solid var(--green-border);
-  padding:28px 0;
-  background:var(--bg-card)
-}
-.proof-inner{
-  display:flex;flex-wrap:wrap;
-  align-items:center;justify-content:center;gap:12px 32px
-}
-.proof-label{
-  font-size:13px;color:var(--text-muted);font-weight:500;
-  flex-basis:100%;text-align:center;margin-bottom:4px
-}
-.proof-badge{
-  display:flex;align-items:center;gap:8px;
-  padding:10px 20px;border-radius:100px;
-  border:1px solid var(--green-border);background:var(--green-glow);
-  font-size:13px;font-weight:600;color:var(--text);
-  white-space:nowrap
-}
-.proof-badge svg{flex-shrink:0;color:var(--green-l)}
+/* ─── Trust bar ─────────────────────────────────────────────── */
+.proof-bar{border-top:1px solid var(--border);border-bottom:1px solid var(--border);padding:26px 0;background:var(--bg-card)}
+.proof-inner{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:12px 32px}
+.proof-label{font-size:13px;color:var(--text-muted);font-weight:500;flex-basis:100%;text-align:center;margin-bottom:4px}
+.proof-badge{display:flex;align-items:center;gap:8px;padding:10px 18px;border-radius:100px;border:1px solid var(--border);background:var(--bg-warm);font-size:13px;font-weight:600;color:var(--text);white-space:nowrap}
+.proof-badge svg{flex-shrink:0;color:var(--secondary)}
 
 /* ─── Section Headings ──────────────────────────────────────── */
-section{padding:96px 0}
-.section-heading{
-  text-align:center;margin-bottom:56px
-}
-.section-heading h2{
-  font-size:clamp(28px,4vw,46px);font-weight:900;
-  letter-spacing:-.025em;line-height:1.12;margin-bottom:14px
-}
-.section-heading p{font-size:18px;color:var(--text-muted);max-width:600px;margin:0 auto}
+section{padding:92px 0;position:relative}
+.section-heading{text-align:center;margin-bottom:52px;position:relative;z-index:1}
+.section-heading h2{font-size:clamp(27px,3.6vw,42px);font-weight:700;letter-spacing:-.02em;line-height:1.15;margin-bottom:14px;color:var(--primary)}
+.section-heading p{font-size:17px;color:var(--text-muted);max-width:600px;margin:0 auto}
 
-/* ─── Problem Section ───────────────────────────────────────── */
-.problem{background:var(--bg-card)}
-.problem-grid{
-  display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:24px
-}
-.problem-card{
-  padding:32px 28px;border-radius:var(--r);
-  border:1px solid rgba(220,50,50,.18);
-  background:rgba(220,50,50,.04);
-  display:flex;align-items:flex-start;gap:18px
-}
-.problem-icon{
-  width:44px;height:44px;border-radius:10px;
-  background:rgba(220,50,50,.1);
-  display:flex;align-items:center;justify-content:center;flex-shrink:0;
-  color:#f87171
-}
-.problem-card h3{font-size:16px;font-weight:700;margin-bottom:8px;color:var(--text)}
-.problem-card p{font-size:14px;color:var(--text-muted);line-height:1.6}
+/* ─── Trust & Safety cards ──────────────────────────────────── */
+.safety{background:var(--bg-card)}
+.safety-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:24px;position:relative;z-index:1}
+.safety-card{padding:32px 28px;border-radius:var(--r);border:1px solid var(--border);background:var(--bg-warm);box-shadow:var(--shadow)}
+.safety-icon{width:48px;height:48px;border-radius:12px;background:var(--leaf-light);border:1px solid var(--leaf-mid);display:flex;align-items:center;justify-content:center;color:var(--secondary);margin-bottom:18px}
+.safety-card h3{font-size:17px;font-weight:700;margin-bottom:8px;color:var(--text)}
+.safety-card p{font-size:14px;color:var(--text-muted);line-height:1.65}
+@media(max-width:768px){.safety-grid{grid-template-columns:1fr}}
 
 /* ─── Features Grid ─────────────────────────────────────────── */
-.features-grid{
-  display:grid;
-  grid-template-columns:repeat(3,1fr);
-  gap:20px
-}
-.feature-card{
-  padding:28px 24px;border-radius:var(--r);
-  border:1px solid var(--green-border);
-  background:var(--bg-card);
-  transition:border-color .2s,transform .2s,background .2s
-}
-.feature-card:hover{
-  border-color:var(--green-border2);
-  background:var(--bg-card3);
-  transform:translateY(-3px)
-}
-.feature-icon{
-  width:46px;height:46px;border-radius:10px;
-  background:var(--green-glow);border:1px solid var(--green-border2);
-  display:flex;align-items:center;justify-content:center;
-  color:var(--green-l);margin-bottom:16px
-}
+.features-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:20px;position:relative;z-index:1}
+.feature-card{padding:26px 24px;border-radius:var(--r);border:1px solid var(--border);background:var(--bg-card);transition:border-color .2s,transform .2s,box-shadow .2s;box-shadow:var(--shadow)}
+.feature-card:hover{border-color:var(--leaf-mid);transform:translateY(-3px);box-shadow:var(--shadow-lg)}
+.feature-icon{width:44px;height:44px;border-radius:10px;background:var(--leaf-light);border:1px solid var(--leaf-mid);display:flex;align-items:center;justify-content:center;color:var(--secondary);margin-bottom:16px}
 .feature-card h3{font-size:15px;font-weight:700;margin-bottom:6px;color:var(--text)}
 .feature-card p{font-size:13px;color:var(--text-muted);line-height:1.6}
 @media(max-width:768px){.features-grid{grid-template-columns:1fr 1fr}}
 @media(max-width:480px){.features-grid{grid-template-columns:1fr}}
 
+/* ─── Secondary capability strip (bulk CSV toolkit) ──────────── */
+.also-included{margin-top:40px;padding:28px 30px;border-radius:var(--r);background:var(--leaf-light);border:1px solid var(--leaf-mid);position:relative;z-index:1}
+.also-included h3{font-size:14px;font-weight:700;color:var(--secondary);text-transform:uppercase;letter-spacing:.04em;margin-bottom:14px}
+.also-list{display:flex;flex-wrap:wrap;gap:10px 28px}
+.also-item{display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text)}
+.also-item svg{color:var(--secondary);flex-shrink:0}
+
 /* ─── How It Works ──────────────────────────────────────────── */
 .how{background:var(--bg-card)}
-.steps-grid{
-  display:grid;grid-template-columns:repeat(3,1fr);gap:24px;
-  position:relative
-}
-.steps-grid::before{
-  content:'';
-  position:absolute;top:38px;left:calc(33.33% + 24px);right:calc(33.33% + 24px);
-  height:1px;background:linear-gradient(90deg,var(--green-border2),var(--green-border2));
-  z-index:0
-}
-.step-card{
-  padding:36px 28px;border-radius:var(--r);
-  border:1px solid var(--green-border);background:var(--bg-card3);
-  text-align:center;position:relative;z-index:1
-}
-.step-number{
-  width:56px;height:56px;border-radius:50%;
-  background:var(--grad);
-  display:flex;align-items:center;justify-content:center;
-  font-size:22px;font-weight:900;color:#081008;
-  margin:0 auto 20px
-}
-.step-card h3{font-size:17px;font-weight:700;margin-bottom:10px;color:var(--text)}
+.steps-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:24px;position:relative;z-index:1}
+.steps-grid::before{content:'';position:absolute;top:38px;left:calc(33.33% + 24px);right:calc(33.33% + 24px);height:1px;background:var(--leaf-mid);z-index:0}
+.step-card{padding:34px 26px;border-radius:var(--r);border:1px solid var(--border);background:var(--bg-warm);text-align:center;position:relative;z-index:1}
+.step-number{width:52px;height:52px;border-radius:50%;background:var(--grad);display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:800;color:#fff;margin:0 auto 18px}
+.step-card h3{font-size:16px;font-weight:700;margin-bottom:8px;color:var(--text)}
 .step-card p{font-size:14px;color:var(--text-muted);line-height:1.65}
-@media(max-width:768px){
-  .steps-grid{grid-template-columns:1fr;gap:20px}
-  .steps-grid::before{display:none}
-}
+@media(max-width:768px){.steps-grid{grid-template-columns:1fr;gap:20px}.steps-grid::before{display:none}}
+
+/* ─── Pricing ───────────────────────────────────────────────── */
+.pricing-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:24px;align-items:stretch;position:relative;z-index:1}
+.price-card{display:flex;flex-direction:column;padding:32px 28px;border-radius:var(--rl);border:1px solid var(--border);background:var(--bg-card);box-shadow:var(--shadow)}
+.price-card.featured{border:2px solid var(--secondary);box-shadow:var(--shadow-lg);position:relative}
+.price-badge{position:absolute;top:-13px;left:50%;transform:translateX(-50%);background:var(--grad);color:#fff;font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;padding:5px 14px;border-radius:100px}
+.price-name{font-size:16px;font-weight:700;color:var(--text);margin-bottom:4px}
+.price-amount{font-size:38px;font-weight:800;color:var(--primary);letter-spacing:-.02em}
+.price-amount span{font-size:14px;font-weight:500;color:var(--text-dim)}
+.price-tagline{font-size:13px;color:var(--secondary);font-weight:600;margin:8px 0 4px}
+.price-desc{font-size:13px;color:var(--text-muted);margin-bottom:22px;min-height:36px}
+.price-features{list-style:none;display:flex;flex-direction:column;gap:11px;margin-bottom:26px;flex:1}
+.price-features li{display:flex;align-items:flex-start;gap:9px;font-size:13.5px;color:var(--text)}
+.price-features svg{color:var(--secondary);flex-shrink:0;margin-top:2px}
+.price-cta{text-align:center;padding:12px 20px;border-radius:10px;font-size:14px;font-weight:700;border:1px solid var(--border);background:var(--bg-warm);color:var(--primary);transition:background .15s,border-color .15s}
+.price-card.featured .price-cta{background:var(--grad);color:#fff;border:none}
+.price-cta:hover{filter:brightness(1.05)}
+.pricing-note{text-align:center;margin-top:32px;font-size:13px;color:var(--text-dim);position:relative;z-index:1}
+@media(max-width:900px){.pricing-grid{grid-template-columns:1fr;max-width:400px;margin:0 auto}}
 
 /* ─── Comparison Table ──────────────────────────────────────── */
-.comparison-wrap{overflow-x:auto;border-radius:var(--r);border:1px solid var(--green-border)}
-table{
-  width:100%;border-collapse:collapse;
-  font-size:14px;min-width:480px
-}
-thead tr{background:var(--bg-card)}
-th{
-  padding:16px 20px;text-align:left;
-  font-size:13px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;
-  color:var(--text-muted);border-bottom:1px solid var(--green-border)
-}
-th.col-importzo{
-  color:var(--green-l);
-  background:rgba(114,224,64,.07)
-}
-td{
-  padding:16px 20px;border-bottom:1px solid var(--green-border);
-  color:var(--text);vertical-align:middle
-}
+.comparison-wrap{overflow-x:auto;border-radius:var(--r);border:1px solid var(--border);position:relative;z-index:1;box-shadow:var(--shadow)}
+table{width:100%;border-collapse:collapse;font-size:14px;min-width:480px;background:var(--bg-card)}
+thead tr{background:var(--bg-warm)}
+th{padding:16px 20px;text-align:left;font-size:13px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--text-muted);border-bottom:1px solid var(--border)}
+th.col-importzo{color:var(--secondary);background:var(--leaf-light)}
+td{padding:16px 20px;border-bottom:1px solid var(--border);color:var(--text);vertical-align:middle}
 tr:last-child td{border-bottom:none}
 td.col-feature{font-weight:500;color:var(--text-muted)}
-td.col-importzo{
-  background:rgba(114,224,64,.05);
-  color:var(--green-l);font-weight:600;text-align:center
-}
-td.col-competitor{color:#f87171;text-align:center}
-td.col-feature{color:var(--text-muted)}
-tr:hover td{background:rgba(255,255,255,.02)}
-tr:hover td.col-importzo{background:rgba(114,224,64,.08)}
-.check{color:var(--green-l);font-size:16px}
-.cross{color:#f87171;font-size:16px}
+td.col-importzo{background:rgba(232,241,226,.5);color:var(--secondary);font-weight:600;text-align:center}
+td.col-competitor{color:#b5493f;text-align:center}
+tr:hover td{background:rgba(23,50,10,.02)}
+tr:hover td.col-importzo{background:var(--leaf-light)}
+.check{color:var(--secondary);font-size:15px}
+.cross{color:#b5493f;font-size:15px}
 .comp-header{margin-bottom:20px;text-align:center}
-.comp-highlight-label{
-  display:inline-flex;align-items:center;gap:6px;
-  margin-bottom:28px;
-  background:var(--green-glow);border:1px solid var(--green-border2);
-  padding:6px 16px;border-radius:100px;
-  font-size:12px;font-weight:700;color:var(--green-l);text-transform:uppercase;letter-spacing:.06em
-}
+.comp-highlight-label{display:inline-flex;align-items:center;gap:6px;margin-bottom:28px;background:var(--leaf-light);border:1px solid var(--leaf-mid);padding:6px 16px;border-radius:100px;font-size:12px;font-weight:700;color:var(--secondary);text-transform:uppercase;letter-spacing:.06em;position:relative;z-index:1}
 
 /* ─── FAQ ───────────────────────────────────────────────────── */
 .faq{background:var(--bg-card)}
-.faq-list{max-width:800px;margin:0 auto;display:flex;flex-direction:column;gap:12px}
-.faq-item{
-  border:1px solid var(--green-border);border-radius:var(--r);
-  background:var(--bg-card3);overflow:hidden;
-  transition:border-color .2s
-}
-.faq-item.open{border-color:var(--green-border2)}
-.faq-question{
-  width:100%;display:flex;justify-content:space-between;align-items:center;gap:16px;
-  padding:20px 24px;background:none;border:none;cursor:pointer;
-  text-align:left;color:var(--text);font-size:15px;font-weight:600;
-  transition:color .15s
-}
-.faq-question:hover{color:var(--green-l)}
-.faq-chevron{
-  flex-shrink:0;width:20px;height:20px;border-radius:50%;
-  background:var(--green-glow);border:1px solid var(--green-border);
-  display:flex;align-items:center;justify-content:center;
-  transition:transform .25s,background .2s;color:var(--green-l)
-}
-.faq-item.open .faq-chevron{transform:rotate(180deg);background:var(--green-border2)}
-.faq-answer{
-  max-height:0;overflow:hidden;
-  transition:max-height .35s ease,padding .35s ease
-}
+.faq-list{max-width:800px;margin:0 auto;display:flex;flex-direction:column;gap:12px;position:relative;z-index:1}
+.faq-item{border:1px solid var(--border);border-radius:var(--r);background:var(--bg-warm);overflow:hidden;transition:border-color .2s}
+.faq-item.open{border-color:var(--leaf-mid)}
+.faq-question{width:100%;display:flex;justify-content:space-between;align-items:center;gap:16px;padding:20px 24px;background:none;border:none;cursor:pointer;text-align:left;color:var(--text);font-size:15px;font-weight:600;transition:color .15s}
+.faq-question:hover{color:var(--secondary)}
+.faq-chevron{flex-shrink:0;width:20px;height:20px;border-radius:50%;background:var(--leaf-light);border:1px solid var(--leaf-mid);display:flex;align-items:center;justify-content:center;transition:transform .25s,background .2s;color:var(--secondary)}
+.faq-item.open .faq-chevron{transform:rotate(180deg);background:var(--leaf-mid)}
+.faq-answer{max-height:0;overflow:hidden;transition:max-height .35s ease}
 .faq-item.open .faq-answer{max-height:400px}
 .faq-answer-inner{padding:0 24px 20px;font-size:14px;color:var(--text-muted);line-height:1.75}
 
 /* ─── CTA Section ───────────────────────────────────────────── */
-.cta-section{
-  text-align:center;padding:100px 0;position:relative;overflow:hidden
-}
-.cta-section::before{
-  content:'';position:absolute;top:-300px;left:50%;transform:translateX(-50%);
-  width:800px;height:800px;border-radius:50%;
-  background:radial-gradient(circle,rgba(74,173,30,.12) 0%,transparent 65%);
-  pointer-events:none
-}
-.cta-box{
-  max-width:640px;margin:0 auto;position:relative;z-index:1
-}
-.cta-section h2{
-  font-size:clamp(28px,4vw,48px);font-weight:900;letter-spacing:-.03em;
-  line-height:1.1;margin-bottom:16px
-}
-.cta-section p{font-size:17px;color:var(--text-muted);margin-bottom:36px}
+.cta-section{text-align:center;padding:96px 0;position:relative;overflow:hidden}
+.cta-box{max-width:640px;margin:0 auto;position:relative;z-index:1}
+.cta-section h2{font-size:clamp(27px,3.6vw,42px);font-weight:700;letter-spacing:-.02em;line-height:1.15;margin-bottom:16px;color:var(--primary)}
+.cta-section p{font-size:16px;color:var(--text-muted);margin-bottom:34px}
 .cta-actions{display:flex;flex-wrap:wrap;gap:14px;justify-content:center}
 .cta-note{margin-top:20px;font-size:13px;color:var(--text-dim)}
 
 /* ─── Footer ────────────────────────────────────────────────── */
-footer{
-  border-top:1px solid var(--green-border);
-  padding:40px 0;background:var(--bg-card)
-}
-.footer-inner{
-  display:flex;flex-wrap:wrap;
-  align-items:center;justify-content:space-between;gap:20px
-}
-.footer-logo{display:flex;align-items:center;gap:10px}
+footer{border-top:1px solid var(--border);padding:40px 0;background:var(--bg-card)}
+.footer-inner{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:20px}
 .footer-links{display:flex;align-items:center;flex-wrap:wrap;gap:24px}
 .footer-links a{font-size:13px;color:var(--text-muted);transition:color .15s}
-.footer-links a:hover{color:var(--green-l)}
+.footer-links a:hover{color:var(--secondary)}
 .footer-copy{font-size:12px;color:var(--text-dim);width:100%;text-align:center;margin-top:8px}
 @media(max-width:600px){.footer-inner{flex-direction:column;text-align:center}.footer-links{justify-content:center}}
-
-/* ─── Shopify logo SVG color ────────────────────────────────── */
-.shopify-green{color:#96bf48}
 </style>
 </head>
 <body>
@@ -682,13 +524,13 @@ footer{
 <header id="site-header">
   <div class="container">
     <div class="header-inner">
-      <a href="/" class="logo" aria-label="Importzo home">
-        <img src="/logo.png" alt="Importzo" style="height:40px; filter: brightness(0) invert(1);">
+      <a href="/" aria-label="Importzo home">
+        <img src="/logo.png" alt="Importzo" style="height:36px;">
       </a>
       <nav aria-label="Main navigation">
         <a href="#features">Features</a>
+        <a href="#pricing">Pricing</a>
         <a href="#how-it-works">How it Works</a>
-        <a href="#compare">Compare</a>
         <a href="#faq">FAQ</a>
       </nav>
       <div class="header-cta">
@@ -703,9 +545,12 @@ footer{
 
 <!-- ════════ HERO ════════ -->
 <section class="hero" aria-labelledby="hero-heading">
+  <svg class="leaf-corner" style="top:60px;right:-40px;opacity:.5" width="220" height="220" viewBox="0 0 120 120" fill="none" aria-hidden="true">
+    <g transform="translate(30,2) rotate(18) scale(1.85)"><path class="leaf-shape" style="fill:var(--leaf-light)" d="M12 2C7 4 3 9 3 14c0 4.5 4 7 9 7s9-2.5 9-7C21 9 17 4 12 2z"/></g>
+    <g transform="translate(56,20) rotate(-8) scale(1.35)"><path class="leaf-shape" d="M12 2C7 4 3 9 3 14c0 4.5 4 7 9 7s9-2.5 9-7C21 9 17 4 12 2z"/></g>
+  </svg>
   <div class="container">
     <div class="hero-grid">
-      <!-- Left: copy -->
       <div>
         <div class="hero-eyebrow">
           <span class="tag">
@@ -714,38 +559,35 @@ footer{
           </span>
         </div>
         <h1 id="hero-heading">
-          Clone &amp; Transfer Your<br>
+          Clone &amp; Migrate Your<br>
           <span class="gradient-text">Shopify Store</span><br>
           in Minutes
         </h1>
         <p class="hero-sub">
-          Move products, themes, content, media, pages, blogs, menus, and metafields between Shopify stores — no CSV, no manual work, no headaches.
+          Launch a new region, spin up a staging copy, back up before a redesign, or hand a client a duplicate store — Importzo clones an entire Shopify store directly, no CSV required.
+        </p>
+        <p class="hero-sub2">
+          Also includes bulk CSV product/inventory import &amp; export, for when a spreadsheet is what you actually want.
         </p>
         <div class="hero-ctas">
           <a href="https://apps.shopify.com/importzo" class="btn-primary" target="_blank" rel="noopener">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
             Install Free on Shopify
           </a>
-          <a href="#demo" class="btn-secondary">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8" fill="currentColor"/></svg>
-            Watch How It Works
+          <a href="#pricing" class="btn-secondary">
+            See Pricing
           </a>
         </div>
         <p class="hero-note">
-          <span>✓</span> Free plan available &nbsp;·&nbsp; <span>✓</span> No credit card &nbsp;·&nbsp; <span>✓</span> 2-minute setup
+          <b>✓</b> Free plan available &nbsp;·&nbsp; <b>✓</b> No credit card &nbsp;·&nbsp; <b>✓</b> 2-minute setup
         </p>
       </div>
 
-      <!-- Right: animated diagram -->
       <div class="diagram-wrap fade-up" aria-hidden="true">
         <div class="diagram">
-          <!-- Source Store -->
           <div class="d-store">
             <div class="d-store-icon">
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color:var(--green-l)">
-                <path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/>
-                <polyline points="9 22 9 12 15 12 15 22"/>
-              </svg>
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
             </div>
             <div class="d-store-label">Source Store</div>
             <div class="d-store-tags">
@@ -754,8 +596,6 @@ footer{
               <div class="d-tag">Pages</div>
             </div>
           </div>
-
-          <!-- Path left -->
           <div class="d-path">
             <div class="d-path-line"></div>
             <div class="d-packet"></div>
@@ -763,19 +603,13 @@ footer{
             <div class="d-packet"></div>
             <span class="d-arrow">›</span>
           </div>
-
-          <!-- Hub -->
           <div class="d-hub">
             <div class="d-hub-icon">
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#081008" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/>
-              </svg>
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/></svg>
             </div>
             <div class="d-hub-label">Importzo</div>
             <div class="d-ticker" id="ticker">Transferring…</div>
           </div>
-
-          <!-- Path right -->
           <div class="d-path reverse">
             <div class="d-path-line"></div>
             <div class="d-packet"></div>
@@ -783,86 +617,75 @@ footer{
             <div class="d-packet"></div>
             <span class="d-arrow">›</span>
           </div>
-
-          <!-- Dest Store -->
           <div class="d-store">
             <div class="d-store-icon">
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color:var(--green-l)">
-                <path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/>
-                <polyline points="9 22 9 12 15 12 15 22"/>
-              </svg>
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
             </div>
             <div class="d-store-label">New Store</div>
             <div class="d-store-tags">
-              <div class="d-tag" style="color:var(--green-l);background:rgba(114,224,64,.12)">✓ Copied!</div>
+              <div class="d-tag" style="color:var(--secondary);background:var(--leaf-mid)">✓ Copied!</div>
             </div>
           </div>
         </div>
       </div>
-    </div><!-- /hero-grid -->
+    </div>
   </div>
 </section>
 
-<!-- ════════ SOCIAL PROOF BAR ════════ -->
-<div class="proof-bar" role="complementary" aria-label="Social proof">
+<!-- ════════ TRUST BAR ════════ -->
+<div class="proof-bar" role="complementary" aria-label="Trust and safety">
   <div class="container">
     <div class="proof-inner">
-      <p class="proof-label">Trusted by Shopify merchants worldwide</p>
+      <p class="proof-label">Built for merchants moving real store data</p>
       <div class="proof-badge">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="color:#96bf48"><path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/></svg>
-        Shopify App Store
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        Automatic Pre-Transfer Backup
       </div>
       <div class="proof-badge">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="color:var(--green-l)"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+        Dry-Run Preview
+      </div>
+      <div class="proof-badge">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 109-9 9.75 9.75 0 00-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+        One-Click Rollback
+      </div>
+      <div class="proof-badge">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
         Free Plan Available
-      </div>
-      <div class="proof-badge">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="color:var(--green-l)"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 9h6M9 13h6M9 17h4"/></svg>
-        No CSV Required
-      </div>
-      <div class="proof-badge">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="color:var(--green-l)"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-        2-Minute Setup
       </div>
     </div>
   </div>
 </div>
 
-<!-- ════════ PROBLEM ════════ -->
-<section class="problem" aria-labelledby="problem-heading">
+<!-- ════════ WHY IMPORTZO / TRUST & SAFETY ════════ -->
+<section id="safety" class="safety" aria-labelledby="safety-heading">
   <div class="container">
     <div class="section-heading fade-up">
-      <div class="section-label"><span class="tag">The Problem</span></div>
-      <h2 id="problem-heading">Store Migration Shouldn't Take Days</h2>
-      <p>The old way of moving Shopify stores is broken. Here's what merchants deal with before they find Importzo.</p>
+      <div class="section-label"><span class="tag">Why Importzo</span></div>
+      <h2 id="safety-heading">Migrating a Live Store Is Nerve-Wracking.<br><span class="gradient-text">We Built for That.</span></h2>
+      <p>Moving real product data, inventory, and content between stores means one mistake can be expensive. Every transfer goes through three layers of safety before, during, and after.</p>
     </div>
-    <div class="problem-grid">
-      <div class="problem-card fade-up">
-        <div class="problem-icon" aria-hidden="true">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
+    <div class="safety-grid">
+      <div class="safety-card fade-up">
+        <div class="safety-icon" aria-hidden="true">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
         </div>
-        <div>
-          <h3>CSV Exports Break Everything</h3>
-          <p>Manual CSV exports scramble formatting, lose images, drop themes entirely, and can't transfer navigation menus, blogs, or metafields at all.</p>
-        </div>
+        <h3>Automatic Backup, Before Anything Writes</h3>
+        <p>Every transfer snapshots your destination store first — before a single record is touched. If something looks wrong afterward, restore it with one click.</p>
       </div>
-      <div class="problem-card fade-up">
-        <div class="problem-icon" aria-hidden="true">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      <div class="safety-card fade-up">
+        <div class="safety-icon" aria-hidden="true">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
         </div>
-        <div>
-          <h3>Hiring Developers Costs Thousands</h3>
-          <p>Agencies charge $2,000–$10,000 for store migrations that Importzo handles automatically in minutes — with zero risk of human error.</p>
-        </div>
+        <h3>Dry-Run Preview</h3>
+        <p>See exactly what would be created, updated, or skipped before you commit — the full result set, with nothing actually written yet. Run it as many times as you like.</p>
       </div>
-      <div class="problem-card fade-up">
-        <div class="problem-icon" aria-hidden="true">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+      <div class="safety-card fade-up">
+        <div class="safety-icon" aria-hidden="true">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 109-9 9.75 9.75 0 00-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
         </div>
-        <div>
-          <h3>Other Tools Leave Gaps</h3>
-          <p>Tools like Matrixify handle products via CSV, but miss themes, blogs, navigation menus, metafields, and media files — so you still end up doing half the work manually.</p>
-        </div>
+        <h3>Rollback Within a Time Window</h3>
+        <p>Changed your mind after a real transfer completed? Undo it within the rollback window — no need to manually track down and revert every change yourself.</p>
       </div>
     </div>
   </div>
@@ -870,86 +693,71 @@ footer{
 
 <!-- ════════ FEATURES ════════ -->
 <section id="features" aria-labelledby="features-heading">
+  <svg class="leaf-corner" style="bottom:-30px;left:-50px;opacity:.35" width="200" height="200" viewBox="0 0 120 120" fill="none" aria-hidden="true">
+    <g transform="translate(30,2) rotate(-30) scale(1.6)"><path class="leaf-shape" d="M12 2C7 4 3 9 3 14c0 4.5 4 7 9 7s9-2.5 9-7C21 9 17 4 12 2z"/></g>
+  </svg>
   <div class="container">
     <div class="section-heading fade-up">
       <div class="section-label"><span class="tag">What Transfers</span></div>
-      <h2 id="features-heading">Everything Transfers.<br><span class="gradient-text">Nothing Gets Left Behind.</span></h2>
+      <h2 id="features-heading">Everything Clones.<br><span class="gradient-text">Nothing Gets Left Behind.</span></h2>
       <p>Importzo handles every piece of your Shopify store — not just products.</p>
     </div>
     <div class="features-grid">
-
       <div class="feature-card fade-up">
-        <div class="feature-icon" aria-hidden="true">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
-        </div>
+        <div class="feature-icon" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg></div>
         <h3>Products &amp; Variants</h3>
         <p>All SKUs, prices, compare-at prices, images, options, tags, and product types — fully intact.</p>
       </div>
-
       <div class="feature-card fade-up">
-        <div class="feature-icon" aria-hidden="true">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
-        </div>
+        <div class="feature-icon" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg></div>
         <h3>Themes &amp; Assets</h3>
         <p>Complete theme with every template file, asset, and customization — copied directly, no downloads needed.</p>
       </div>
-
       <div class="feature-card fade-up">
-        <div class="feature-icon" aria-hidden="true">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
-        </div>
+        <div class="feature-icon" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg></div>
         <h3>Pages &amp; Blogs</h3>
         <p>All online store pages, blog channels, and articles with full content, SEO settings, and status.</p>
       </div>
-
       <div class="feature-card fade-up">
-        <div class="feature-icon" aria-hidden="true">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
-        </div>
+        <div class="feature-icon" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg></div>
         <h3>Navigation Menus</h3>
         <p>Header, footer, and all custom menus with every link — including nested items and external URLs.</p>
       </div>
-
       <div class="feature-card fade-up">
-        <div class="feature-icon" aria-hidden="true">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 010 14.14M4.93 4.93a10 10 0 000 14.14"/></svg>
-        </div>
+        <div class="feature-icon" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 010 14.14M4.93 4.93a10 10 0 000 14.14"/></svg></div>
         <h3>Metafields</h3>
         <p>Custom data and metafield definitions for products, collections, pages, and other resources.</p>
       </div>
-
       <div class="feature-card fade-up">
-        <div class="feature-icon" aria-hidden="true">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
-        </div>
+        <div class="feature-icon" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg></div>
         <h3>Collections</h3>
         <p>Smart and manual collections with all rules, sort orders, and product assignments.</p>
       </div>
-
       <div class="feature-card fade-up">
-        <div class="feature-icon" aria-hidden="true">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
-        </div>
+        <div class="feature-icon" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg></div>
         <h3>Media &amp; Files</h3>
         <p>All uploaded images, videos, and documents in your Shopify Files library.</p>
       </div>
-
       <div class="feature-card fade-up">
-        <div class="feature-icon" aria-hidden="true">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
-        </div>
+        <div class="feature-icon" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg></div>
         <h3>Customers</h3>
         <p>Customer names, email addresses, phone numbers, and order history from your source store.</p>
       </div>
-
       <div class="feature-card fade-up">
-        <div class="feature-icon" aria-hidden="true">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17"/><circle cx="16" cy="19" r="1"/><circle cx="9" cy="19" r="1"/></svg>
-        </div>
+        <div class="feature-icon" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17"/><circle cx="16" cy="19" r="1"/><circle cx="9" cy="19" r="1"/></svg></div>
         <h3>Inventory</h3>
         <p>Stock quantities by location — synced accurately to the destination store's inventory levels.</p>
       </div>
+    </div>
 
+    <div class="also-included fade-up">
+      <h3>Also included — bulk CSV toolkit</h3>
+      <div class="also-list">
+        <span class="also-item"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Bulk product &amp; inventory CSV import/export</span>
+        <span class="also-item"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Saved field-mapping templates</span>
+        <span class="also-item"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>AI-assisted SEO cleanup (bring your own key)</span>
+        <span class="also-item"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Scheduled recurring sync</span>
+      </div>
     </div>
   </div>
 </section>
@@ -975,10 +783,66 @@ footer{
       </div>
       <div class="step-card fade-up">
         <div class="step-number" aria-hidden="true">3</div>
-        <h3>Select &amp; Start Transfer</h3>
-        <p>Choose which modules to transfer — products, themes, pages, menus, or everything. Hit Start and Importzo handles the rest automatically.</p>
+        <h3>Preview, Then Transfer</h3>
+        <p>Choose which modules to transfer, run a dry-run to see exactly what would happen, then hit Start. Importzo handles the rest automatically.</p>
       </div>
     </div>
+  </div>
+</section>
+
+<!-- ════════ PRICING ════════ -->
+<section id="pricing" aria-labelledby="pricing-heading">
+  <svg class="leaf-corner" style="top:0;right:-40px;opacity:.3" width="180" height="180" viewBox="0 0 120 120" fill="none" aria-hidden="true">
+    <g transform="translate(30,2) rotate(18) scale(1.5)"><path class="leaf-shape" d="M12 2C7 4 3 9 3 14c0 4.5 4 7 9 7s9-2.5 9-7C21 9 17 4 12 2z"/></g>
+  </svg>
+  <div class="container">
+    <div class="section-heading fade-up">
+      <div class="section-label"><span class="tag">Pricing</span></div>
+      <h2 id="pricing-heading">Simple Plans That<br><span class="gradient-text">Scale With You</span></h2>
+      <p>Start free. Upgrade only when you need unlimited volume or recurring sync.</p>
+    </div>
+    <div class="pricing-grid">
+      <div class="price-card fade-up">
+        <p class="price-name">Free</p>
+        <p class="price-amount">$0<span>/mo</span></p>
+        <p class="price-tagline">1 store, 250 records/month</p>
+        <p class="price-desc">For trying Importzo out on a single store.</p>
+        <ul class="price-features">
+          <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Store cloning &amp; migration</li>
+          <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Bulk CSV import/export</li>
+          <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Dry-run preview &amp; backup</li>
+        </ul>
+        <a href="https://apps.shopify.com/importzo" class="price-cta" target="_blank" rel="noopener">Install Free</a>
+      </div>
+
+      <div class="price-card featured fade-up">
+        <span class="price-badge">Most Popular</span>
+        <p class="price-name">Pro</p>
+        <p class="price-amount">$15<span>/mo</span></p>
+        <p class="price-tagline">Unlimited records + scheduled sync</p>
+        <p class="price-desc">For growing stores that need unlimited volume and recurring sync.</p>
+        <ul class="price-features">
+          <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Everything in Free, unlimited</li>
+          <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Scheduled recurring sync</li>
+          <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>7-day free trial</li>
+        </ul>
+        <a href="https://apps.shopify.com/importzo" class="price-cta" target="_blank" rel="noopener">Start Free Trial</a>
+      </div>
+
+      <div class="price-card fade-up">
+        <p class="price-name">Agency</p>
+        <p class="price-amount">$10<span>/mo per store</span></p>
+        <p class="price-tagline">Everything in Pro, discounted</p>
+        <p class="price-desc">Unlocks once the same merchant has 3+ stores running Importzo.</p>
+        <ul class="price-features">
+          <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Everything in Pro</li>
+          <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Discounted per-store pricing</li>
+          <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Built for multi-store portfolios</li>
+        </ul>
+        <a href="https://apps.shopify.com/importzo" class="price-cta" target="_blank" rel="noopener">Install Free</a>
+      </div>
+    </div>
+    <p class="pricing-note">No credit card required for Free. Prices in USD, billed monthly through Shopify.</p>
   </div>
 </section>
 
@@ -999,53 +863,19 @@ footer{
         <thead>
           <tr>
             <th class="col-feature">Feature</th>
-            <th class="col-importzo">
-              <span>⚡ Importzo</span>
-            </th>
+            <th class="col-importzo"><span>⚡ Importzo</span></th>
             <th>Matrixify</th>
           </tr>
         </thead>
         <tbody>
-          <tr>
-            <td class="col-feature">Direct store-to-store transfer</td>
-            <td class="col-importzo"><span class="check">✅ Yes</span></td>
-            <td class="col-competitor"><span class="cross">❌ CSV only</span></td>
-          </tr>
-          <tr>
-            <td class="col-feature">Theme cloning</td>
-            <td class="col-importzo"><span class="check">✅ Yes</span></td>
-            <td class="col-competitor"><span class="cross">❌ Not supported</span></td>
-          </tr>
-          <tr>
-            <td class="col-feature">No CSV required</td>
-            <td class="col-importzo"><span class="check">✅ Yes</span></td>
-            <td class="col-competitor"><span class="cross">❌ CSV mandatory</span></td>
-          </tr>
-          <tr>
-            <td class="col-feature">Navigation menus</td>
-            <td class="col-importzo"><span class="check">✅ Yes</span></td>
-            <td class="col-competitor"><span class="cross">❌ Not supported</span></td>
-          </tr>
-          <tr>
-            <td class="col-feature">Free plan</td>
-            <td class="col-importzo"><span class="check">✅ Yes</span></td>
-            <td class="col-competitor"><span class="cross">❌ Paid only</span></td>
-          </tr>
-          <tr>
-            <td class="col-feature">Setup time</td>
-            <td class="col-importzo"><span class="check">2 minutes</span></td>
-            <td class="col-competitor" style="color:var(--text-muted)">Hours</td>
-          </tr>
-          <tr>
-            <td class="col-feature">Learning curve</td>
-            <td class="col-importzo"><span class="check">None</span></td>
-            <td class="col-competitor" style="color:var(--text-muted)">Steep (Excel/CSV)</td>
-          </tr>
-          <tr>
-            <td class="col-feature">Media &amp; files transfer</td>
-            <td class="col-importzo"><span class="check">✅ Full</span></td>
-            <td class="col-competitor"><span class="cross">⚠️ Limited</span></td>
-          </tr>
+          <tr><td class="col-feature">Direct store-to-store transfer</td><td class="col-importzo"><span class="check">✅ Yes</span></td><td class="col-competitor"><span class="cross">❌ CSV only</span></td></tr>
+          <tr><td class="col-feature">Theme cloning</td><td class="col-importzo"><span class="check">✅ Yes</span></td><td class="col-competitor"><span class="cross">❌ Not supported</span></td></tr>
+          <tr><td class="col-feature">Pre-transfer backup + rollback</td><td class="col-importzo"><span class="check">✅ Yes</span></td><td class="col-competitor"><span class="cross">❌ Not supported</span></td></tr>
+          <tr><td class="col-feature">Navigation menus</td><td class="col-importzo"><span class="check">✅ Yes</span></td><td class="col-competitor"><span class="cross">❌ Not supported</span></td></tr>
+          <tr><td class="col-feature">Free plan</td><td class="col-importzo"><span class="check">✅ Yes</span></td><td class="col-competitor"><span class="cross">❌ Paid only</span></td></tr>
+          <tr><td class="col-feature">Setup time</td><td class="col-importzo"><span class="check">2 minutes</span></td><td class="col-competitor" style="color:var(--text-muted)">Hours</td></tr>
+          <tr><td class="col-feature">Learning curve</td><td class="col-importzo"><span class="check">None</span></td><td class="col-competitor" style="color:var(--text-muted)">Steep (Excel/CSV)</td></tr>
+          <tr><td class="col-feature">Media &amp; files transfer</td><td class="col-importzo"><span class="check">✅ Full</span></td><td class="col-competitor"><span class="cross">⚠️ Limited</span></td></tr>
         </tbody>
       </table>
     </div>
@@ -1065,9 +895,7 @@ footer{
       <div class="faq-item" role="listitem">
         <button class="faq-question" aria-expanded="false" aria-controls="faq-1">
           How do I transfer my Shopify store to a new store?
-          <span class="faq-chevron" aria-hidden="true">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-          </span>
+          <span class="faq-chevron" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
         </button>
         <div class="faq-answer" id="faq-1" role="region">
           <div class="faq-answer-inner">Install Importzo on both the source and destination stores. On the source store, go to Transfer Store and generate a one-time session code. Enter that code on the destination store to pair them. Then choose what to transfer — products, themes, pages, menus, or everything — and click Start. All data is copied automatically with no CSV files or manual steps.</div>
@@ -1077,9 +905,7 @@ footer{
       <div class="faq-item" role="listitem">
         <button class="faq-question" aria-expanded="false" aria-controls="faq-2">
           Can I clone a Shopify store without losing data?
-          <span class="faq-chevron" aria-hidden="true">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-          </span>
+          <span class="faq-chevron" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
         </button>
         <div class="faq-answer" id="faq-2" role="region">
           <div class="faq-answer-inner">Yes. Importzo performs a complete store clone using the Shopify Admin API directly — no CSV reformatting means no data loss. Products, variants, images, themes, pages, blog posts, navigation menus, metafields, collections, media files, and inventory all transfer intact.</div>
@@ -1089,9 +915,7 @@ footer{
       <div class="faq-item" role="listitem">
         <button class="faq-question" aria-expanded="false" aria-controls="faq-3">
           Does Importzo transfer themes between Shopify stores?
-          <span class="faq-chevron" aria-hidden="true">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-          </span>
+          <span class="faq-chevron" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
         </button>
         <div class="faq-answer" id="faq-3" role="region">
           <div class="faq-answer-inner">Yes — and this is one of Importzo's biggest advantages over CSV-based tools. Importzo transfers complete Shopify themes including all Liquid templates, assets, JSON configuration, and customizations. The theme is recreated in the destination store automatically. No manual downloads, uploads, or theme editor work needed.</div>
@@ -1101,21 +925,17 @@ footer{
       <div class="faq-item" role="listitem">
         <button class="faq-question" aria-expanded="false" aria-controls="faq-4">
           Is there a free way to migrate a Shopify store?
-          <span class="faq-chevron" aria-hidden="true">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-          </span>
+          <span class="faq-chevron" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
         </button>
         <div class="faq-answer" id="faq-4" role="region">
-          <div class="faq-answer-inner">Yes. Importzo has a free plan with no credit card required. Install it from the Shopify App Store and you can start migrating immediately. The free plan covers core data transfer including products, collections, and store data.</div>
+          <div class="faq-answer-inner">Yes. Importzo's Free plan covers 1 store and 250 records a month with no credit card required. Install it from the Shopify App Store and start migrating immediately.</div>
         </div>
       </div>
 
       <div class="faq-item" role="listitem">
         <button class="faq-question" aria-expanded="false" aria-controls="faq-5">
           How long does a Shopify store migration take with Importzo?
-          <span class="faq-chevron" aria-hidden="true">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-          </span>
+          <span class="faq-chevron" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
         </button>
         <div class="faq-answer" id="faq-5" role="region">
           <div class="faq-answer-inner">Setup takes about 2 minutes. Transfer time depends on store size: a typical store with a few thousand products completes in under 30 minutes. Large stores with 50,000+ products may take a few hours due to Shopify API rate limits. Importzo runs in the background so you don't need to keep the browser open.</div>
@@ -1125,21 +945,17 @@ footer{
       <div class="faq-item" role="listitem">
         <button class="faq-question" aria-expanded="false" aria-controls="faq-6">
           Does Importzo work without CSV files?
-          <span class="faq-chevron" aria-hidden="true">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-          </span>
+          <span class="faq-chevron" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
         </button>
         <div class="faq-answer" id="faq-6" role="region">
-          <div class="faq-answer-inner">Yes — Importzo works entirely without CSV files. It uses the Shopify Admin API to transfer data directly between stores in real time. This is why it can transfer themes, media files, and navigation menus, which are impossible to move via CSV.</div>
+          <div class="faq-answer-inner">For store-to-store cloning, yes — Importzo connects directly to the Shopify Admin API of both stores and transfers data in real time, no exports or imports needed. Importzo also supports traditional CSV bulk import/export separately, for merchants who specifically want to work from a spreadsheet.</div>
         </div>
       </div>
 
       <div class="faq-item" role="listitem">
         <button class="faq-question" aria-expanded="false" aria-controls="faq-7">
           Can I transfer metafields between Shopify stores?
-          <span class="faq-chevron" aria-hidden="true">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-          </span>
+          <span class="faq-chevron" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
         </button>
         <div class="faq-answer" id="faq-7" role="region">
           <div class="faq-answer-inner">Yes. Importzo transfers metafields and metafield definitions for products, collections, pages, and other resources. Your custom data model — including metaobjects and their values — is preserved completely in the destination store.</div>
@@ -1149,9 +965,7 @@ footer{
       <div class="faq-item" role="listitem">
         <button class="faq-question" aria-expanded="false" aria-controls="faq-8">
           What is the difference between Importzo and Matrixify?
-          <span class="faq-chevron" aria-hidden="true">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-          </span>
+          <span class="faq-chevron" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
         </button>
         <div class="faq-answer" id="faq-8" role="region">
           <div class="faq-answer-inner">Matrixify transfers data via Excel/CSV files — you export from one store, edit the spreadsheet, and import into another. It can't transfer themes, navigation menus, or media files. Importzo connects stores directly via API with no CSV step, handles themes and menus automatically, requires no learning curve, and has a free plan. Setup takes 2 minutes vs hours with Matrixify.</div>
@@ -1160,25 +974,21 @@ footer{
 
       <div class="faq-item" role="listitem">
         <button class="faq-question" aria-expanded="false" aria-controls="faq-9">
-          How do I copy products from one Shopify store to another?
-          <span class="faq-chevron" aria-hidden="true">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-          </span>
+          Is it safe to run a store migration with Importzo?
+          <span class="faq-chevron" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
         </button>
         <div class="faq-answer" id="faq-9" role="region">
-          <div class="faq-answer-inner">Install Importzo on both stores. On the source store, go to Transfer Store and generate a session code. On the destination store, enter that code to connect. Choose "Products" as a transfer module and click Start. All variants, images, pricing, inventory levels, metafields, and product metadata are copied automatically.</div>
+          <div class="faq-answer-inner">Yes. Every transfer to a destination store takes an automatic backup first, with one-click restore if anything needs to be undone. You can also run a full dry-run preview that shows exactly what would change before anything is written, and roll back a completed transfer within a time window afterward.</div>
         </div>
       </div>
 
       <div class="faq-item" role="listitem">
         <button class="faq-question" aria-expanded="false" aria-controls="faq-10">
-          Does Importzo transfer blog posts and pages?
-          <span class="faq-chevron" aria-hidden="true">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-          </span>
+          What does Importzo cost?
+          <span class="faq-chevron" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
         </button>
         <div class="faq-answer" id="faq-10" role="region">
-          <div class="faq-answer-inner">Yes. Importzo transfers all blog channels, blog articles, and online store pages. This includes page content, SEO metadata (title, description), tags, publication status, and featured images — everything needed to recreate your content exactly in the new store.</div>
+          <div class="faq-answer-inner">Importzo has three plans: Free ($0, 1 store, 250 records/month), Pro ($15/month, unlimited records plus scheduled sync), and Agency ($10/month per store, everything in Pro at a discount, for merchants running 3 or more stores with Importzo installed). No credit card is required for the Free plan.</div>
         </div>
       </div>
 
@@ -1188,11 +998,13 @@ footer{
 
 <!-- ════════ CTA ════════ -->
 <section class="cta-section" aria-labelledby="cta-heading">
+  <svg class="leaf-corner" style="top:-20px;left:50%;transform:translateX(-50%);opacity:.4" width="260" height="140" viewBox="0 0 200 120" fill="none" aria-hidden="true">
+    <g transform="translate(20,10) rotate(10) scale(1.4)"><path class="leaf-shape" style="fill:var(--leaf-light)" d="M12 2C7 4 3 9 3 14c0 4.5 4 7 9 7s9-2.5 9-7C21 9 17 4 12 2z"/></g>
+    <g transform="translate(150,20) rotate(-20) scale(1.2)"><path class="leaf-shape" d="M12 2C7 4 3 9 3 14c0 4.5 4 7 9 7s9-2.5 9-7C21 9 17 4 12 2z"/></g>
+  </svg>
   <div class="container">
     <div class="cta-box fade-up">
-      <div class="section-label" style="margin-bottom:20px">
-        <span class="tag">Get Started Free</span>
-      </div>
+      <div class="section-label" style="margin-bottom:20px"><span class="tag">Get Started Free</span></div>
       <h2 id="cta-heading">Start Your Store Migration Today</h2>
       <p>Free plan available. No credit card required. Up and running in 2 minutes.</p>
       <div class="cta-actions">
@@ -1210,17 +1022,18 @@ footer{
 <footer>
   <div class="container">
     <div class="footer-inner">
-      <a href="/" class="footer-logo" aria-label="Importzo home">
-        <img src="/logo.png" alt="Importzo" height="32" style="display:block;">
+      <a href="/" aria-label="Importzo home">
+        <img src="/logo.png" alt="Importzo" height="30" style="display:block;">
       </a>
       <nav class="footer-links" aria-label="Footer navigation">
+        <a href="#pricing">Pricing</a>
         <a href="/privacy">Privacy Policy</a>
         <a href="mailto:support@dazzletech.co">Support</a>
         <a href="https://apps.shopify.com/importzo" target="_blank" rel="noopener">Shopify App Store</a>
         <a href="https://dazzletech.co" target="_blank" rel="noopener">dazzletech.co</a>
       </nav>
     </div>
-    <p class="footer-copy">© 2025 Dazzle Tech LLC · importzo.dazzletech.co · Built with ❤️ for Shopify merchants</p>
+    <p class="footer-copy">© 2026 Dazzle Tech LLC · importzo.dazzletech.co · Built with care for Shopify merchants</p>
   </div>
 </footer>
 
@@ -1228,14 +1041,12 @@ footer{
 (function () {
   'use strict';
 
-  // ── Sticky header background ──
   var header = document.getElementById('site-header');
   function onScroll() {
     header.classList.toggle('scrolled', window.scrollY > 40);
   }
   window.addEventListener('scroll', onScroll, { passive: true });
 
-  // ── Scroll fade-in ──
   var fadeEls = document.querySelectorAll('.fade-up');
   if ('IntersectionObserver' in window) {
     var io = new IntersectionObserver(function (entries) {
@@ -1251,17 +1062,14 @@ footer{
     fadeEls.forEach(function (el) { el.classList.add('visible'); });
   }
 
-  // ── FAQ accordion ──
   document.querySelectorAll('.faq-question').forEach(function (btn) {
     btn.addEventListener('click', function () {
       var item = btn.closest('.faq-item');
       var isOpen = item.classList.contains('open');
-      // Close all
       document.querySelectorAll('.faq-item.open').forEach(function (i) {
         i.classList.remove('open');
         i.querySelector('.faq-question').setAttribute('aria-expanded', 'false');
       });
-      // Toggle clicked
       if (!isOpen) {
         item.classList.add('open');
         btn.setAttribute('aria-expanded', 'true');
@@ -1269,7 +1077,6 @@ footer{
     });
   });
 
-  // ── Ticker label in diagram ──
   var ticker = document.getElementById('ticker');
   if (ticker) {
     var labels = ['Products…', 'Themes…', 'Pages…', 'Menus…', 'Metafields…', 'Collections…', 'Media…'];
