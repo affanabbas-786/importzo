@@ -179,6 +179,48 @@ describe("app.billing action — subscribe", () => {
     expect(currentBilling.request).not.toHaveBeenCalled();
   });
 
+  // Regression: the app was registered for Shopify Managed Pricing in the
+  // Partners Dashboard while this code drives plan selection through the
+  // Billing API, so appSubscriptionCreate was rejected outright. The
+  // BillingError escaped the action into the route's ErrorBoundary, which
+  // swapped the whole page for "We couldn't load Billing" — the merchant
+  // saw a dead page instead of Shopify's actual reason.
+  it("returns Shopify's reason as JSON when billing.request fails, instead of throwing into the ErrorBoundary", async () => {
+    const billingError = Object.assign(new Error("Error while billing the store"), {
+      errorData: [{ field: null, message: "Managed Pricing Apps cannot use the Billing API (to create charges)." }],
+    });
+    currentBilling = fakeBilling({ requestImpl: vi.fn(async () => { throw billingError; }) });
+
+    const request = mockActionRequest({ intent: "subscribe", plan: "pro" }, { url: `https://${SHOP}/app/billing` });
+    const response = await action({ request });
+
+    expect(response.status).toBe(502);
+    const body = await response.json();
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("Managed Pricing Apps cannot use the Billing API");
+  });
+
+  it("still lets billing.request's success redirect propagate", async () => {
+    currentBilling = fakeBilling({
+      requestImpl: vi.fn(async () => { throw new Response(null, { status: 302, headers: { Location: "/charge" } }); }),
+    });
+
+    const request = mockActionRequest({ intent: "subscribe", plan: "pro" }, { url: `https://${SHOP}/app/billing` });
+    await expect(action({ request })).rejects.toBeInstanceOf(Response);
+  });
+
+  it("falls back to the error's message when Shopify sends no errorData", async () => {
+    currentBilling = fakeBilling({
+      requestImpl: vi.fn(async () => { throw new Error("network unreachable"); }),
+    });
+
+    const request = mockActionRequest({ intent: "subscribe", plan: "pro" }, { url: `https://${SHOP}/app/billing` });
+    const response = await action({ request });
+
+    expect(response.status).toBe(502);
+    expect((await response.json()).error).toContain("network unreachable");
+  });
+
   it("rejects an unknown plan id", async () => {
     const request = mockActionRequest({ intent: "subscribe", plan: "enterprise" }, { url: `https://${SHOP}/app/billing` });
     const response = await action({ request });

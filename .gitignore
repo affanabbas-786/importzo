@@ -15,6 +15,9 @@ database.sqlite
 
 .env
 .env.*
+# ...but the local-dev template carries no secrets and must be committed, so a
+# dev machine has something to copy other than production's .env.
+!.env.development.example
 ecosystem.config.cjs
 production.sqlite
 prisma/production.sqlite

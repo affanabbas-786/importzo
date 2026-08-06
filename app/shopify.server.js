@@ -18,6 +18,36 @@ if (missingVars.length > 0) {
   console.error(`[importzo] FATAL: Missing required env vars: ${missingVars.join(", ")}. App will not function correctly.`);
 }
 
+// Guard against a production .env being used for a local dev run. This is the
+// billing safety net: app.billing.jsx's isTestCharge() keys off NODE_ENV alone,
+// so NODE_ENV=production on a dev machine means a "Subscribe" click asks
+// Shopify for a REAL charge instead of a test one. NODE_ENV is pinned to
+// development in shopify.web.toml's dev command, but a .env copied from the
+// server is exactly the mistake that would defeat that, so refuse to boot on
+// the one combination that can only mean the files got crossed: production
+// mode served from a dev tunnel or localhost.
+//
+// Only an app URL that is present AND parseable is judged: an absent or
+// malformed SHOPIFY_APP_URL is the missingVars case above, not this one, and
+// must not be turned into a boot failure by this check.
+const appUrlHost = (() => {
+  if (!process.env.SHOPIFY_APP_URL) return ""; // eslint-disable-line no-undef
+  try {
+    return new URL(process.env.SHOPIFY_APP_URL).hostname; // eslint-disable-line no-undef
+  } catch {
+    return "";
+  }
+})();
+const DEV_HOST_PATTERN = /(^localhost$|^127\.|\.trycloudflare\.com$|\.ngrok(-free)?\.(io|app|dev)$|\.loca\.lt$)/;
+if (process.env.NODE_ENV === "production" && appUrlHost && DEV_HOST_PATTERN.test(appUrlHost)) { // eslint-disable-line no-undef
+  throw new Error(
+    `[importzo] FATAL: NODE_ENV=production with a development app URL (${appUrlHost}). ` +
+    `This almost certainly means a production .env is being used for local dev — in this state ` +
+    `billing would issue real charges. Use .env.development (NODE_ENV=development) locally; ` +
+    `production's .env stays on the server.`
+  );
+}
+
 // ENCRYPTION_KEY is checked differently from the vars above: it THROWS rather
 // than logging, so the process refuses to start.
 //

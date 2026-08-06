@@ -4,4 +4,15 @@ webhooks_path = "/webhooks/app/uninstalled"
 
 [commands]
 predev = "npx prisma generate"
-dev = "npx prisma migrate deploy && npm exec react-router dev"
+# NODE_ENV is pinned here, not left to .env, because this is the exact process
+# the dev server runs as. The Shopify CLI merges .env into the environment it
+# spawns this command with, so a .env copied from production (NODE_ENV=production)
+# would otherwise reach the app — and app.billing.jsx's isTestCharge() would
+# return false, making a local "Subscribe" click request a REAL charge.
+# An inline assignment here is applied after the CLI's env and wins over it.
+#
+# assert-dev-database runs FIRST, ahead of `prisma migrate deploy`: that command
+# is its own process and would apply migrations to whatever DATABASE_URL points
+# at — including the production database, if a .env was copied down from the
+# server — before the app's own boot guard could ever run.
+dev = "node scripts/assert-dev-database.mjs && NODE_ENV=development npx prisma migrate deploy && NODE_ENV=development npm exec react-router dev"

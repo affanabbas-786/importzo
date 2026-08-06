@@ -68,3 +68,74 @@ describe("app boot: encryption key guard", () => {
     await expect(import("../app/shopify.server.js")).rejects.toThrow(/no entropy/i);
   });
 });
+
+// The billing safety net. isTestCharge() in app.billing.jsx is
+// `NODE_ENV !== "production"` and nothing else, so NODE_ENV=production on a
+// developer's machine turns a "Subscribe" click into a request for a REAL
+// recurring charge. NODE_ENV is pinned to development by the dev command, but
+// the mistake this guards against — copying the server's .env down to a laptop
+// — is precisely the one that would otherwise slip past unnoticed.
+describe("app boot: production-env-on-a-dev-machine guard", () => {
+  let originalNodeEnv, originalAppUrl;
+
+  beforeEach(() => {
+    originalNodeEnv = process.env.NODE_ENV;
+    originalAppUrl = process.env.SHOPIFY_APP_URL;
+    process.env.ENCRYPTION_KEY = GOOD_KEY; // isolate this guard from the one above
+  });
+  afterEach(() => {
+    process.env.NODE_ENV = originalNodeEnv;
+    if (originalAppUrl === undefined) delete process.env.SHOPIFY_APP_URL;
+    else process.env.SHOPIFY_APP_URL = originalAppUrl;
+  });
+
+  const devHosts = [
+    ["a Cloudflare dev tunnel", "https://abc-def-ghi.trycloudflare.com"],
+    ["localhost", "http://localhost:3000"],
+    ["a loopback IP", "http://127.0.0.1:3000"],
+    ["an ngrok tunnel", "https://abcd1234.ngrok-free.app"],
+  ];
+
+  for (const [label, url] of devHosts) {
+    it(`refuses to boot with NODE_ENV=production served from ${label}`, async () => {
+      process.env.NODE_ENV = "production";
+      process.env.SHOPIFY_APP_URL = url;
+
+      await expect(import("../app/shopify.server.js")).rejects.toThrow(/NODE_ENV=production with a development app URL/);
+    });
+
+    it(`boots normally with NODE_ENV=development served from ${label}`, async () => {
+      process.env.NODE_ENV = "development";
+      process.env.SHOPIFY_APP_URL = url;
+
+      const mod = await import("../app/shopify.server.js");
+      expect(mod.default).toBeDefined();
+    });
+  }
+
+  it("boots in production when the app URL is the real production host", async () => {
+    process.env.NODE_ENV = "production";
+    process.env.SHOPIFY_APP_URL = "https://importzo.dazzletech.co";
+
+    const mod = await import("../app/shopify.server.js");
+    expect(mod.default).toBeDefined();
+  });
+
+  // A missing or malformed SHOPIFY_APP_URL is the missing-vars case handled
+  // above it, which logs. This guard must not escalate that into a dead process.
+  it("stays out of the way when SHOPIFY_APP_URL is absent", async () => {
+    process.env.NODE_ENV = "production";
+    delete process.env.SHOPIFY_APP_URL;
+
+    const mod = await import("../app/shopify.server.js");
+    expect(mod.default).toBeDefined();
+  });
+
+  it("stays out of the way when SHOPIFY_APP_URL is unparseable", async () => {
+    process.env.NODE_ENV = "production";
+    process.env.SHOPIFY_APP_URL = "not-a-url";
+
+    const mod = await import("../app/shopify.server.js");
+    expect(mod.default).toBeDefined();
+  });
+});

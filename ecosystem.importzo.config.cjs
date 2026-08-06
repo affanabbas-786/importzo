@@ -17,7 +17,7 @@ module.exports = {
       cwd,
       script: "./node_modules/@react-router/serve/bin.js",
       args: "./build/server/index.js",
-      interpreter: "node",
+      interpreter: "/home/dazzletech-importzo/.nvm/versions/node/v22.23.2/bin/node",
       interpreter_args: "--env-file=.env",
       exec_mode: "fork",
       instances: 1,

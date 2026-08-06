@@ -127,12 +127,40 @@ export const action = async ({ request }) => {
   // App Bridge's patched fetch recognizes and turns into a top-level
   // redirect to Shopify's charge confirmation page. There is no line of
   // code after this that will ever run on success.
-  await billing.request({
-    plan: SHOPIFY_PLAN_NAME[plan],
-    isTest: isTestCharge(),
-    trialDays: 7,
-    returnUrl: `${appUrl}/app/billing`,
-  });
+  //
+  // Because success is signalled by a thrown Response, a *failed* charge
+  // request throws too — as a BillingError. Left uncaught, that error
+  // propagates to this route's ErrorBoundary, which replaces the whole
+  // page with "We couldn't load Billing" and hides Shopify's actual
+  // reason. The one that matters in practice: if the app is configured
+  // for Shopify Managed Pricing in the Partners Dashboard, Shopify
+  // rejects appSubscriptionCreate outright ("Managed Pricing Apps cannot
+  // use the Billing API (to create charges)") — a config mismatch no
+  // retry can fix, and one the merchant must be able to see and report.
+  try {
+    await billing.request({
+      plan: SHOPIFY_PLAN_NAME[plan],
+      isTest: isTestCharge(),
+      trialDays: 7,
+      returnUrl: `${appUrl}/app/billing`,
+    });
+  } catch (err) {
+    // The success path — keep it propagating, it IS the redirect.
+    if (err instanceof Response) throw err;
+
+    // BillingError carries Shopify's own explanation in `errorData`;
+    // fall back to the generic message when it doesn't.
+    const detail = (Array.isArray(err?.errorData) ? err.errorData : [])
+      .map((e) => e?.message)
+      .filter(Boolean)
+      .join(" ") || err?.message || "Unknown billing error";
+
+    console.error(`[app.billing] billing.request failed for ${shop} (plan=${plan}):`, detail);
+    return Response.json({
+      ok: false,
+      error: `Shopify could not start this subscription: ${detail}`,
+    }, { status: 502 });
+  }
 
   return null;
 };
