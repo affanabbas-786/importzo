@@ -297,6 +297,16 @@ model ShopPlan {
   usagePeriodStart DateTime @default(now())
   subscriptionId     String? // Shopify AppSubscription GID; null while on Free (Shopify has no $0 recurring charge)
   subscriptionStatus String? // mirrors Shopify AppSubscription.status (ACTIVE, CANCELLED, ...)
+  // Phase 8 — set when this shop holds an Agency subscription without meeting
+  // the 3-store requirement, cleared the moment it does. Under Shopify App
+  // Pricing the hosted plan-selection page knows nothing about that rule, so
+  // a shop can self-select Agency's discounted price while ineligible. The
+  // app does NOT strip features for it (see app.billing.jsx — Agency and Pro
+  // are feature-identical, so the only difference is price, and cutting off a
+  // paying merchant is the worse error). It records the discrepancy here
+  // instead, so under-priced accounts are queryable server-side rather than
+  // only visible to whoever happens to open the Billing page.
+  agencyIneligibleSince DateTime?
   // Soft marker set by webhooks.app.uninstalled — excluded from Agency
   // eligibility counts ("stores with Importzo installed") without needing to
   // delete the row immediately. The row itself is hard-deleted 48h later at

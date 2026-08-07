@@ -9,6 +9,7 @@ import { SUPPORT_EMAIL, mailtoLink, openLiveChat } from "../lib/support";
 import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
 import { DecorativeBanner, LeafIcon, EmptyStateIllustration } from "../components/decor";
 import { COLORS } from "../lib/design-tokens";
+import { PLANS, PLAN_IDS, yearlySavingsPercent } from "../lib/plans.js";
 
 export const loader = async ({ request }) => {
   const { session } = await authenticate.admin(request);
@@ -549,7 +550,7 @@ export default function Dashboard() {
           <ul className="space-y-2.5">
             {[
               "Use Dry Run mode before a real transfer to preview exactly what would change, with nothing written yet.",
-              "Scheduled Sync is available on the Pro and Agency plans — see Billing to upgrade.",
+              `Scheduled Sync is available on the Pro and Agency plans — from $${PLANS[PLAN_IDS.PRO].price}/month, or $${PLANS[PLAN_IDS.PRO].priceYearly}/year to save ${yearlySavingsPercent(PLAN_IDS.PRO)}%. See Billing to upgrade.`,
               "Save a CSV column mapping as a template from any importer so you don't have to remap it next time.",
             ].map((tip) => (
               <li key={tip} className="flex items-start gap-2.5 text-sm text-gray-700">

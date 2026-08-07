@@ -7,7 +7,8 @@ vi.mock("@shopify/shopify-app-react-router/adapters/node", () => ({}));
 vi.mock("@shopify/shopify-app-react-router/server", () => ({
   ApiVersion: { October25: "2025-10" },
   AppDistribution: { AppStore: "app_store" },
-  BillingInterval: { OneTime: "ONE_TIME", Every30Days: "EVERY_30_DAYS", Annual: "ANNUAL", Usage: "USAGE" },
+  // No BillingInterval: shopify.server.js stopped importing it when the
+  // `billing` config block went away under Shopify App Pricing.
   shopifyApp: () => ({
     registerWebhooks: vi.fn(),
     addDocumentResponseHeaders: vi.fn(),
@@ -69,12 +70,16 @@ describe("app boot: encryption key guard", () => {
   });
 });
 
-// The billing safety net. isTestCharge() in app.billing.jsx is
-// `NODE_ENV !== "production"` and nothing else, so NODE_ENV=production on a
-// developer's machine turns a "Subscribe" click into a request for a REAL
-// recurring charge. NODE_ENV is pinned to development by the dev command, but
-// the mistake this guards against — copying the server's .env down to a laptop
-// — is precisely the one that would otherwise slip past unnoticed.
+// This began as the billing safety net: app.billing.jsx used to derive
+// isTest from NODE_ENV, so NODE_ENV=production on a developer's machine turned
+// a "Subscribe" click into a request for a REAL recurring charge. Under
+// Shopify App Pricing that hazard is gone — Shopify decides test-vs-real from
+// the store, and the app can no longer create a charge at all. The guard is
+// still worth its keep for the rest of what it catches: a production .env on a
+// dev machine points DATABASE_URL at the live database and hands over
+// production Shopify credentials. NODE_ENV is pinned to development by the dev
+// command, but copying the server's .env down to a laptop is precisely the
+// mistake that defeats that.
 describe("app boot: production-env-on-a-dev-machine guard", () => {
   let originalNodeEnv, originalAppUrl;
 

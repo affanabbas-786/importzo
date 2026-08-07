@@ -13,7 +13,7 @@ function setShopPlan(shop, data) {
   rows.set(shop, {
     id: "plan-preset", shop, tier: "free", recordsUsed: 0, usagePeriodStart: new Date(),
     subscriptionId: null, subscriptionStatus: null, shopOwnerEmail: null, uninstalledAt: null,
-    createdAt: new Date(), updatedAt: new Date(), ...data,
+    agencyIneligibleSince: null, createdAt: new Date(), updatedAt: new Date(), ...data,
   });
 }
 
@@ -51,37 +51,67 @@ vi.mock("../../app/db.server", () => ({
 // null by default (no match, not eligible) — tests that need eligibility
 // override this per-test.
 const shopEmail = { value: null };
+// Phase 8 — the app handle Shopify reports for this install, used to build
+// the hosted plan-selection URL. null models a lookup that returns nothing,
+// which must fall back to DEFAULT_APP_HANDLE rather than produce a broken URL.
+const liveAppHandle = { value: "importzo" };
+
+// One mock serves both queries the billing route issues; it dispatches on the
+// query text so a test can move the app-handle lookup independently of the
+// shop-email one.
 vi.mock("../../app/lib/shopify-api.server", () => ({
-  shopifyGraphql: vi.fn(async () => ({ shop: { email: shopEmail.value } })),
+  shopifyGraphql: vi.fn(async (_shop, _token, query) => {
+    if (String(query).includes("currentAppInstallation")) {
+      return { currentAppInstallation: { app: { handle: liveAppHandle.value } } };
+    }
+    return { shop: { email: shopEmail.value } };
+  }),
 }));
 
 // authenticate.admin's `billing` context is configured per-test via
-// currentBilling, since billing.check/.request behavior is the whole
-// point of most tests here.
+// currentBilling, since billing.check behavior is the whole point of the
+// loader tests. `redirect` is the App Bridge-aware helper the action now
+// uses to leave the embedded iframe — see the action in app.billing.jsx.
 let currentBilling;
+const redirectMock = vi.fn((url, opts) => new Response(null, {
+  status: 302,
+  headers: { Location: url, "X-Redirect-Target": opts?.target || "" },
+}));
+
 vi.mock("../../app/shopify.server", () => ({
   authenticate: {
     admin: vi.fn(async () => ({
       session: { shop: SHOP, accessToken: "dest-token" },
       billing: currentBilling,
+      redirect: redirectMock,
     })),
   },
   apiVersion: "2025-10",
 }));
 
-function fakeBilling({ appSubscriptions = [], requestImpl } = {}) {
+function fakeBilling({ appSubscriptions = [] } = {}) {
   return {
     check: vi.fn(async () => ({ hasActivePayment: appSubscriptions.length > 0, appSubscriptions })),
-    request: requestImpl || vi.fn(async () => { throw new Response(null, { status: 401 }); }),
   };
 }
 
+// A subscription line item shaped like Shopify's, so intervalOf() has
+// something real to read monthly-vs-yearly off.
+function withInterval(subscription, interval) {
+  return { ...subscription, lineItems: [{ plan: { pricingDetails: { interval } } }] };
+}
+
 import { loader, action } from "../../app/routes/app.billing.jsx";
+import { resetAppHandleCache, DEFAULT_APP_HANDLE } from "../../app/lib/app-pricing.server.js";
 
 describe("app.billing loader — reconciliation", () => {
   beforeEach(() => {
     rows.clear();
     shopEmail.value = null;
+    liveAppHandle.value = "importzo";
+    delete process.env.SHOPIFY_APP_HANDLE; // eslint-disable-line no-undef
+    resetAppHandleCache();
+    redirectMock.mockClear();
     currentBilling = fakeBilling();
   });
 
@@ -140,102 +170,238 @@ describe("app.billing loader — reconciliation", () => {
     expect(data.eligibility.eligible).toBe(true);
     expect(data.eligibility.storeCount).toBe(3); // the two others + this shop itself
   });
-});
 
-describe("app.billing action — subscribe", () => {
-  beforeEach(() => {
-    rows.clear();
-    shopEmail.value = null;
-    currentBilling = fakeBilling();
+  // ── Phase 8 — Shopify App Pricing ──────────────────────────────────
+
+  // Under App Pricing the plan name comes from the Partner Dashboard, in the
+  // merchant's own language, and monthly/yearly variants may be named
+  // separately. An exact-match lookup would fail to recognise a real paid
+  // subscription and silently drop a paying merchant to Free.
+  it.each([
+    ["Importzo Pro", "pro"],
+    ["Pro", "pro"],
+    ["Pro Annual", "pro"],
+    ["Importzo Pro (Yearly)", "pro"],
+    ["Importzo Agency", "agency"],
+    ["Agency Yearly", "agency"],
+  ])("recognises the dashboard-named plan %j as tier %j", async (name, tier) => {
+    currentBilling = fakeBilling({
+      appSubscriptions: [{ id: "gid://shopify/AppSubscription/9", name, status: "ACTIVE" }],
+    });
+    const data = await loader({ request: { url: `https://${SHOP}/app/billing` } });
+    expect(data.usage.tier).toBe(tier);
   });
 
-  it("requests the Pro plan with a 7-day trial, USD pricing owned by shopify.server.js's config", async () => {
-    const request = mockActionRequest({ intent: "subscribe", plan: "pro" }, { url: `https://${SHOP}/app/billing` });
-    await expect(action({ request })).rejects.toBeDefined();
+  it("reads the billing interval off the subscription's recurring line item", async () => {
+    currentBilling = fakeBilling({
+      appSubscriptions: [withInterval(
+        { id: "gid://shopify/AppSubscription/1", name: "Importzo Pro", status: "ACTIVE" },
+        "ANNUAL",
+      )],
+    });
+    const data = await loader({ request: { url: `https://${SHOP}/app/billing` } });
 
-    expect(currentBilling.request).toHaveBeenCalledWith(expect.objectContaining({
-      plan: "Importzo Pro",
-      trialDays: 7,
-      returnUrl: expect.stringContaining("/app/billing"),
-    }));
+    expect(data.usage.tier).toBe("pro");
+    expect(data.usage.interval).toBe("yearly");
   });
 
-  it("requests the Agency plan when the shop is eligible", async () => {
+  it("reports a monthly subscription as monthly", async () => {
+    currentBilling = fakeBilling({
+      appSubscriptions: [withInterval(
+        { id: "gid://shopify/AppSubscription/1", name: "Importzo Pro", status: "ACTIVE" },
+        "EVERY_30_DAYS",
+      )],
+    });
+    const data = await loader({ request: { url: `https://${SHOP}/app/billing` } });
+    expect(data.usage.interval).toBe("monthly");
+  });
+
+  it("leaves the interval null when Shopify sends no line items, rather than guessing", async () => {
+    currentBilling = fakeBilling({
+      appSubscriptions: [{ id: "gid://shopify/AppSubscription/1", name: "Importzo Pro", status: "ACTIVE" }],
+    });
+    const data = await loader({ request: { url: `https://${SHOP}/app/billing` } });
+    expect(data.usage.interval).toBeNull();
+  });
+
+  it("builds the hosted plan-selection URL from the live app handle and the store handle", async () => {
+    liveAppHandle.value = "importzo-live";
+    const data = await loader({ request: { url: `https://${SHOP}/app/billing` } });
+
+    expect(data.planSelectionUrl)
+      .toBe("https://admin.shopify.com/store/dest-shop/charges/importzo-live/pricing_plans");
+  });
+
+  it("falls back to the default handle when Shopify reports none, rather than emitting a broken URL", async () => {
+    liveAppHandle.value = null;
+    const data = await loader({ request: { url: `https://${SHOP}/app/billing` } });
+
+    expect(data.planSelectionUrl)
+      .toBe(`https://admin.shopify.com/store/dest-shop/charges/${DEFAULT_APP_HANDLE}/pricing_plans`);
+  });
+
+  // The Agency eligibility rule can't be enforced on Shopify's hosted page,
+  // so the app records the discrepancy instead of blocking or revoking.
+  it("flags a shop that holds Agency without meeting the store requirement", async () => {
+    currentBilling = fakeBilling({
+      appSubscriptions: [{ id: "gid://shopify/AppSubscription/2", name: "Importzo Agency", status: "ACTIVE" }],
+    });
+
+    const data = await loader({ request: { url: `https://${SHOP}/app/billing` } });
+
+    expect(data.usage.tier).toBe("agency"); // access is NOT revoked
+    expect(data.eligibility.eligible).toBe(false);
+    expect(data.usage.agencyIneligibleSince).toBeInstanceOf(Date);
+    expect(rows.get(SHOP).agencyIneligibleSince).toBeInstanceOf(Date);
+  });
+
+  it("keeps the original flag date on a re-visit, so it answers 'since when'", async () => {
+    const original = new Date("2026-01-01T00:00:00.000Z");
+    currentBilling = fakeBilling({
+      appSubscriptions: [{ id: "gid://shopify/AppSubscription/2", name: "Importzo Agency", status: "ACTIVE" }],
+    });
+    setShopPlan(SHOP, { tier: "agency", agencyIneligibleSince: original });
+
+    const data = await loader({ request: { url: `https://${SHOP}/app/billing` } });
+
+    expect(data.usage.agencyIneligibleSince).toEqual(original);
+  });
+
+  it("clears the flag once the merchant reaches the store threshold", async () => {
+    setShopPlan(SHOP, { tier: "agency", agencyIneligibleSince: new Date("2026-01-01T00:00:00.000Z") });
     setShopPlan("other-1.myshopify.com", { shopOwnerEmail: "merchant@example.com" });
     setShopPlan("other-2.myshopify.com", { shopOwnerEmail: "merchant@example.com" });
     shopEmail.value = "merchant@example.com";
-
-    const request = mockActionRequest({ intent: "subscribe", plan: "agency" }, { url: `https://${SHOP}/app/billing` });
-    await expect(action({ request })).rejects.toBeDefined();
-
-    expect(currentBilling.request).toHaveBeenCalledWith(expect.objectContaining({ plan: "Importzo Agency" }));
-  });
-
-  it("refuses Agency for an ineligible shop even via a direct POST, without calling billing.request", async () => {
-    const request = mockActionRequest({ intent: "subscribe", plan: "agency" }, { url: `https://${SHOP}/app/billing` });
-    const response = await action({ request });
-
-    expect(response.status).toBe(403);
-    expect(currentBilling.request).not.toHaveBeenCalled();
-  });
-
-  // Regression: the app was registered for Shopify Managed Pricing in the
-  // Partners Dashboard while this code drives plan selection through the
-  // Billing API, so appSubscriptionCreate was rejected outright. The
-  // BillingError escaped the action into the route's ErrorBoundary, which
-  // swapped the whole page for "We couldn't load Billing" — the merchant
-  // saw a dead page instead of Shopify's actual reason.
-  it("returns Shopify's reason as JSON when billing.request fails, instead of throwing into the ErrorBoundary", async () => {
-    const billingError = Object.assign(new Error("Error while billing the store"), {
-      errorData: [{ field: null, message: "Managed Pricing Apps cannot use the Billing API (to create charges)." }],
-    });
-    currentBilling = fakeBilling({ requestImpl: vi.fn(async () => { throw billingError; }) });
-
-    const request = mockActionRequest({ intent: "subscribe", plan: "pro" }, { url: `https://${SHOP}/app/billing` });
-    const response = await action({ request });
-
-    expect(response.status).toBe(502);
-    const body = await response.json();
-    expect(body.ok).toBe(false);
-    expect(body.error).toContain("Managed Pricing Apps cannot use the Billing API");
-  });
-
-  it("still lets billing.request's success redirect propagate", async () => {
     currentBilling = fakeBilling({
-      requestImpl: vi.fn(async () => { throw new Response(null, { status: 302, headers: { Location: "/charge" } }); }),
+      appSubscriptions: [{ id: "gid://shopify/AppSubscription/2", name: "Importzo Agency", status: "ACTIVE" }],
     });
 
-    const request = mockActionRequest({ intent: "subscribe", plan: "pro" }, { url: `https://${SHOP}/app/billing` });
-    await expect(action({ request })).rejects.toBeInstanceOf(Response);
+    const data = await loader({ request: { url: `https://${SHOP}/app/billing` } });
+
+    expect(data.eligibility.eligible).toBe(true);
+    expect(data.usage.agencyIneligibleSince).toBeNull();
+    expect(rows.get(SHOP).agencyIneligibleSince).toBeNull();
   });
 
-  it("falls back to the error's message when Shopify sends no errorData", async () => {
+  it("does not flag an ineligible shop that is merely on Pro", async () => {
     currentBilling = fakeBilling({
-      requestImpl: vi.fn(async () => { throw new Error("network unreachable"); }),
+      appSubscriptions: [{ id: "gid://shopify/AppSubscription/1", name: "Importzo Pro", status: "ACTIVE" }],
     });
 
-    const request = mockActionRequest({ intent: "subscribe", plan: "pro" }, { url: `https://${SHOP}/app/billing` });
-    const response = await action({ request });
+    const data = await loader({ request: { url: `https://${SHOP}/app/billing` } });
 
-    expect(response.status).toBe(502);
-    expect((await response.json()).error).toContain("network unreachable");
+    expect(data.eligibility.eligible).toBe(false);
+    expect(data.usage.agencyIneligibleSince).toBeNull();
   });
 
-  it("rejects an unknown plan id", async () => {
-    const request = mockActionRequest({ intent: "subscribe", plan: "enterprise" }, { url: `https://${SHOP}/app/billing` });
-    const response = await action({ request });
-    expect(response.status).toBe(400);
+  it("passes Shopify's post-approval plan_handle through as a confirmation signal only", async () => {
+    currentBilling = fakeBilling({
+      appSubscriptions: [{ id: "gid://shopify/AppSubscription/1", name: "Importzo Pro", status: "ACTIVE" }],
+    });
+
+    const data = await loader({ request: { url: `https://${SHOP}/app/billing?plan_handle=pro-yearly` } });
+
+    expect(data.justSelectedPlan).toBe("pro-yearly");
+    expect(data.usage.tier).toBe("pro"); // from billing.check, never from the URL
   });
 
-  it("rejects Free — there is no Shopify charge to request for it", async () => {
-    const request = mockActionRequest({ intent: "subscribe", plan: "free" }, { url: `https://${SHOP}/app/billing` });
+  // A merchant editing the URL must not be able to talk themselves onto a
+  // paid tier — the parameter is display-only.
+  it("ignores plan_handle when Shopify reports no active subscription", async () => {
+    currentBilling = fakeBilling({ appSubscriptions: [] });
+
+    const data = await loader({ request: { url: `https://${SHOP}/app/billing?plan_handle=agency-yearly` } });
+
+    expect(data.usage.tier).toBe("free");
+  });
+});
+
+
+// ═══════════════════════════════════════════════════════════════════
+// Phase 8 — the action no longer creates a charge. Shopify rejects
+// appSubscriptionCreate for App Pricing apps outright, so the only thing
+// left to do is send the merchant to Shopify's own hosted plan page.
+// ═══════════════════════════════════════════════════════════════════
+describe("app.billing action — plan selection redirect", () => {
+  beforeEach(() => {
+    rows.clear();
+    shopEmail.value = null;
+    liveAppHandle.value = "importzo";
+    delete process.env.SHOPIFY_APP_HANDLE; // eslint-disable-line no-undef
+    resetAppHandleCache();
+    redirectMock.mockClear();
+    currentBilling = fakeBilling();
+  });
+
+  it("redirects to Shopify's hosted plan page at the top level, escaping the embedded iframe", async () => {
+    const request = mockActionRequest({ intent: "select-plan" }, { url: `https://${SHOP}/app/billing` });
     const response = await action({ request });
-    expect(response.status).toBe(400);
+
+    expect(redirectMock).toHaveBeenCalledWith(
+      "https://admin.shopify.com/store/dest-shop/charges/importzo/pricing_plans",
+      { target: "_top" },
+    );
+    expect(response.headers.get("Location"))
+      .toBe("https://admin.shopify.com/store/dest-shop/charges/importzo/pricing_plans");
+    expect(response.headers.get("X-Redirect-Target")).toBe("_top");
+  });
+
+  it("uses the live app handle Shopify reports, not the hard-coded fallback", async () => {
+    liveAppHandle.value = "importzo-live";
+    const request = mockActionRequest({ intent: "select-plan" }, { url: `https://${SHOP}/app/billing` });
+    await action({ request });
+
+    expect(redirectMock).toHaveBeenCalledWith(
+      "https://admin.shopify.com/store/dest-shop/charges/importzo-live/pricing_plans",
+      { target: "_top" },
+    );
+  });
+
+  it("honours the SHOPIFY_APP_HANDLE override ahead of the live lookup", async () => {
+    process.env.SHOPIFY_APP_HANDLE = "importzo-override"; // eslint-disable-line no-undef
+    const request = mockActionRequest({ intent: "select-plan" }, { url: `https://${SHOP}/app/billing` });
+    await action({ request });
+
+    expect(redirectMock).toHaveBeenCalledWith(
+      expect.stringContaining("/charges/importzo-override/pricing_plans"),
+      { target: "_top" },
+    );
+  });
+
+  // Regression guard for the whole point of Phase 8: this route must never
+  // attempt a charge again. Shopify answers appSubscriptionCreate from an
+  // App Pricing app with "Managed Pricing Apps cannot use the Billing API".
+  it("never calls billing.request — the Billing API write path is gone", async () => {
+    const request = mockActionRequest({ intent: "select-plan" }, { url: `https://${SHOP}/app/billing` });
+    await action({ request });
+
+    expect(currentBilling.request).toBeUndefined();
+  });
+
+  // Agency eligibility is deliberately NOT enforced here any more: there is
+  // one hosted page for every plan, so there is no per-plan request to
+  // refuse. It's surfaced before the click and recorded after it instead.
+  it("redirects an Agency-ineligible shop just the same, rather than blocking the page", async () => {
+    const request = mockActionRequest({ intent: "select-plan" }, { url: `https://${SHOP}/app/billing` });
+    const response = await action({ request });
+
+    expect(response.status).toBe(302);
+    expect(redirectMock).toHaveBeenCalled();
   });
 
   it("rejects an unsupported intent", async () => {
     const request = mockActionRequest({ intent: "cancel" }, { url: `https://${SHOP}/app/billing` });
     const response = await action({ request });
+
     expect(response.status).toBe(400);
+    expect(redirectMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects the old 'subscribe' intent, so a stale client can't silently no-op", async () => {
+    const request = mockActionRequest({ intent: "subscribe", plan: "pro" }, { url: `https://${SHOP}/app/billing` });
+    const response = await action({ request });
+
+    expect(response.status).toBe(400);
+    expect(redirectMock).not.toHaveBeenCalled();
   });
 });

@@ -2,13 +2,11 @@ import "@shopify/shopify-app-react-router/adapters/node";
 import {
   ApiVersion,
   AppDistribution,
-  BillingInterval,
   shopifyApp,
 } from "@shopify/shopify-app-react-router/server";
 import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prisma";
 import prisma from "./db.server";
 import { assertEncryptionConfigured } from "./utils/encryption.server";
-import { SHOPIFY_PLAN_NAME } from "./lib/plans.js";
 
 // Validate required environment variables on startup
 const missingVars = ["SHOPIFY_API_KEY", "SHOPIFY_API_SECRET", "SHOPIFY_APP_URL"].filter(
@@ -18,14 +16,20 @@ if (missingVars.length > 0) {
   console.error(`[importzo] FATAL: Missing required env vars: ${missingVars.join(", ")}. App will not function correctly.`);
 }
 
-// Guard against a production .env being used for a local dev run. This is the
-// billing safety net: app.billing.jsx's isTestCharge() keys off NODE_ENV alone,
-// so NODE_ENV=production on a dev machine means a "Subscribe" click asks
-// Shopify for a REAL charge instead of a test one. NODE_ENV is pinned to
-// development in shopify.web.toml's dev command, but a .env copied from the
-// server is exactly the mistake that would defeat that, so refuse to boot on
-// the one combination that can only mean the files got crossed: production
-// mode served from a dev tunnel or localhost.
+// Guard against a production .env being used for a local dev run.
+//
+// This started life as the billing safety net: app.billing.jsx used to derive
+// isTest from NODE_ENV, so NODE_ENV=production on a dev machine meant a
+// "Subscribe" click asked Shopify for a REAL charge. Under Shopify App Pricing
+// that specific hazard is gone — Shopify decides test-vs-real from the store
+// itself, and this app can't create a charge at all. The guard stays because
+// the rest of what it catches is unchanged and just as damaging: a production
+// .env on a dev machine points DATABASE_URL at the live database and hands out
+// production Shopify credentials. NODE_ENV is pinned to development in
+// shopify.web.toml's dev command, but a .env copied from the server is exactly
+// the mistake that defeats that, so refuse to boot on the one combination that
+// can only mean the files got crossed: production mode on a dev tunnel or
+// localhost.
 //
 // Only an app URL that is present AND parseable is judged: an absent or
 // malformed SHOPIFY_APP_URL is the missingVars case above, not this one, and
@@ -69,27 +73,22 @@ const shopify = shopifyApp({
   authPathPrefix: "/auth",
   sessionStorage: new PrismaSessionStorage(prisma),
   distribution: AppDistribution.AppStore,
-  // Phase 5 — Billing. Standard Shopify Billing API (AppSubscription via
-  // billing.request/.check/.require — see app.billing.jsx), not the
-  // dashboard-configured "Shopify Managed Pricing" plans: Agency's
-  // eligibility depends on cross-store logic (agency-eligibility.server.js)
-  // that dashboard-configured pricing can't express, so plan selection has
-  // to stay code-driven.
+  // Phase 8 — no `billing` config block. The app is registered for Shopify
+  // App Pricing (formerly Managed Pricing) in the Partner Dashboard, which
+  // owns the plans, the prices, the trial lengths and the charge itself.
+  // Shopify rejects appSubscriptionCreate from such apps outright ("Managed
+  // Pricing Apps cannot use the Billing API (to create charges)"), so the
+  // config that used to declare Pro at $15 and Agency at $10 could only
+  // mislead: it described charges this app is no longer permitted to create,
+  // in a place a reader would reasonably trust as authoritative. Prices now
+  // live in the dashboard, with plans.js holding the display copy that has
+  // to be kept in step with it by hand.
   //
-  // Free has no entry here — Shopify doesn't support a $0 recurring charge,
-  // so Free is simply "no active subscription" (see plans.js, usage.server.js).
-  // Agency is priced at $10 as its own plan rather than a discount override
-  // of Pro: it's a distinct named charge a shop either does or doesn't
-  // qualify for, not a coupon applied to Pro's charge. Every line item is
-  // explicitly USD — this app has no per-market/currency pricing.
-  billing: {
-    [SHOPIFY_PLAN_NAME.pro]: {
-      lineItems: [{ amount: 15, currencyCode: "USD", interval: BillingInterval.Every30Days }],
-    },
-    [SHOPIFY_PLAN_NAME.agency]: {
-      lineItems: [{ amount: 10, currencyCode: "USD", interval: BillingInterval.Every30Days }],
-    },
-  },
+  // Removing it does NOT break reading subscription state. This package
+  // always passes `unstable_managedPricingSupport: true` down to
+  // shopify-api, which is exactly the flag that lets billing.check() run
+  // against currentAppInstallation.activeSubscriptions with no billing
+  // config present — see app.billing.jsx's reconcile().
   hooks: {
     afterAuth: async ({ session }) => {
       console.log(`[importzo] afterAuth: shop=${session.shop} isOnline=${session.isOnline} scope=${session.scope}`);

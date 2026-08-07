@@ -19,15 +19,18 @@
 // context (authenticate.webhook), never from the payload — same rule every
 // other webhook handler in this app follows.
 
+// Phase 8 note — under Shopify App Pricing this topic is no longer the
+// documented notification channel (Shopify passes plan details as URL
+// parameters on the post-approval redirect instead, and says to query the
+// Partner API for changes that happen off-redirect). The handler is kept
+// registered rather than deleted: it costs nothing when Shopify doesn't
+// send the topic, and if it does still fire it closes exactly the gap it
+// was written for. app.billing.jsx's reconcile() remains the reliable path.
+
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
-import { PLAN_IDS, SHOPIFY_PLAN_NAME } from "../lib/plans.js";
+import { PLAN_IDS, tierFromSubscriptionName } from "../lib/plans.js";
 import { getUsageStatus, setShopTier } from "../lib/usage.server";
-
-const NAME_TO_TIER = Object.freeze({
-  [SHOPIFY_PLAN_NAME.pro]: PLAN_IDS.PRO,
-  [SHOPIFY_PLAN_NAME.agency]: PLAN_IDS.AGENCY,
-});
 
 export const action = async ({ request }) => {
   const { shop, topic, payload } = await authenticate.webhook(request);
@@ -45,7 +48,12 @@ export const action = async ({ request }) => {
       // unconditionally. Covers a fresh subscribe AND an upgrade/downgrade
       // between paid tiers (Shopify's default replacementBehavior cancels
       // the old subscription and activates the new one on approval).
-      const tier = NAME_TO_TIER[name] || PLAN_IDS.FREE;
+      // Keyword match, not an exact plan-name lookup — see
+      // tierFromSubscriptionName: App Pricing plan names come from the
+      // Partner Dashboard and may differ per language and per billing
+      // interval, and an unrecognised name here would downgrade a merchant
+      // who just successfully paid.
+      const tier = tierFromSubscriptionName(name) || PLAN_IDS.FREE;
       await setShopTier({ prisma, shop, tier, subscriptionId: subscriptionId || null, subscriptionStatus: status });
       console.log(`[webhooks/app_subscriptions/update] ${shop}: tier -> ${tier} (subscription "${name}" activated)`);
     } else {

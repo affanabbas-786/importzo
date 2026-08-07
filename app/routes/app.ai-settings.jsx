@@ -5,7 +5,7 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { getUsageStatus } from "../lib/usage.server";
-import { builtInAiAllowed, AI_MONTHLY_CALL_CAP } from "../lib/plans.js";
+import { builtInAiAllowed, AI_MONTHLY_CALL_CAP, PLANS, PLAN_IDS, yearlySavingsPercent } from "../lib/plans.js";
 import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
 
 // ═══════════════════════════════════════════════════════════════════
@@ -184,7 +184,8 @@ export default function AiSettingsPage() {
               {!builtInAiEligible && (
                 <p className="text-xs text-gray-500 mt-2">
                   <Link to="/app/billing" className="font-semibold hover:underline" style={{ color: S }}>Upgrade to Pro or Agency</Link>
-                  {" "}to use Importzo&apos;s built-in AI instead of your own key.
+                  {" "}to use Importzo&apos;s built-in AI instead of your own key — from ${PLANS[PLAN_IDS.PRO].price}/month,
+                  or ${PLANS[PLAN_IDS.PRO].priceYearly}/year to save {yearlySavingsPercent(PLAN_IDS.PRO)}%.
                 </p>
               )}
             </div>

@@ -43,6 +43,12 @@ function toStatus(row) {
     scheduledSyncAllowed: !!plan.scheduledSync,
     subscriptionId: row.subscriptionId || null,
     subscriptionStatus: row.subscriptionStatus || null,
+    // Phase 8 — on Agency pricing without meeting the 3-store requirement.
+    // Carried on the usage status (rather than recomputed) so Settings and
+    // any other page already loading usage can surface the notice for free;
+    // establishing it needs a Shopify round trip, and only app.billing.jsx
+    // pays that cost. See syncAgencyIneligibilityFlag.
+    agencyIneligibleSince: row.agencyIneligibleSince || null,
   };
 }
 
@@ -99,7 +105,7 @@ export async function assertQuotaAvailable({ prisma, shop, now = new Date() }) {
   return {
     ok: false,
     status,
-    message: `You've used all ${status.limit} records included in your ${status.label} plan this month. Upgrade your plan to continue, or wait for your usage to reset.`,
+    message: `You've used all ${status.limit} records included in your ${status.label} plan this month. Upgrade to Pro for unlimited records — $${getPlan(PLAN_IDS.PRO).price}/month or $${getPlan(PLAN_IDS.PRO).priceYearly}/year — or wait for your usage to reset.`,
   };
 }
 

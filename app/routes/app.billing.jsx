@@ -6,51 +6,57 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate, apiVersion } from "../shopify.server";
 import prisma from "../db.server";
 import { shopifyGraphql } from "../lib/shopify-api.server";
-import { getOrCreateShopPlan, getUsageStatus, setShopTier } from "../lib/usage.server";
-import { checkAgencyEligibility } from "../lib/agency-eligibility.server";
-import { PLAN_IDS, PLANS, PLAN_ORDER, SHOPIFY_PLAN_NAME, AGENCY_MIN_STORES, isBillablePlanId } from "../lib/plans.js";
+import { getUsageStatus, setShopTier } from "../lib/usage.server";
+import { checkAgencyEligibility, syncAgencyIneligibilityFlag } from "../lib/agency-eligibility.server";
+import { planSelectionUrl, resolveAppHandle } from "../lib/app-pricing.server";
+import {
+  PLAN_IDS, PLANS, PLAN_ORDER, AGENCY_MIN_STORES, TRIAL_DAYS, BILLING_INTERVAL,
+  tierFromSubscriptionName, intervalFromShopifyInterval, yearlySavingsPercent,
+} from "../lib/plans.js";
 import { BRAND } from "../lib/constants";
 import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
 
 // ═══════════════════════════════════════════════════════════════════
-// Phase 5 — Billing: plan-selection UI + Shopify AppSubscription wiring.
+// Phase 5 — Billing: plan UI.
+// Phase 8 — rewired for Shopify App Pricing (formerly Managed Pricing).
 //
-// ShopPlan.tier (usage.server.js) is the value every write path actually
-// enforces against, and it's only ever changed here (plus the Free default
-// on first install) — via reconcile() in the loader, which is the single
-// place Shopify's billing state gets translated into a local tier. Without
-// this route, ShopPlan.tier could never leave "free": nothing else in the
-// app calls setShopTier with a real subscription.
+// This app is registered for Shopify App Pricing in the Partner Dashboard,
+// which makes Shopify the owner of both the plan-selection page and the
+// charge. appSubscriptionCreate is rejected for such apps outright
+// ("Managed Pricing Apps cannot use the Billing API (to create charges)"),
+// so the Subscribe buttons no longer call billing.request — they redirect
+// to Shopify's hosted plan-selection page (see app-pricing.server.js).
+//
+// READING plan state is unchanged. billing.check() is a query against
+// currentAppInstallation.activeSubscriptions and returns App Pricing
+// subscriptions exactly as it did Billing API ones, so reconcile() below is
+// still the single place Shopify's billing state becomes a local tier —
+// ShopPlan.tier, the value every write path actually enforces against.
 // ═══════════════════════════════════════════════════════════════════
-
-const NAME_TO_TIER = Object.freeze({
-  [SHOPIFY_PLAN_NAME.pro]: PLAN_IDS.PRO,
-  [SHOPIFY_PLAN_NAME.agency]: PLAN_IDS.AGENCY,
-});
-
-// Every paid tier request goes through Shopify's *test* charge mode outside
-// production — see shopify.server.js's `billing` config, which fixes the
-// currency/amount; this only controls whether a real card gets charged.
-function isTestCharge() {
-  return process.env.NODE_ENV !== "production"; // eslint-disable-line no-undef
-}
 
 /**
  * Reconciles ShopPlan.tier against Shopify's actual AppSubscription state.
- * The merchant can approve or cancel a charge from places this app never
- * sees a request for (Shopify's own billing settings, an email link), so
- * local tier can drift from reality — this is the point where it's pulled
- * back in sync, on every Billing page load.
+ * The merchant can approve or cancel a plan from places this app never sees
+ * a request for — and under App Pricing that is now the NORMAL path, not the
+ * exception: every subscribe happens on Shopify's page, off-site. This is
+ * where it gets pulled back in sync, on every Billing page load.
  */
 async function reconcile({ billing, shop }) {
   const { appSubscriptions } = await billing.check();
-  const active = appSubscriptions.find((s) => NAME_TO_TIER[s.name]);
+
+  // Match on the tier keyword rather than an exact plan name: under App
+  // Pricing the name is whatever the Partner Dashboard calls it, in the
+  // merchant's language, and monthly/yearly may be named separately. See
+  // tierFromSubscriptionName — failing to recognise a real paid subscription
+  // here would silently downgrade a paying merchant to Free.
+  const active = appSubscriptions.find((s) => tierFromSubscriptionName(s.name));
 
   if (active) {
-    return setShopTier({
-      prisma, shop, tier: NAME_TO_TIER[active.name],
+    const status = await setShopTier({
+      prisma, shop, tier: tierFromSubscriptionName(active.name),
       subscriptionId: active.id, subscriptionStatus: active.status,
     });
+    return { ...status, interval: intervalOf(active), subscriptionName: active.name };
   }
 
   // No active Shopify subscription. If this shop is still marked paid
@@ -58,8 +64,21 @@ async function reconcile({ billing, shop }) {
   // back to Free rather than keep enforcing a paid shop's limits/features
   // for a subscription that no longer exists.
   const current = await getUsageStatus({ prisma, shop });
-  if (current.tier === PLAN_IDS.FREE) return current;
-  return setShopTier({ prisma, shop, tier: PLAN_IDS.FREE, subscriptionId: null, subscriptionStatus: null });
+  if (current.tier === PLAN_IDS.FREE) return { ...current, interval: null, subscriptionName: null };
+
+  const downgraded = await setShopTier({ prisma, shop, tier: PLAN_IDS.FREE, subscriptionId: null, subscriptionStatus: null });
+  return { ...downgraded, interval: null, subscriptionName: null };
+}
+
+// Monthly vs yearly, read off the subscription's recurring line item.
+// Informational only — nothing is gated on it; it's so the page can say
+// "billed yearly" instead of implying everyone pays monthly.
+function intervalOf(subscription) {
+  for (const item of subscription?.lineItems || []) {
+    const interval = intervalFromShopifyInterval(item?.plan?.pricingDetails?.interval);
+    if (interval) return interval;
+  }
+  return null;
 }
 
 export const loader = async ({ request }) => {
@@ -74,95 +93,74 @@ export const loader = async ({ request }) => {
     // Reconciliation failing (Shopify API hiccup) must not break the page —
     // it just falls back to whatever ShopPlan already has on file.
     console.warn(`[app.billing] reconciliation failed for ${shop}:`, err?.message);
-    usage = await getUsageStatus({ prisma, shop });
+    usage = { ...(await getUsageStatus({ prisma, shop })), interval: null, subscriptionName: null };
   }
 
   const eligibility = await checkAgencyEligibility({
     prisma, shopifyGraphql, shop, token: session.accessToken, version,
   });
 
-  return { usage, eligibility, isTestCharge: isTestCharge() };
+  // Phase 8 — Shopify's hosted plan page can't enforce the 3-store Agency
+  // rule, so a shop can end up on Agency without qualifying. Record it (the
+  // page renders a notice below; the flag also makes it reportable without
+  // waiting for the merchant to visit). Never revokes access — see
+  // syncAgencyIneligibilityFlag for why that's the deliberate choice.
+  const agencyIneligibleSince = await syncAgencyIneligibilityFlag({
+    prisma, shop, tier: usage.tier, eligible: eligibility.eligible,
+  });
+
+  const appHandle = await resolveAppHandle({
+    shopifyGraphql, shop, token: session.accessToken, version,
+  });
+
+  // Shopify appends ?plan_handle=... when it sends the merchant back after
+  // they pick a plan. Its only use here is to confirm the round trip
+  // happened — the tier itself always comes from reconcile() above, never
+  // from a URL parameter the merchant could edit.
+  const justSelectedPlan = new URL(request.url).searchParams.get("plan_handle");
+
+  return {
+    usage: { ...usage, agencyIneligibleSince },
+    eligibility,
+    planSelectionUrl: planSelectionUrl({ shop, appHandle }),
+    justSelectedPlan,
+  };
 };
 
+/**
+ * The only remaining server action: send the merchant to Shopify's hosted
+ * plan-selection page.
+ *
+ * `redirect` from authenticate.admin with target "_top" is the supported way
+ * out of the embedded iframe — for a fetcher POST like this one it throws a
+ * 401 carrying the reauthorize-URL header, which App Bridge's patched fetch
+ * turns into a top-level navigation. (This is the same mechanism the old
+ * billing.request call relied on; only the destination changed.)
+ *
+ * There is no per-plan URL under App Pricing — Shopify hosts ONE page
+ * showing every plan — so this takes no plan argument. The Agency
+ * eligibility rule is therefore no longer enforceable at this point; it is
+ * surfaced before the click (the warning on the Agency card) and recorded
+ * after it (syncAgencyIneligibilityFlag in the loader).
+ */
 export const action = async ({ request }) => {
-  const { session, billing } = await authenticate.admin(request);
+  const { session, redirect } = await authenticate.admin(request);
   const shop = session.shop;
   const version = apiVersion || "2025-10";
   const formData = await request.formData();
   const intent = formData.get("intent");
 
-  if (intent !== "subscribe") {
+  if (intent !== "select-plan") {
     return Response.json({ ok: false, error: `Unsupported intent "${intent}"` }, { status: 400 });
   }
 
-  const plan = formData.get("plan");
-  if (!isBillablePlanId(plan)) {
-    return Response.json({ ok: false, error: `Unknown plan "${plan}"` }, { status: 400 });
-  }
+  const appHandle = await resolveAppHandle({
+    shopifyGraphql, shop, token: session.accessToken, version,
+  });
+  const url = planSelectionUrl({ shop, appHandle });
 
-  if (plan === PLAN_IDS.AGENCY) {
-    // The UI already hides/disables Agency for an ineligible shop, but a
-    // raw POST must not be able to skip the store-count requirement.
-    // checkAgencyEligibility persists the fetched email onto THIS shop's own
-    // row (needed for it to count itself), which requires that row to
-    // already exist — normally true by the time a merchant can click
-    // Subscribe (the loader's reconcile() creates it on page load), but not
-    // guaranteed for a direct POST, so it's created here too.
-    await getOrCreateShopPlan({ prisma, shop });
-    const eligibility = await checkAgencyEligibility({
-      prisma, shopifyGraphql, shop, token: session.accessToken, version,
-    });
-    if (!eligibility.eligible) {
-      return Response.json({
-        ok: false,
-        error: `Agency requires ${AGENCY_MIN_STORES}+ stores running Importzo (this merchant currently has ${eligibility.storeCount}).`,
-      }, { status: 403 });
-    }
-  }
-
-  const appUrl = (process.env.SHOPIFY_APP_URL || new URL(request.url).origin).replace(/\/+$/, ""); // eslint-disable-line no-undef
-
-  // billing.request always throws — either a redirect (non-embedded) or,
-  // for an embedded/XHR request like this fetcher submission, a response
-  // App Bridge's patched fetch recognizes and turns into a top-level
-  // redirect to Shopify's charge confirmation page. There is no line of
-  // code after this that will ever run on success.
-  //
-  // Because success is signalled by a thrown Response, a *failed* charge
-  // request throws too — as a BillingError. Left uncaught, that error
-  // propagates to this route's ErrorBoundary, which replaces the whole
-  // page with "We couldn't load Billing" and hides Shopify's actual
-  // reason. The one that matters in practice: if the app is configured
-  // for Shopify Managed Pricing in the Partners Dashboard, Shopify
-  // rejects appSubscriptionCreate outright ("Managed Pricing Apps cannot
-  // use the Billing API (to create charges)") — a config mismatch no
-  // retry can fix, and one the merchant must be able to see and report.
-  try {
-    await billing.request({
-      plan: SHOPIFY_PLAN_NAME[plan],
-      isTest: isTestCharge(),
-      trialDays: 7,
-      returnUrl: `${appUrl}/app/billing`,
-    });
-  } catch (err) {
-    // The success path — keep it propagating, it IS the redirect.
-    if (err instanceof Response) throw err;
-
-    // BillingError carries Shopify's own explanation in `errorData`;
-    // fall back to the generic message when it doesn't.
-    const detail = (Array.isArray(err?.errorData) ? err.errorData : [])
-      .map((e) => e?.message)
-      .filter(Boolean)
-      .join(" ") || err?.message || "Unknown billing error";
-
-    console.error(`[app.billing] billing.request failed for ${shop} (plan=${plan}):`, detail);
-    return Response.json({
-      ok: false,
-      error: `Shopify could not start this subscription: ${detail}`,
-    }, { status: 502 });
-  }
-
-  return null;
+  console.log(`[app.billing] redirecting ${shop} to Shopify App Pricing plan selection: ${url}`);
+  return redirect(url, { target: "_top" });
 };
 
 const { primary: P, secondary: S, font: F } = BRAND;
@@ -170,12 +168,15 @@ const { primary: P, secondary: S, font: F } = BRAND;
 function UsageCard({ usage }) {
   const pct = usage.isUnlimited ? 0 : Math.min(100, Math.round((usage.used / Math.max(usage.limit, 1)) * 100));
   const atLimit = !usage.isUnlimited && usage.remaining === 0;
+  const intervalLabel = usage.interval === BILLING_INTERVAL.YEARLY
+    ? " · billed yearly"
+    : usage.interval === BILLING_INTERVAL.MONTHLY ? " · billed monthly" : "";
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div>
-          <p className="text-sm font-semibold text-gray-900">Current plan: {usage.label}</p>
+          <p className="text-sm font-semibold text-gray-900">Current plan: {usage.label}{intervalLabel}</p>
           <p className="text-xs text-gray-500 mt-0.5">
             {usage.isUnlimited
               ? "Unlimited records this month"
@@ -207,13 +208,84 @@ UsageCard.propTypes = {
     limit: PropTypes.number,
     remaining: PropTypes.number,
     isUnlimited: PropTypes.bool,
+    interval: PropTypes.string,
   }).isRequired,
 };
 
-function PlanCard({ plan, currentTier, eligibility, isTestCharge, onSubscribe, busy }) {
+/**
+ * Phase 8 — the notice for a shop holding Agency without meeting the
+ * 3-store requirement.
+ *
+ * Deliberately states all three things a merchant needs to know and none of
+ * the ones they don't: nothing has been turned off, this IS being tracked,
+ * and here are the two ways out. Silence in either direction — letting it
+ * pass unmentioned, or quietly degrading the account — was the thing to
+ * avoid.
+ */
+function AgencyIneligibleNotice({ eligibility, since, planSelectionUrl: url }) {
+  const shortfall = Math.max(0, AGENCY_MIN_STORES - eligibility.storeCount);
+  const flaggedOn = since ? new Date(since).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : null;
+
+  return (
+    <div className="rounded-xl border border-amber-300 bg-amber-50 p-5">
+      <div className="flex items-start gap-3">
+        <svg className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+        </svg>
+        <div className="min-w-0">
+          <p className="text-sm font-semibold text-amber-900" style={{ fontFamily: F }}>
+            You&apos;re on Agency pricing, but this account doesn&apos;t qualify yet
+          </p>
+          <p className="mt-1.5 text-xs text-amber-800 leading-relaxed">
+            Agency&apos;s discounted rate is for merchants running Importzo on {AGENCY_MIN_STORES} or more stores.
+            We currently count <strong>{eligibility.storeCount}</strong> {eligibility.storeCount === 1 ? "store" : "stores"} under
+            your store contact email{shortfall > 0 ? ` — ${shortfall} short` : ""}.
+          </p>
+          <p className="mt-2 text-xs text-amber-800 leading-relaxed">
+            <strong>Nothing has been switched off.</strong> Every Importzo feature stays fully available and
+            your imports keep running — Agency and Pro include exactly the same features, so this is a
+            pricing question, not an access one.
+            {flaggedOn ? ` We've noted this on your account since ${flaggedOn}.` : ""} If the store count
+            doesn&apos;t reach {AGENCY_MIN_STORES}, we may ask you to move to Pro pricing; we&apos;ll contact you first and
+            never change your plan without telling you.
+          </p>
+          <p className="mt-2 text-xs text-amber-800 leading-relaxed">
+            To resolve it: install Importzo on {shortfall > 0 ? `${shortfall} more ${shortfall === 1 ? "store" : "stores"}` : "your other stores"} using
+            the same store contact email, or switch to Pro on your plan page.
+          </p>
+          <a
+            href={url}
+            target="_top"
+            className="mt-3 inline-flex items-center gap-1 text-xs font-semibold text-amber-900 hover:underline"
+          >
+            Manage your plan in Shopify
+            <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden="true"><path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" /></svg>
+          </a>
+          <p className="mt-2 text-[11px] text-amber-700">
+            Think this is wrong? Stores are matched by their Shopify contact email — if your stores use
+            different addresses, email support@dazzletech.co and we&apos;ll link them by hand.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+AgencyIneligibleNotice.propTypes = {
+  eligibility: PropTypes.shape({ storeCount: PropTypes.number }).isRequired,
+  // Date, not string: React Router's single-fetch (turbo-stream) preserves
+  // Date instances across the loader boundary, so this arrives as the Date
+  // syncAgencyIneligibilityFlag returned. Accepts both so the prop stays
+  // honest either way — new Date() handles each.
+  since: PropTypes.oneOfType([PropTypes.string, PropTypes.instanceOf(Date)]),
+  planSelectionUrl: PropTypes.string.isRequired,
+};
+
+function PlanCard({ plan, currentTier, eligibility, onSelect, busy }) {
   const isCurrent = plan.id === currentTier;
   const isFree = plan.id === PLAN_IDS.FREE;
   const needsEligibility = plan.requiresEligibility && !eligibility.eligible;
+  const savings = yearlySavingsPercent(plan.id);
 
   return (
     <div
@@ -232,29 +304,37 @@ function PlanCard({ plan, currentTier, eligibility, isTestCharge, onSubscribe, b
         {plan.price === 0 ? "Free" : `$${plan.price}`}
         {plan.price > 0 && <span className="text-sm font-medium text-gray-400">/mo{plan.requiresEligibility ? " per store" : ""}</span>}
       </p>
-      <p className="mt-1 text-xs text-gray-500">{plan.tagline}</p>
+      {plan.priceYearly > 0 && (
+        <p className="mt-0.5 text-xs text-gray-500">
+          or <strong className="text-gray-700">${plan.priceYearly}/year</strong>
+          {savings > 0 && <span className="ml-1 font-semibold" style={{ color: S }}>save {savings}%</span>}
+        </p>
+      )}
+      <p className="mt-1.5 text-xs text-gray-500">{plan.tagline}</p>
       <p className="mt-2 text-xs text-gray-500 leading-relaxed flex-1">{plan.description}</p>
 
       {needsEligibility && (
-        <p className="mt-3 text-[11px] text-amber-600 font-medium">
+        <p className="mt-3 text-[11px] text-amber-700 font-medium leading-relaxed">
           Unlocks at {AGENCY_MIN_STORES}+ stores — this merchant currently has {eligibility.storeCount}.
+          Shopify&apos;s plan page will still let you pick it, but we&apos;ll flag the account and may ask you to
+          move to Pro.
         </p>
       )}
 
       {!isFree && !isCurrent && (
         <button
           type="button"
-          disabled={busy || needsEligibility}
-          onClick={() => onSubscribe(plan.id)}
+          disabled={busy}
+          onClick={onSelect}
           className="mt-4 px-4 py-2 text-sm rounded-lg shadow-sm font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed hover:brightness-110"
-          style={{ background: needsEligibility ? "#d1d5db" : P, color: "#fff", fontFamily: F }}
+          style={{ background: P, color: "#fff", fontFamily: F }}
         >
-          {busy ? "Redirecting…" : `Subscribe to ${plan.label}`}
+          {busy ? "Redirecting…" : `Choose ${plan.label} in Shopify`}
         </button>
       )}
 
-      {!isFree && !isCurrent && !needsEligibility && (
-        <p className="mt-2 text-[11px] text-gray-400">7-day free trial{isTestCharge ? " · test charge, no real card is billed" : ""}</p>
+      {!isFree && !isCurrent && (
+        <p className="mt-2 text-[11px] text-gray-400">{TRIAL_DAYS}-day free trial · monthly or yearly, chosen on Shopify&apos;s page</p>
       )}
     </div>
   );
@@ -265,6 +345,7 @@ PlanCard.propTypes = {
     id: PropTypes.string,
     label: PropTypes.string,
     price: PropTypes.number,
+    priceYearly: PropTypes.number,
     tagline: PropTypes.string,
     description: PropTypes.string,
     requiresEligibility: PropTypes.bool,
@@ -274,25 +355,34 @@ PlanCard.propTypes = {
     eligible: PropTypes.bool,
     storeCount: PropTypes.number,
   }).isRequired,
-  isTestCharge: PropTypes.bool.isRequired,
-  onSubscribe: PropTypes.func.isRequired,
+  onSelect: PropTypes.func.isRequired,
   busy: PropTypes.bool.isRequired,
 };
 
 export default function BillingPage() {
-  const { usage, eligibility, isTestCharge } = useLoaderData();
+  const { usage, eligibility, planSelectionUrl: url, justSelectedPlan } = useLoaderData();
   const shopify = useAppBridge();
   const fetcher = useFetcher();
   const busy = fetcher.state !== "idle";
+  const showAgencyNotice = usage.tier === PLAN_IDS.AGENCY && !eligibility.eligible;
 
   useEffect(() => {
     if (fetcher.data?.ok === false && fetcher.state === "idle") {
-      shopify.toast.show(fetcher.data.error || "Could not start checkout", { isError: true });
+      shopify.toast.show(fetcher.data.error || "Could not open the plan page", { isError: true });
     }
   }, [fetcher.data, fetcher.state, shopify]);
 
-  function handleSubscribe(planId) {
-    fetcher.submit({ intent: "subscribe", plan: planId }, { method: "POST" });
+  // Shopify sends the merchant back here after they pick a plan. The tier
+  // shown has already been reconciled from billing.check() by the loader, so
+  // this is only a confirmation that the round trip landed.
+  useEffect(() => {
+    if (justSelectedPlan) {
+      shopify.toast.show(`You're on the ${usage.label} plan`);
+    }
+  }, [justSelectedPlan, usage.label, shopify]);
+
+  function handleSelectPlan() {
+    fetcher.submit({ intent: "select-plan" }, { method: "POST" });
   }
 
   return (
@@ -305,12 +395,22 @@ export default function BillingPage() {
 
         <UsageCard usage={usage} />
 
+        {showAgencyNotice && (
+          <AgencyIneligibleNotice
+            eligibility={eligibility}
+            since={usage.agencyIneligibleSince}
+            planSelectionUrl={url}
+          />
+        )}
+
         <section className="space-y-4">
           <div>
             <h2 className="text-base font-semibold text-gray-900" style={{ fontFamily: F }}>Plans</h2>
             <p className="text-sm text-gray-500 mt-0.5">
-              Upgrading takes effect as soon as you approve the charge in Shopify. To cancel or change
-              payment details, use Shopify admin&apos;s Apps &amp; sales channels &rarr; Manage app &rarr; Billing.
+              Plans are billed through Shopify. Choosing a plan opens Shopify&apos;s own plan page, where you
+              pick monthly or yearly billing and approve the charge — upgrading takes effect as soon as you
+              approve it. To cancel or change payment details, use the same page, or Shopify
+              admin&apos;s Apps &amp; sales channels &rarr; Manage app &rarr; Billing.
             </p>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -320,12 +420,14 @@ export default function BillingPage() {
                 plan={PLANS[id]}
                 currentTier={usage.tier}
                 eligibility={eligibility}
-                isTestCharge={isTestCharge}
-                onSubscribe={handleSubscribe}
+                onSelect={handleSelectPlan}
                 busy={busy}
               />
             ))}
           </div>
+          <p className="text-xs text-gray-400">
+            Yearly billing saves {yearlySavingsPercent(PLAN_IDS.PRO)}% versus paying month to month. Prices in USD.
+          </p>
         </section>
       </div>
     </s-page>

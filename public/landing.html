@@ -62,17 +62,31 @@
     },
     {
       "@type": "Offer",
-      "name": "Pro",
+      "name": "Pro (monthly)",
       "price": "15",
       "priceCurrency": "USD",
-      "description": "Unlimited records plus scheduled sync"
+      "description": "Unlimited records plus scheduled sync, billed monthly"
     },
     {
       "@type": "Offer",
-      "name": "Agency",
+      "name": "Pro (yearly)",
+      "price": "144",
+      "priceCurrency": "USD",
+      "description": "Unlimited records plus scheduled sync, billed yearly — saves 20% versus monthly"
+    },
+    {
+      "@type": "Offer",
+      "name": "Agency (monthly)",
       "price": "10",
       "priceCurrency": "USD",
-      "description": "Everything in Pro, discounted per store, for merchants running 3+ stores"
+      "description": "Everything in Pro, discounted per store, for merchants running 3+ stores, billed monthly"
+    },
+    {
+      "@type": "Offer",
+      "name": "Agency (yearly)",
+      "price": "96",
+      "priceCurrency": "USD",
+      "description": "Everything in Pro, discounted per store, for merchants running 3+ stores, billed yearly — saves 20% versus monthly"
     }
   ],
   "aggregateRating": {
@@ -173,7 +187,7 @@
       "name": "What does Importzo cost?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "Importzo has three plans: Free ($0, 1 store, 250 records/month), Pro ($15/month, unlimited records plus scheduled sync), and Agency ($10/month per store, everything in Pro at a discount, for merchants running 3 or more stores with Importzo installed). No credit card is required for the Free plan."
+        "text": "Importzo has three plans: Free ($0, 1 store, 250 records/month), Pro ($15/month or $144/year — a 20% saving — for unlimited records plus scheduled sync), and Agency ($10/month or $96/year per store, everything in Pro at a discount, for merchants running 3 or more stores with Importzo installed). Both paid plans include a 7-day free trial and can be billed monthly or yearly. No credit card is required for the Free plan."
       }
     }
   ]
@@ -458,7 +472,10 @@ section{padding:92px 0;position:relative}
 .price-name{font-size:16px;font-weight:700;color:var(--text);margin-bottom:4px}
 .price-amount{font-size:38px;font-weight:800;color:var(--primary);letter-spacing:-.02em}
 .price-amount span{font-size:14px;font-weight:500;color:var(--text-dim)}
-.price-tagline{font-size:13px;color:var(--secondary);font-weight:600;margin:8px 0 4px}
+.price-yearly{font-size:13px;color:var(--text-muted);margin-top:6px;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.price-yearly strong{color:var(--text);font-weight:700}
+.save-badge{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.01em;color:var(--secondary);background:rgba(46,99,22,.1);border-radius:999px;padding:2px 8px;white-space:nowrap}
+.price-tagline{font-size:13px;color:var(--secondary);font-weight:600;margin:10px 0 4px}
 .price-desc{font-size:13px;color:var(--text-muted);margin-bottom:22px;min-height:36px}
 .price-features{list-style:none;display:flex;flex-direction:column;gap:11px;margin-bottom:26px;flex:1}
 .price-features li{display:flex;align-items:flex-start;gap:9px;font-size:13.5px;color:var(--text)}
@@ -799,12 +816,13 @@ footer{border-top:1px solid var(--border);padding:40px 0;background:var(--bg-car
     <div class="section-heading fade-up">
       <div class="section-label"><span class="tag">Pricing</span></div>
       <h2 id="pricing-heading">Simple Plans That<br><span class="gradient-text">Scale With You</span></h2>
-      <p>Start free. Upgrade only when you need unlimited volume or recurring sync.</p>
+      <p>Start free. Upgrade only when you need unlimited volume or recurring sync — and save 20% when you pay yearly.</p>
     </div>
     <div class="pricing-grid">
       <div class="price-card fade-up">
         <p class="price-name">Free</p>
         <p class="price-amount">$0<span>/mo</span></p>
+        <p class="price-yearly">Free forever — no card required</p>
         <p class="price-tagline">1 store, 250 records/month</p>
         <p class="price-desc">For trying Importzo out on a single store.</p>
         <ul class="price-features">
@@ -819,12 +837,13 @@ footer{border-top:1px solid var(--border);padding:40px 0;background:var(--bg-car
         <span class="price-badge">Most Popular</span>
         <p class="price-name">Pro</p>
         <p class="price-amount">$15<span>/mo</span></p>
+        <p class="price-yearly">or <strong>$144/year</strong> <span class="save-badge">save 20%</span></p>
         <p class="price-tagline">Unlimited records + scheduled sync</p>
         <p class="price-desc">For growing stores that need unlimited volume and recurring sync.</p>
         <ul class="price-features">
           <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Everything in Free, unlimited</li>
           <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Scheduled recurring sync</li>
-          <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>7-day free trial</li>
+          <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>7-day free trial · monthly or yearly</li>
         </ul>
         <a href="https://apps.shopify.com/importzo" class="price-cta" target="_blank" rel="noopener">Start Free Trial</a>
       </div>
@@ -832,17 +851,18 @@ footer{border-top:1px solid var(--border);padding:40px 0;background:var(--bg-car
       <div class="price-card fade-up">
         <p class="price-name">Agency</p>
         <p class="price-amount">$10<span>/mo per store</span></p>
+        <p class="price-yearly">or <strong>$96/year</strong> per store <span class="save-badge">save 20%</span></p>
         <p class="price-tagline">Everything in Pro, discounted</p>
         <p class="price-desc">Unlocks once the same merchant has 3+ stores running Importzo.</p>
         <ul class="price-features">
           <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Everything in Pro</li>
-          <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Discounted per-store pricing</li>
+          <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Discounted per-store pricing, monthly or yearly</li>
           <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Built for multi-store portfolios</li>
         </ul>
         <a href="https://apps.shopify.com/importzo" class="price-cta" target="_blank" rel="noopener">Install Free</a>
       </div>
     </div>
-    <p class="pricing-note">No credit card required for Free. Prices in USD, billed monthly through Shopify.</p>
+    <p class="pricing-note">No credit card required for Free. Prices in USD, billed through Shopify — choose monthly or yearly at checkout. Yearly saves 20%.</p>
   </div>
 </section>
 
@@ -988,7 +1008,7 @@ footer{border-top:1px solid var(--border);padding:40px 0;background:var(--bg-car
           <span class="faq-chevron" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
         </button>
         <div class="faq-answer" id="faq-10" role="region">
-          <div class="faq-answer-inner">Importzo has three plans: Free ($0, 1 store, 250 records/month), Pro ($15/month, unlimited records plus scheduled sync), and Agency ($10/month per store, everything in Pro at a discount, for merchants running 3 or more stores with Importzo installed). No credit card is required for the Free plan.</div>
+          <div class="faq-answer-inner">Importzo has three plans: Free ($0, 1 store, 250 records/month), Pro ($15/month or $144/year — a 20% saving — for unlimited records plus scheduled sync), and Agency ($10/month or $96/year per store, everything in Pro at a discount, for merchants running 3 or more stores with Importzo installed). Both paid plans include a 7-day free trial and can be billed monthly or yearly. No credit card is required for the Free plan.</div>
         </div>
       </div>
 
