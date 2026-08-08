@@ -139,7 +139,16 @@
       "Bash(git --no-pager diff --stat)",
       "Bash(git --no-pager diff package-lock.json)",
       "Bash(awk '{print $4}')",
-      "Bash(awk '{split\\($4,t,\":\"\\); print t[2]\":\"t[3]\"h  status=\"$9}')"
+      "Bash(awk '{split\\($4,t,\":\"\\); print t[2]\":\"t[3]\"h  status=\"$9}')",
+      "mcp__claude_ai_Shopify__search_docs_chunks",
+      "Bash(python3 -c ' *)",
+      "mcp__claude_ai_Shopify__graphql_schema",
+      "Bash(awk '/model ShopPlan/,/^}/' prisma/schema.prisma)",
+      "Bash(python3 *)",
+      "Bash(npm test *)",
+      "Bash(git add *)",
+      "Bash(git checkout *)",
+      "Bash(git commit *)"
     ]
   }
 }

@@ -47,8 +47,8 @@ if (process.env.NODE_ENV === "production" && appUrlHost && DEV_HOST_PATTERN.test
   throw new Error(
     `[importzo] FATAL: NODE_ENV=production with a development app URL (${appUrlHost}). ` +
     `This almost certainly means a production .env is being used for local dev — in this state ` +
-    `billing would issue real charges. Use .env.development (NODE_ENV=development) locally; ` +
-    `production's .env stays on the server.`
+    `DATABASE_URL points at the LIVE database and production Shopify credentials are in play. ` +
+    `Use .env.development (NODE_ENV=development) locally; production's .env stays on the server.`
   );
 }
 

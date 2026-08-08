@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import PropTypes from "prop-types";
 import { useFetcher, useLoaderData, useRouteError } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
@@ -10,11 +10,14 @@ import { getUsageStatus, setShopTier } from "../lib/usage.server";
 import { checkAgencyEligibility, syncAgencyIneligibilityFlag } from "../lib/agency-eligibility.server";
 import { planSelectionUrl, resolveAppHandle } from "../lib/app-pricing.server";
 import {
-  PLAN_IDS, PLANS, PLAN_ORDER, AGENCY_MIN_STORES, TRIAL_DAYS, BILLING_INTERVAL,
+  PLAN_IDS, PLANS, PLAN_ORDER, AGENCY_MIN_STORES, BILLING_INTERVAL,
   tierFromSubscriptionName, intervalFromShopifyInterval, yearlySavingsPercent,
 } from "../lib/plans.js";
+import { REDIRECT_OVERLAY_COPY, beginPlanSelection, shouldDismissOverlay } from "../lib/billing-ui.js";
 import { BRAND } from "../lib/constants";
 import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
+import { PlanCard } from "../components/PlanCard";
+import { RedirectingOverlay } from "../components/RedirectingOverlay";
 
 // ═══════════════════════════════════════════════════════════════════
 // Phase 5 — Billing: plan UI.
@@ -281,84 +284,6 @@ AgencyIneligibleNotice.propTypes = {
   planSelectionUrl: PropTypes.string.isRequired,
 };
 
-function PlanCard({ plan, currentTier, eligibility, onSelect, busy }) {
-  const isCurrent = plan.id === currentTier;
-  const isFree = plan.id === PLAN_IDS.FREE;
-  const needsEligibility = plan.requiresEligibility && !eligibility.eligible;
-  const savings = yearlySavingsPercent(plan.id);
-
-  return (
-    <div
-      className="bg-white rounded-xl border shadow-sm p-5 flex flex-col"
-      style={{ borderColor: isCurrent ? S : "#e5e7eb", borderWidth: isCurrent ? 2 : 1 }}
-    >
-      <div className="flex items-start justify-between gap-2">
-        <p className="text-base font-semibold text-gray-900" style={{ fontFamily: F }}>{plan.label}</p>
-        {isCurrent && (
-          <span className="text-xs font-semibold px-2 py-1 rounded-full flex-shrink-0" style={{ background: "rgba(46,99,22,0.1)", color: S }}>
-            Current plan
-          </span>
-        )}
-      </div>
-      <p className="mt-1 text-2xl font-bold text-gray-900" style={{ fontFamily: F }}>
-        {plan.price === 0 ? "Free" : `$${plan.price}`}
-        {plan.price > 0 && <span className="text-sm font-medium text-gray-400">/mo{plan.requiresEligibility ? " per store" : ""}</span>}
-      </p>
-      {plan.priceYearly > 0 && (
-        <p className="mt-0.5 text-xs text-gray-500">
-          or <strong className="text-gray-700">${plan.priceYearly}/year</strong>
-          {savings > 0 && <span className="ml-1 font-semibold" style={{ color: S }}>save {savings}%</span>}
-        </p>
-      )}
-      <p className="mt-1.5 text-xs text-gray-500">{plan.tagline}</p>
-      <p className="mt-2 text-xs text-gray-500 leading-relaxed flex-1">{plan.description}</p>
-
-      {needsEligibility && (
-        <p className="mt-3 text-[11px] text-amber-700 font-medium leading-relaxed">
-          Unlocks at {AGENCY_MIN_STORES}+ stores — this merchant currently has {eligibility.storeCount}.
-          Shopify&apos;s plan page will still let you pick it, but we&apos;ll flag the account and may ask you to
-          move to Pro.
-        </p>
-      )}
-
-      {!isFree && !isCurrent && (
-        <button
-          type="button"
-          disabled={busy}
-          onClick={onSelect}
-          className="mt-4 px-4 py-2 text-sm rounded-lg shadow-sm font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed hover:brightness-110"
-          style={{ background: P, color: "#fff", fontFamily: F }}
-        >
-          {busy ? "Redirecting…" : `Choose ${plan.label} in Shopify`}
-        </button>
-      )}
-
-      {!isFree && !isCurrent && (
-        <p className="mt-2 text-[11px] text-gray-400">{TRIAL_DAYS}-day free trial · monthly or yearly, chosen on Shopify&apos;s page</p>
-      )}
-    </div>
-  );
-}
-
-PlanCard.propTypes = {
-  plan: PropTypes.shape({
-    id: PropTypes.string,
-    label: PropTypes.string,
-    price: PropTypes.number,
-    priceYearly: PropTypes.number,
-    tagline: PropTypes.string,
-    description: PropTypes.string,
-    requiresEligibility: PropTypes.bool,
-  }).isRequired,
-  currentTier: PropTypes.string.isRequired,
-  eligibility: PropTypes.shape({
-    eligible: PropTypes.bool,
-    storeCount: PropTypes.number,
-  }).isRequired,
-  onSelect: PropTypes.func.isRequired,
-  busy: PropTypes.bool.isRequired,
-};
-
 export default function BillingPage() {
   const { usage, eligibility, planSelectionUrl: url, justSelectedPlan } = useLoaderData();
   const shopify = useAppBridge();
@@ -366,7 +291,16 @@ export default function BillingPage() {
   const busy = fetcher.state !== "idle";
   const showAgencyNotice = usage.tier === PLAN_IDS.AGENCY && !eligibility.eligible;
 
+  // Drives RedirectingOverlay. Set true the instant a plan is selected —
+  // BEFORE the fetcher submits — and only ever cleared on a failed action.
+  // See shouldDismissOverlay in billing-ui.js for why it must not track
+  // fetcher.state directly.
+  const [overlayOpen, setOverlayOpen] = useState(false);
+
   useEffect(() => {
+    if (shouldDismissOverlay({ state: fetcher.state, data: fetcher.data })) {
+      setOverlayOpen(false);
+    }
     if (fetcher.data?.ok === false && fetcher.state === "idle") {
       shopify.toast.show(fetcher.data.error || "Could not open the plan page", { isError: true });
     }
@@ -381,12 +315,23 @@ export default function BillingPage() {
     }
   }, [justSelectedPlan, usage.label, shopify]);
 
-  function handleSelectPlan() {
-    fetcher.submit({ intent: "select-plan" }, { method: "POST" });
+  function handleSelectPlan(plan) {
+    beginPlanSelection({
+      plan,
+      currentTier: usage.tier,
+      showOverlay: () => setOverlayOpen(true),
+      submit: () => fetcher.submit({ intent: "select-plan" }, { method: "POST" }),
+    });
   }
 
   return (
     <s-page heading="Billing" backAction={JSON.stringify({ content: "Dashboard", url: "/app" })}>
+      <RedirectingOverlay
+        open={overlayOpen}
+        title={REDIRECT_OVERLAY_COPY.title}
+        timing={REDIRECT_OVERLAY_COPY.timing}
+        reassurance={REDIRECT_OVERLAY_COPY.reassurance}
+      />
       <div className="space-y-6 animate-fade-in">
         <div className="flex items-center gap-2.5">
           <img src="/logo.png" alt="Importzo" style={{ height: 40, width: "auto", objectFit: "contain" }} />
@@ -420,8 +365,9 @@ export default function BillingPage() {
                 plan={PLANS[id]}
                 currentTier={usage.tier}
                 eligibility={eligibility}
-                onSelect={handleSelectPlan}
+                onSelect={() => handleSelectPlan(PLANS[id])}
                 busy={busy}
+                planSelectionUrl={url}
               />
             ))}
           </div>
