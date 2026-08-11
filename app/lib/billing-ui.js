@@ -35,6 +35,70 @@ export const REDIRECT_OVERLAY_COPY = Object.freeze({
 });
 
 /**
+ * Which plan gets the featured treatment, for THIS shop.
+ *
+ * A function of eligibility rather than a constant, and that is the whole
+ * point: this page knows something the public marketing site cannot. The
+ * landing page has no idea who is reading it, so it features Pro for
+ * everyone. Here we have the shop's real connected-store count, so each
+ * merchant can be pointed at the plan that is genuinely best for them.
+ *
+ *   3+ connected stores  -> Agency. Identical features to Pro at $10/store
+ *                           instead of $15, so for this merchant it is
+ *                           strictly the better deal and recommending
+ *                           anything else would be costing them money.
+ *   fewer than that      -> Pro. Agency is not usable by them in practice;
+ *                           featuring a card that carries its own "unlocks at
+ *                           3+ stores" warning is pointing a merchant at
+ *                           something they cannot have.
+ *
+ * Deliberately NOT a function of the merchant's current tier. The featured
+ * card marks the best-fit plan, not the one they are already on — that is what
+ * the "Current plan" pill says, and one card can legitimately carry both.
+ */
+export function featuredPlanId(eligibility) {
+  return eligibility?.eligible ? PLAN_IDS.AGENCY : PLAN_IDS.PRO;
+}
+
+/**
+ * Whether a given card gets the featured chrome — border, lift, badge.
+ *
+ * Note this changes the CHROME only. The amber "unlocks at 3+ stores" notice
+ * inside the Agency card is driven separately, off plan.requiresEligibility,
+ * so an ineligible merchant still sees that warning on an unfeatured card.
+ */
+export function isFeaturedPlan(planId, eligibility) {
+  return planId === featuredPlanId(eligibility);
+}
+
+/**
+ * Left-to-right order the plan cards are RENDERED in, keyed by which plan is
+ * currently featured.
+ *
+ * Deliberately not PLAN_ORDER. That array is the price/rank ladder — Free is
+ * below Pro is below Agency — and isUpgradeFrom() reads positions out of it to
+ * decide whether a move is an upgrade or a switch. Reordering it to suit the
+ * layout would silently relabel "Upgrade to Agency" as "Switch to Agency".
+ * They are different orderings of the same three ids and they are kept apart
+ * on purpose — note that the Pro-featured row below happens to match
+ * PLAN_ORDER today, and is still spelled out rather than aliased to it, so a
+ * future change to the ranking cannot quietly reshuffle the layout.
+ *
+ * The single rule: the featured plan sits in the middle. A highlighted plan at
+ * the end of a row reads as an afterthought; in the middle it reads as the
+ * recommendation. Free stays leftmost either way so the row still opens at $0.
+ */
+export const PLAN_DISPLAY_ORDER = Object.freeze({
+  [PLAN_IDS.AGENCY]: Object.freeze([PLAN_IDS.FREE, PLAN_IDS.AGENCY, PLAN_IDS.PRO]),
+  [PLAN_IDS.PRO]: Object.freeze([PLAN_IDS.FREE, PLAN_IDS.PRO, PLAN_IDS.AGENCY]),
+});
+
+/** The render order for this shop, with its featured plan in the middle. */
+export function planDisplayOrder(eligibility) {
+  return PLAN_DISPLAY_ORDER[featuredPlanId(eligibility)];
+}
+
+/**
  * Label for a plan card's call to action.
  *
  * "Upgrade to Pro" rather than "Choose Pro in Shopify": the merchant is

@@ -10,10 +10,13 @@ import { getUsageStatus, setShopTier } from "../lib/usage.server";
 import { checkAgencyEligibility, syncAgencyIneligibilityFlag } from "../lib/agency-eligibility.server";
 import { planSelectionUrl, resolveAppHandle } from "../lib/app-pricing.server";
 import {
-  PLAN_IDS, PLANS, PLAN_ORDER, AGENCY_MIN_STORES, BILLING_INTERVAL,
+  PLAN_IDS, PLANS, AGENCY_MIN_STORES, BILLING_INTERVAL,
   tierFromSubscriptionName, intervalFromShopifyInterval, yearlySavingsPercent,
 } from "../lib/plans.js";
-import { REDIRECT_OVERLAY_COPY, beginPlanSelection, shouldDismissOverlay } from "../lib/billing-ui.js";
+import {
+  REDIRECT_OVERLAY_COPY, beginPlanSelection, shouldDismissOverlay,
+  planDisplayOrder, isFeaturedPlan,
+} from "../lib/billing-ui.js";
 import { BRAND } from "../lib/constants";
 import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
 import { PlanCard } from "../components/PlanCard";
@@ -359,7 +362,9 @@ export default function BillingPage() {
             </p>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            {PLAN_ORDER.map((id) => (
+            {/* Order and emphasis both depend on this shop's eligibility:
+                the best-fit plan is featured and sits in the middle. */}
+            {planDisplayOrder(eligibility).map((id) => (
               <PlanCard
                 key={id}
                 plan={PLANS[id]}
@@ -368,6 +373,7 @@ export default function BillingPage() {
                 onSelect={() => handleSelectPlan(PLANS[id])}
                 busy={busy}
                 planSelectionUrl={url}
+                featured={isFeaturedPlan(id, eligibility)}
               />
             ))}
           </div>
