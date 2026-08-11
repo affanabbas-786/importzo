@@ -46,8 +46,15 @@ Importzo is a store-to-store migration tool for Shopify merchants. It connects t
 
 ## Pricing
 
-- Free plan: available immediately after install, no credit card required
-- Paid plans: available for larger stores and additional features
+All plans are billed through Shopify. Both paid plans include a 7-day free
+trial and can be paid monthly or yearly; yearly saves 20%.
+
+- **Free** — $0/month. 1 store, 250 records per month. No credit card required.
+- **Pro** — $15/month or $144/year. Unlimited records, scheduled recurring
+  sync, and built-in AI SEO cleanup.
+- **Agency** — $10/month or $96/year per store. Everything in Pro at a
+  discount; unlocks automatically once the same merchant is running Importzo
+  on 3 or more stores.
 
 ## Links
 
