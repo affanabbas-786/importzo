@@ -201,9 +201,14 @@ Backups taken before mutating anything: `prisma/production.sqlite.backup.pre-tok
 
 ---
 
-## Three process defects in `deploy.sh`
+## Three process defects in `deploy.sh` — FIXED 2026-08-15
 
-I read `deploy.sh` at the end and it explains more than it looks like it should. It currently runs: `npm run build` → `npx prisma migrate deploy` → `pm2 reload importzo`.
+**Status: all three fixed and verified by a real end-to-end deploy (exit 0).** The
+description below is what was wrong; the fix for each follows it. New sequence:
+`prisma generate` → `build` → `backup` → conditional `migrate` → `reload`/`restart`
+→ `verify` → `prune`.
+
+I read `deploy.sh` at the end and it explains more than it looks like it should. It previously ran: `npm run build` → `npx prisma migrate deploy` → `pm2 reload importzo`.
 
 **1. `pm2 reload importzo` does not pick up `.env` changes — this is the actual root cause of finding #7.**
 PM2 injects the environment it cached in `dump.pm2` at first start, and Node's `--env-file` does not override variables already present in the process environment. So a deploy after editing `.env` silently keeps serving the *old* values. That is exactly how `GROQ_API_KEY` could be added on 2026-08-13 and still be absent from a process that had been reloaded since. It will happen again with any new variable.
@@ -213,6 +218,25 @@ PM2 injects the environment it cached in `dump.pm2` at first start, and Node's `
 
 **3. `prisma migrate deploy` will fail while the app is running.** SQLite returns `database is locked` — I hit this during the audit. It happened to be harmless because all 17 migrations were already applied, but on a deploy that *does* carry a migration, `set -e` means the script aborts **after** `npm run build` and **before** `pm2 reload` — leaving new code built but not serving, and the migration unapplied. Needs the app stopped for the migration step, or a retry/backoff.
 
-**One more, unrelated to `deploy.sh`:** the first backup I took during this audit with `cp -a` captured **8 of 9 sessions** — it missed the write-ahead log. Anything that copies a live SQLite file with `cp` produces a silently incomplete backup. Use `sqlite3 production.sqlite ".backup 'target'"`, which is what I used for the real one. `deploy.sh` does not back up the database at all, so whatever produced the fourteen `production.sqlite.backup.*` files is a separate process worth checking for the same flaw.
+**4. No database backup existed at all.** `deploy.sh` never backed one up, and Citeable's cron does not touch Importzo — the fifteen `production.sqlite.backup.*` files were created ad hoc. There was no process to fix, so one was added: `sqlite3 ".backup"` (never `cp`, which misses the write-ahead log — a `cp -a` backup taken during this audit captured **8 of 9** live sessions), `chmod 640`, verified with both `integrity_check` and a row-count comparison, aborting the deploy before any change if either fails.
 
-I did not modify `deploy.sh` — it is your deploy path and changing it mid-audit without you watching is not a call I should make unilaterally.
+### Bugs found while testing the new script
+
+Writing it was not the hard part; testing it was. Four bugs in my own draft, all of the same family — under `set -euo pipefail`, a pipeline whose first command legitimately finds nothing aborts the whole deploy:
+
+- `prune_backups` aborted the deploy when no backups exist (verified: exit 2).
+- `APP_URL` would abort if `SHOPIFY_APP_URL` were missing from `.env` — `grep` exits 1, killing the script *before* the `${:-}` default could supply one.
+- A failed `pm2 jlist` would abort at the verify step, which looks identical to a healthy deploy.
+- **The prune glob matched `-shm`/`-wal` sidecars.** `prisma/` holds 39 matches for 16 real backups, so "keep newest 10" would have deleted genuine backups while retaining orphaned sidecars. Now filtered, and each backup's sidecars are removed with it.
+
+`set -euo pipefail` was kept deliberately. It is stricter than the old `set -e` and it is what surfaced all four — reverting would re-hide exactly the silent-failure class this audit was about.
+
+### Deploy verification (2026-08-15 17:08)
+
+Ran for real, exit 0. Generate → build → backup (`integrity ok`, sessions 4/4) → `migrate status` reported the schema up to date so **no downtime was taken** → `pm2 reload <ecosystem> --update-env` → PM2 online, `/` HTTP 200 → prune correctly did nothing.
+
+`KEEP_BACKUPS` is temporarily **20**, not the sane long-term 10: there were already 15 backups on disk and each run adds one, so 10 would have deleted the oldest immediately. All 15 originals confirmed intact after the deploy. **Lower it back to 10 once the pre-2026-08 backups are archived.**
+
+Fix #1 was verified at the process level rather than inferred: `SCHEDULER_SECRET`, `GROQ_API_KEY`, `ENCRYPTION_KEY` and `SHOPIFY_API_SECRET` in `/proc/<pid>/environ` all now match `.env`, and the cron tick script authenticates against the running app with the current secret.
+
+**Minor, noticed in the logs and not addressed:** `/robots.txt` 404s with a stack trace. Harmless, but it is a public marketing domain and a trivial static file would quiet it.
