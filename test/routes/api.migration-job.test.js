@@ -14,6 +14,12 @@ vi.mock("../../app/db.server", () => ({
     transferSession: { findUnique: vi.fn(async () => null) },
     migrationJob: {
       count: vi.fn(async () => 0),
+      // Same-pair idempotency guard: an in-flight job for this exact
+      // source -> destination pair short-circuits a duplicate submit.
+      findFirst: vi.fn(async ({ where }) => db.jobs.find((j) =>
+        j.shop === where.shop
+        && j.sourceShop === where.sourceShop
+        && where.status.in.includes(j.status)) || null),
       create: vi.fn(async ({ data }) => {
         const row = { id: `job-${db.jobs.length + 1}`, ...data };
         db.jobs.push(row);
@@ -79,6 +85,77 @@ describe("api.migration-job action", () => {
     expect(body.ok).toBe(true);
     expect(db.jobs[0]).toMatchObject({ sourceMarketId: null, sourceMarketHandle: null, sourceMarketPublicationIds: null });
     expect(runMigrationWorkerMock).toHaveBeenCalledWith(db.jobs[0].id);
+  });
+
+  // ── Double-submit must not duplicate the merchant's catalog ─────────────
+  //
+  // maxConcurrent is 2 (two different source stores at once is legitimate),
+  // so the load cap alone lets a second job for the SAME pair through. Two
+  // workers then run the same product set concurrently: ProductMapping is
+  // unique per (jobId, sourceProductId) so it dedupes within a job and not
+  // across two, and conflictMode="skip" loses the race because both look up
+  // the handle before either has created anything.
+
+  describe("double-submit for the same store pair", () => {
+    function submit() {
+      return action({
+        request: mockActionRequest({
+          sourceShop: "source-shop.myshopify.com", sourceToken: "shpat_abc", conflictMode: "skip",
+        }),
+      });
+    }
+
+    it("does not start a second job for the same source -> destination pair", async () => {
+      const first = await (await submit()).json();
+      db.jobs[0].status = "RUNNING";
+
+      const second = await (await submit()).json();
+
+      expect(db.jobs).toHaveLength(1);
+      expect(second.jobId).toBe(first.jobId);
+      expect(second.alreadyRunning).toBe(true);
+      // Only the original worker was ever started.
+      expect(runMigrationWorkerMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("returns ok:true with the in-flight job id so a double-click just polls the real job", async () => {
+      await submit();
+      db.jobs[0].status = "PENDING";
+
+      const res = await submit();
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.ok).toBe(true);
+      expect(body.jobId).toBe(db.jobs[0].id);
+      expect(body.message).toMatch(/already in progress/i);
+    });
+
+    it("still allows a concurrent transfer from a DIFFERENT source store", async () => {
+      await submit();
+      db.jobs[0].status = "RUNNING";
+
+      const res = await action({
+        request: mockActionRequest({
+          sourceShop: "other-source.myshopify.com", sourceToken: "shpat_xyz", conflictMode: "skip",
+        }),
+      });
+      const body = await res.json();
+
+      expect(body.ok).toBe(true);
+      expect(body.alreadyRunning).toBeUndefined();
+      expect(db.jobs).toHaveLength(2);
+    });
+
+    it("allows a re-run once the previous job for that pair has finished", async () => {
+      await submit();
+      db.jobs[0].status = "COMPLETED";
+
+      const body = await (await submit()).json();
+
+      expect(body.alreadyRunning).toBeUndefined();
+      expect(db.jobs).toHaveLength(2);
+    });
   });
 
   it("resolves a selected market against the SOURCE store and snapshots its publication ids onto the job", async () => {

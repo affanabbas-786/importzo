@@ -42,6 +42,25 @@ prisma/production.sqlite
 prisma/production.sqlite-shm
 prisma/production.sqlite-wal
 archive.zip
+
+# Database BACKUPS. These were not covered by the rules above — which match
+# `production.sqlite` exactly — so every `production.sqlite.backup.<stamp>`
+# file deploy.sh drops next to the live database was committable, and twelve
+# of them were in fact committed and are still in this repository's history.
+#
+# They are not "just an old database". PrismaSessionStorage stores
+# Session.accessToken in PLAINTEXT (only the app's own copies of tokens, in
+# MigrationJob/SourceStore/etc., go through encryption.server.js), so each of
+# these files is a list of live Shopify Admin API offline tokens for real
+# merchant stores — several of which are byte-identical to the tokens in the
+# live database right now. Broad glob, deliberately: the next backup will be
+# named something nobody predicted.
+prisma/*.sqlite
+prisma/*.sqlite-shm
+prisma/*.sqlite-wal
+prisma/*.sqlite.backup*
+prisma/*.backup.*
+*.sqlite.backup*
 .claude/settings.local.json
 
 # SQLite sidecar files for the local dev database (WAL mode is enabled in

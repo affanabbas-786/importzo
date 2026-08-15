@@ -24,9 +24,13 @@ api_version = "2026-04"
   # changes made outside this app (Shopify's own billing settings). See
   # webhooks.app_subscriptions.update.jsx for why this matters: without it,
   # ShopPlan.tier only re-syncs the next time the merchant opens the
-  # Billing page. NOT YET COMMITTED — new webhook subscriptions take effect
-  # on next deploy/registration; flagged for your review alongside the rest
-  # of this audit.
+  # Billing page.
+  #
+  # LIVE as of 2026-08-13: this subscription is registered and Shopify is
+  # delivering the topic (deliveries observed in the app's own access log).
+  # The earlier "NOT YET COMMITTED" note here was stale and said the
+  # opposite — left uncorrected it would have invited someone to "finish"
+  # a migration that had already shipped.
   [[webhooks.subscriptions]]
   topics = [ "app_subscriptions/update" ]
   uri = "/webhooks/app_subscriptions/update"

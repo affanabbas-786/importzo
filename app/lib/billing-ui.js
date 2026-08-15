@@ -14,7 +14,7 @@
 // in service of that gap.
 // ═══════════════════════════════════════════════════════════════════
 
-import { PLAN_IDS, PLAN_ORDER } from "./plans.js";
+import { PLAN_IDS, PLANS, PLAN_ORDER, BILLING_INTERVAL, isBillablePlanId } from "./plans.js";
 
 /**
  * Copy for the overlay shown while the browser is on its way to Shopify.
@@ -135,10 +135,90 @@ export function isUpgradeFrom(fromId, toId) {
  * of Shopify's page. Neither is the paid upgrade flow, so neither gets the
  * paid upgrade button. See freeCardLink for what they get instead.
  */
-export function offersPlanSelection({ planId, currentTier }) {
+export function offersPlanSelection({ planId, currentTier, interval, currentInterval }) {
   if (planId === PLAN_IDS.FREE) return false;
-  return planId !== currentTier;
+  return planCta({ planId, currentTier, interval, currentInterval }).kind === "select";
 }
+
+/**
+ * What a plan card's single call-to-action should be, in this period.
+ *
+ * One function instead of a scatter of booleans in the component, because the
+ * states are mutually exclusive and getting the precedence wrong is exactly
+ * the bug this replaced: a shop on Pro was shown "Upgrade to Pro". That
+ * happened because the card compared tier AND interval, and `interval` was
+ * null — Shopify does not always return line items, and reconcile() honestly
+ * reports null rather than guessing. `monthly !== null` read as "different
+ * plan", so the card offered a merchant the plan they were already paying for.
+ *
+ * The fix is the `currentInterval == null` branch below: when the tier matches
+ * but the period is UNKNOWN, the honest answer is "you're on this plan", not
+ * "upgrade". An unknown period is not a different period.
+ *
+ * Kinds:
+ *   current   — this exact plan and period. Disabled.
+ *   switch    — same tier, other period. A real billable change.
+ *   downgrade — the Free card, for a shop on a paid plan.
+ *   included  — the Free card, for a shop already on Free. Disabled.
+ *   select    — anything else: a genuine upgrade or tier change.
+ */
+export function planCta({ planId, currentTier, interval, currentInterval }) {
+  if (planId === PLAN_IDS.FREE) {
+    return currentTier === PLAN_IDS.FREE
+      ? { kind: "included", label: "Included", disabled: true }
+      : { kind: "downgrade", label: "Downgrade to Free", disabled: false };
+  }
+
+  if (planId === currentTier) {
+    // Unknown period counts as "the one you're on" — see above.
+    if (currentInterval == null || interval === currentInterval) {
+      return { kind: "current", label: "Active plan", disabled: true };
+    }
+    return {
+      kind: "switch",
+      label: interval === BILLING_INTERVAL.YEARLY ? "Switch to yearly" : "Switch to monthly",
+      disabled: false,
+    };
+  }
+
+  return { kind: "select", label: `Upgrade to ${PLANS[planId]?.label || planId}`, disabled: false };
+}
+
+/**
+ * The feature bullets a plan card lists.
+ *
+ * Derived from the plan's own capability flags rather than written out per
+ * plan, so a card can never advertise something plans.js does not actually
+ * grant — the failure mode of a hand-maintained second list.
+ */
+export function planFeatures(plan) {
+  if (!plan) return [];
+  const records = plan.recordLimit === Infinity
+    ? "Unlimited records per month"
+    : `${plan.recordLimit.toLocaleString()} records per month`;
+
+  return [
+    records,
+    plan.scheduledSync ? "Scheduled automatic sync" : "Manual imports",
+    plan.builtInAi ? "Built-in AI mapping & enhancement" : "Bring your own AI key",
+    plan.requiresEligibility ? "Priority support for agencies" : plan.price > 0 ? "Priority email support" : "Email support",
+  ];
+}
+
+/** Copy for the billing-period toggle above the cards. */
+export const PERIOD_TOGGLE_OPTIONS = Object.freeze([
+  { key: BILLING_INTERVAL.MONTHLY, label: "Pay monthly" },
+  { key: BILLING_INTERVAL.YEARLY, label: "Pay yearly" },
+]);
+
+/** Everything each plan includes, listed once below the cards. */
+export const ALL_PLANS_INCLUDE = Object.freeze([
+  "Free to install",
+  "Cancel anytime",
+  "Email support",
+  "Automatic updates",
+  "GDPR compliant",
+]);
 
 /**
  * What the Free card shows instead of an upgrade button.
@@ -152,8 +232,41 @@ export function offersPlanSelection({ planId, currentTier }) {
  */
 export function freeCardLink({ currentTier }) {
   if (currentTier === PLAN_IDS.FREE) return null;
-  return { label: "Downgrade in Shopify", description: "Cancel your paid plan on Shopify's plan page." };
+  // Phase 10 — a real in-app action, not a link off to Shopify.
+  //
+  // Free has no charge to create, so there is nothing for a merchant to
+  // approve and nowhere they need to be sent: cancelling the live
+  // subscription is a single API call this app is allowed to make. The whole
+  // downgrade now happens without leaving the page.
+  //
+  // The description states the two things Shopify decides and this app does
+  // not — that the change lands at the end of the cycle, and that the unused
+  // remainder is credited — because a merchant pressing "cancel" reasonably
+  // expects it to be immediate, and finding out otherwise from a bill is
+  // worse than reading it here.
+  return {
+    label: "Downgrade to Free",
+    description: "Cancels your paid plan at the end of the current billing cycle. Unused time is credited.",
+  };
 }
+
+/**
+ * Copy for the confirmation step before a cancellation is actually sent.
+ *
+ * Cancelling is the one action on this page that removes something the
+ * merchant is paying for, and unlike every other button it is NOT followed by
+ * a Shopify approval screen that would give them a second look at it. That
+ * missing step is the reason this exists: without it, one stray click ends a
+ * subscription outright.
+ */
+export const CANCEL_CONFIRM_COPY = Object.freeze({
+  title: "Downgrade to Free?",
+  body:
+    "Your paid plan stays active until the end of the current billing cycle, and Shopify credits the unused portion. "
+    + "After that, Importzo returns to the Free limits.",
+  confirm: "Yes, downgrade to Free",
+  dismiss: "Keep my plan",
+});
 
 /**
  * The plan button's click handler, as a function of its effects.
@@ -168,13 +281,17 @@ export function freeCardLink({ currentTier }) {
  * test) can tell "Free plan, correctly refused" apart from "nothing
  * happened".
  */
-export function beginPlanSelection({ plan, currentTier, showOverlay, submit }) {
-  if (!offersPlanSelection({ planId: plan?.id, currentTier })) {
+export function beginPlanSelection({ plan, interval, currentTier, currentInterval, showOverlay, submit }) {
+  if (!offersPlanSelection({ planId: plan?.id, currentTier, interval, currentInterval })) {
     return { started: false, reason: plan?.id === PLAN_IDS.FREE ? "free-plan" : "already-on-plan" };
   }
 
   showOverlay();
-  submit();
+  // The interval is passed to the caller's submit rather than assumed, so the
+  // charge Shopify creates is the one whose price the merchant just read off
+  // this card. See the action in app.billing.jsx, which resolves the pair into
+  // a billing key and refuses anything it cannot resolve.
+  submit({ plan: plan.id, interval });
   return { started: true, reason: null };
 }
 
@@ -190,4 +307,66 @@ export function beginPlanSelection({ plan, currentTier, showOverlay, submit }) {
  */
 export function shouldDismissOverlay({ state, data }) {
   return state === "idle" && data?.ok === false;
+}
+
+/**
+ * The other half of taking the overlay down: the merchant is looking at this
+ * page again.
+ *
+ * shouldDismissOverlay above only fires on a failed action, which is correct
+ * for the outbound leg but leaves two return paths where the overlay stays up
+ * over a navigation that is never going to happen:
+ *
+ *   1. The merchant reaches Shopify's plan page, decides against it, and
+ *      presses Back. The top-level navigation is restored from bfcache with
+ *      this component's React state intact — overlayOpen still true.
+ *   2. The App Bridge handoff silently does not occur (the 401 + reauthorize
+ *      header not picked up). The fetcher settles to idle with ok !== false,
+ *      so nothing clears it.
+ *
+ * Both matter more than an ordinary stuck spinner because RedirectingOverlay
+ * is an alertdialog with no dismiss control by design — the merchant's only
+ * way out is to reload the page. Both end in the same observable state, so
+ * that is what this keys on rather than trying to distinguish them.
+ *
+ * `wasHidden` is what keeps this from firing on the outbound leg. Becoming
+ * visible is only meaningful as a RETURN if the page was hidden first; without
+ * it, a merchant tabbing away and back while the redirect is still in flight
+ * would lose the overlay early. `persisted` (a bfcache restore) needs no such
+ * qualification — it can only mean case 1.
+ */
+export function shouldDismissOverlayOnReshow({ persisted, visibilityState, wasHidden }) {
+  if (persisted) return true;
+  return Boolean(wasHidden) && visibilityState === "visible";
+}
+
+/**
+ * The toast shown when Shopify sends the merchant back after they pick a plan.
+ *
+ * Shopify appends ?plan_handle=... to the welcome link, so its presence means
+ * the round trip landed — but it says nothing about whether THIS app has
+ * caught up yet. The tier is reconciled from billing.check() in the loader,
+ * and that can legitimately not yet reflect the new subscription: activation
+ * can lag the redirect, and reconcile() is explicitly allowed to fail soft
+ * (falling back to the stale local ShopPlan) rather than break the page.
+ *
+ * In either case the old unconditional `You're on the ${label} plan` announced
+ * the STALE tier — telling a merchant who had just paid for Pro that they are
+ * on the Free plan, at the exact moment they are most alert to being charged
+ * correctly. So the confident message is only used when the reconciled tier is
+ * actually a paid one; otherwise the merchant is told the truth, which is that
+ * it is still settling.
+ *
+ * Neither case is an error toast. Nothing has gone wrong in either — one is
+ * success, the other is a few seconds of lag — and colouring the second one
+ * red would manufacture alarm about a charge that went through fine.
+ */
+export function planConfirmationToast({ planHandle, tier, label }) {
+  if (!planHandle) return null;
+
+  if (isBillablePlanId(tier)) {
+    return { message: `You're on the ${label} plan` };
+  }
+
+  return { message: "Confirming your plan with Shopify — reload in a moment if it hasn't updated." };
 }

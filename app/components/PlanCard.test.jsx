@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { PlanCard } from "./PlanCard.jsx";
-import { PLAN_IDS, PLANS } from "../lib/plans.js";
+import { PLAN_IDS, PLANS, BILLING_INTERVAL } from "../lib/plans.js";
 import { BRAND } from "../lib/constants";
 
 // No jsdom in this project, and none is needed: PlanCard is presentational and
@@ -18,10 +18,11 @@ function render(overrides = {}) {
     <PlanCard
       plan={PLANS[PLAN_IDS.AGENCY]}
       currentTier={PLAN_IDS.FREE}
+      period={BILLING_INTERVAL.MONTHLY}
       eligibility={ELIGIBLE}
       onSelect={() => {}}
+      onCancel={() => {}}
       busy={false}
-      planSelectionUrl="https://admin.shopify.com/store/x/charges/importzo/pricing_plans"
       {...overrides}
     />,
   );
@@ -32,6 +33,12 @@ function rootTag(html) {
   return html.slice(0, html.indexOf(">") + 1);
 }
 
+// Phase 10 — the featured card's chrome (ring, lift, top bar, glint) moved
+// out of inline styles and into the .iz-plan-cell--featured class, matching
+// the Citeable Plans design this page now reproduces. So the assertions are
+// on the class the card claims rather than on the shadow it paints: the
+// visual is in tailwind.css, and duplicating its pixel values here would
+// only test that two files were edited together.
 describe("PlanCard featured chrome", () => {
   describe("featured={true}", () => {
     const html = render({ featured: true });
@@ -46,24 +53,14 @@ describe("PlanCard featured chrome", () => {
       expect(root).toContain(`data-plan-id="${PLAN_IDS.AGENCY}"`);
     });
 
-    it("draws the 2px brand-green border", () => {
-      expect(root).toContain(`border-color:${S}`);
-      expect(root).toContain("border-width:2px");
+    it("claims the featured cell class that carries the ring, lift and glint", () => {
+      expect(root).toContain("iz-plan-cell--featured");
     });
 
-    it("carries the green elevation shadow", () => {
-      expect(root).toMatch(/box-shadow:[^"]*rgba\(46,99,22/);
-    });
-
-    it("applies the lift and the roomier padding", () => {
-      // sm:-mt-6 is what makes the card taller as well as higher, since grid
-      // items stretch to the row height.
-      expect(root).toContain("sm:-mt-6");
-      expect(root).toContain("p-6");
-      expect(root).not.toContain("p-5");
-      // Above its neighbours, so the shadow isn't clipped by the next card.
-      expect(root).toContain("relative");
-      expect(root).toContain("z-10");
+    // The ring is a box-shadow on the cell; a coloured border on the inner
+    // card as well would stack into a visibly thicker, mismatched edge.
+    it("does not also paint an inline green border", () => {
+      expect(html).not.toContain(`border-color:${S}`);
     });
   });
 
@@ -79,52 +76,108 @@ describe("PlanCard featured chrome", () => {
       expect(root).toContain('data-featured="false"');
     });
 
-    it("keeps the plain 1px grey border", () => {
-      expect(root).toContain(`border-color:${UNEMPHASISED_BORDER}`);
-      expect(root).toContain("border-width:1px");
-      expect(root).not.toContain(`border-color:${S}`);
+    it("does not claim the featured cell class", () => {
+      expect(root).not.toContain("iz-plan-cell--featured");
     });
 
-    it("carries no elevation shadow", () => {
-      expect(root).not.toContain("box-shadow");
-    });
-
-    it("applies neither the lift nor the roomier padding", () => {
-      expect(root).not.toContain("sm:-mt-6");
-      expect(root).not.toContain("z-10");
-      expect(root).toContain("p-5");
+    it("keeps the plain grey border on a plan the shop is not on", () => {
+      expect(html).toContain(`border-color:${UNEMPHASISED_BORDER}`);
     });
   });
 
   it("defaults to unfeatured when the prop is omitted entirely", () => {
     const root = rootTag(render());
     expect(root).toContain('data-featured="false"');
-    expect(root).not.toContain("sm:-mt-6");
+    expect(root).not.toContain("iz-plan-cell--featured");
   });
 });
 
 describe("PlanCard featured vs current plan", () => {
-  // Both reasons produce a green edge, but only `featured` adds the badge and
-  // the lift — otherwise every merchant's current plan would look recommended.
-  it("gives the current plan a green border but no badge, lift or shadow", () => {
+  it("gives the current plan a green border but no badge or featured class", () => {
     const html = render({ featured: false, currentTier: PLAN_IDS.AGENCY });
     const root = rootTag(html);
 
-    expect(root).toContain(`border-color:${S}`);
-    expect(root).toContain("border-width:2px");
+    expect(html).toContain(`border-color:${S}`);
     expect(html).toContain("Current plan");
     expect(html).not.toContain("Most Popular");
-    expect(root).not.toContain("box-shadow");
-    expect(root).not.toContain("sm:-mt-6");
+    expect(root).not.toContain("iz-plan-cell--featured");
   });
 
-  it("shows both markers when the featured plan is also the current one", () => {
+  // Changed deliberately in Phase 10, matching Citeable: "Most Popular" is a
+  // recommendation to buy, so putting it on the card the merchant already
+  // pays for is recommending a purchase they have already made. The "Current
+  // plan" pill is what that card gets instead.
+  it("drops Most Popular when the featured plan is the one they already hold", () => {
     const html = render({ featured: true, currentTier: PLAN_IDS.AGENCY });
 
-    expect(html).toContain("Most Popular");
     expect(html).toContain("Current plan");
-    // The 2px green edge is applied once, not doubled.
-    expect(rootTag(html).match(/border-width:/g)).toHaveLength(1);
+    expect(html).not.toContain("Most Popular");
+  });
+});
+
+// The bug this replaced: a shop on Pro was offered "Upgrade to Pro", because
+// the card compared interval and Shopify had reported none.
+describe("PlanCard call-to-action state", () => {
+  it("disables the card for the exact plan and period the shop is on", () => {
+    const html = render({
+      plan: PLANS[PLAN_IDS.PRO], currentTier: PLAN_IDS.PRO,
+      currentInterval: BILLING_INTERVAL.MONTHLY, period: BILLING_INTERVAL.MONTHLY,
+    });
+
+    expect(rootTag(html)).toContain('data-cta="current"');
+    expect(html).toContain("Active plan");
+    expect(html).toContain("disabled");
+    expect(html).not.toMatch(/Upgrade to Pro/);
+  });
+
+  it("never offers an upgrade to the tier the shop already holds, even when the period is unknown", () => {
+    const html = render({
+      plan: PLANS[PLAN_IDS.PRO], currentTier: PLAN_IDS.PRO,
+      currentInterval: null, period: BILLING_INTERVAL.MONTHLY,
+    });
+
+    expect(rootTag(html)).toContain('data-cta="current"');
+    expect(html).not.toMatch(/Upgrade to Pro/);
+  });
+
+  it("offers a period switch on the same tier, which is a real billable change", () => {
+    const html = render({
+      plan: PLANS[PLAN_IDS.PRO], currentTier: PLAN_IDS.PRO,
+      currentInterval: BILLING_INTERVAL.MONTHLY, period: BILLING_INTERVAL.YEARLY,
+    });
+
+    expect(rootTag(html)).toContain('data-cta="switch"');
+    expect(html).toContain("Switch to yearly");
+  });
+
+  it("offers a real upgrade for a different tier", () => {
+    const html = render({ plan: PLANS[PLAN_IDS.PRO], currentTier: PLAN_IDS.FREE });
+
+    expect(rootTag(html)).toContain('data-cta="select"');
+    expect(html).toContain("Upgrade to Pro");
+  });
+
+  it("offers the downgrade on the Free card only when the shop is paying", () => {
+    const paying = render({ plan: PLANS[PLAN_IDS.FREE], currentTier: PLAN_IDS.PRO });
+    expect(rootTag(paying)).toContain('data-cta="downgrade"');
+    expect(paying).toContain("Downgrade to Free");
+
+    const free = render({ plan: PLANS[PLAN_IDS.FREE], currentTier: PLAN_IDS.FREE });
+    expect(rootTag(free)).toContain('data-cta="included"');
+    expect(free).toContain("Included");
+  });
+
+  // One price per card. Two buttons meant reading four prices to compare
+  // three plans, which is what the toggle above the grid replaced.
+  it("shows exactly one call-to-action, priced by the toggle", () => {
+    const monthly = render({ plan: PLANS[PLAN_IDS.PRO], period: BILLING_INTERVAL.MONTHLY });
+    expect(monthly.match(/<button/g)).toHaveLength(1);
+    expect(monthly).toContain("$15");
+    expect(monthly).not.toContain("$144");
+
+    const yearly = render({ plan: PLANS[PLAN_IDS.PRO], period: BILLING_INTERVAL.YEARLY });
+    expect(yearly.match(/<button/g)).toHaveLength(1);
+    expect(yearly).toContain("$144");
   });
 });
 

@@ -9,7 +9,7 @@ import { fetchJobLog, fetchJobLogSummary } from "../lib/transfer-log.server";
 import { describeActor } from "../lib/audit.server";
 
 export const loader = async ({ request, params }) => {
-  await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
 
   const { jobId } = params;
   if (!jobId) return Response.json({ ok: false, error: "Missing jobId" }, { status: 400 });
@@ -26,11 +26,38 @@ export const loader = async ({ request, params }) => {
     },
   });
 
-  if (!job) return Response.json({ ok: false, error: "Job not found" }, { status: 404 });
+  // Ownership check. Authenticating the caller is NOT the same as authorizing
+  // them for this job: jobId is a caller-supplied path parameter, so without
+  // this any installed shop could poll any other shop's migration by id and
+  // read back its product titles, source store domain, per-record error log
+  // (including metafield payload snapshots) and the triggering user's email
+  // and IP — and, via the auto-resume below, restart another shop's transfer.
+  //
+  // 404 rather than 403, deliberately: a shop that does not own this job
+  // should not be able to tell the difference between "exists, not yours" and
+  // "does not exist", which would otherwise make job ids enumerable.
+  //
+  // Compare api.rollback.jsx and api.backup.jsx, which have always scoped
+  // their lookups this way — this endpoint was the one that did not.
+  if (!job || job.shop !== session.shop) {
+    return Response.json({ ok: false, error: "Job not found" }, { status: 404 });
+  }
 
   // Auto-resume: if the job is marked RUNNING but no active worker exists (process restarted),
   // kick off a new worker so the job doesn't stay stuck.
-  if (job.status === "RUNNING" && !isWorkerActive(job.id)) {
+  //
+  // PENDING counts too. api.migration-job.jsx creates the row and only then
+  // calls the worker, which flips it to RUNNING — so a restart inside that
+  // window leaves a job that was never started at all, and testing only for
+  // RUNNING meant even a merchant sitting on the progress bar would watch it
+  // stay at 0% indefinitely. There is no race with a just-created job:
+  // runMigrationWorker registers itself in activeWorkers synchronously, before
+  // its first await, so isWorkerActive is already true by the time any poll
+  // for that job can arrive.
+  //
+  // This is still only a recovery path for jobs someone is watching; the
+  // scheduler tick covers the ones nobody is (see job-recovery.server.js).
+  if ((job.status === "RUNNING" || job.status === "PENDING") && !isWorkerActive(job.id)) {
     console.log(`[api/migration-status] auto-resuming job=${job.id} after process restart`);
     runMigrationWorker(job.id).catch((err) =>
       console.error(`[api/migration-status] auto-resume crash job=${job.id}:`, err),

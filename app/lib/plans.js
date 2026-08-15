@@ -10,12 +10,16 @@
 // This is the single source of truth for prices/limits. Nothing else in the
 // app should hard-code a "15", "10", "144", "96", or a record limit.
 //
-// Phase 8 — the app is now on Shopify App Pricing (formerly "Managed
-// Pricing"): the amounts below are entered in the Partner Dashboard and
-// Shopify owns the charge. The values here are DISPLAY COPY that must be
-// kept in step with the dashboard by hand — changing a number here does not
-// change what a merchant is billed, and changing the dashboard does not
-// change what this app says. See app-pricing.server.js.
+// Phase 8 — under Shopify App Pricing these amounts were DISPLAY COPY only:
+// the Partner Dashboard held the real numbers and Shopify owned the charge.
+//
+// Phase 10 — that is no longer true, and the difference is money. The app
+// charges directly again (appSubscriptionCreate, via the `billing` config in
+// shopify.server.js), and that config is built from the amounts below. A
+// number changed here now changes what a merchant is actually billed on their
+// next subscribe. Treat every edit in this file as a pricing change, not a
+// copy change. test/lib/plans.test.js pins the current values precisely so
+// that an accidental edit fails loudly rather than quietly re-pricing the app.
 // ═══════════════════════════════════════════════════════════════════
 
 export const PLAN_IDS = Object.freeze({
@@ -145,6 +149,55 @@ export function yearlySavingsPercent(id) {
 /** True when this plan can be paid for annually as well as monthly. */
 export function hasYearlyOption(id) {
   return getPlan(id).priceYearly > 0;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Phase 10 — Manual Billing API plan keys.
+//
+// Under App Pricing there was ONE hosted page and no per-plan path, so the
+// app never had to name a specific charge. Charging directly means naming
+// exactly one of four things, and the tier alone is not enough: Pro monthly
+// and Pro yearly are separate AppSubscriptions at different prices.
+//
+// These strings are the keys of the `billing` config in shopify.server.js AND
+// the `name` Shopify stores on the subscription it creates. That dual role is
+// why they matter beyond bookkeeping: reconcile() reads the name back off the
+// subscription and runs it through tierFromSubscriptionName below to recover
+// the tier. Every name here is deliberately chosen to still match those
+// keyword patterns — "Importzo Pro Monthly" contains "Pro", "Importzo Agency
+// Yearly" contains "Agency" — so the existing reconciliation keeps working
+// unchanged, including for subscriptions created by App Pricing before the
+// migration. Renaming one of these without checking that is how a paying
+// merchant silently becomes Free.
+// ═══════════════════════════════════════════════════════════════════
+export const BILLING_PLAN_KEY = Object.freeze({
+  [PLAN_IDS.PRO]: Object.freeze({
+    [BILLING_INTERVAL.MONTHLY]: "Importzo Pro Monthly",
+    [BILLING_INTERVAL.YEARLY]: "Importzo Pro Yearly",
+  }),
+  [PLAN_IDS.AGENCY]: Object.freeze({
+    [BILLING_INTERVAL.MONTHLY]: "Importzo Agency Monthly",
+    [BILLING_INTERVAL.YEARLY]: "Importzo Agency Yearly",
+  }),
+});
+
+/**
+ * Tier + interval -> the billing config key to charge against.
+ *
+ * Returns null for anything that is not a real, billable combination — Free
+ * (no charge exists), an unknown tier, or an unknown interval. Callers treat
+ * null as "reject this request" rather than falling back to a default, because
+ * every possible default here is a wrong amount of money.
+ */
+export function billingPlanKey(tier, interval) {
+  return BILLING_PLAN_KEY[tier]?.[interval] || null;
+}
+
+/** The price a given tier+interval actually charges, for confirmation copy. */
+export function priceFor(tier, interval) {
+  const plan = getPlan(tier);
+  if (interval === BILLING_INTERVAL.YEARLY) return plan.priceYearly;
+  return plan.price;
 }
 
 // Maps a Shopify AppSubscription's `name` back to one of this app's tiers.

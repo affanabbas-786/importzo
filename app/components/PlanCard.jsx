@@ -1,128 +1,158 @@
 import PropTypes from "prop-types";
-import { PLAN_IDS, AGENCY_MIN_STORES, TRIAL_DAYS, yearlySavingsPercent } from "../lib/plans.js";
-import { planActionLabel, offersPlanSelection, freeCardLink } from "../lib/billing-ui.js";
+import { PLAN_IDS, AGENCY_MIN_STORES, BILLING_INTERVAL, yearlySavingsPercent } from "../lib/plans.js";
+import { planCta, planFeatures } from "../lib/billing-ui.js";
 import { BRAND } from "../lib/constants";
 
 const { primary: P, secondary: S, font: F } = BRAND;
 
-// The featured card's lift, drawn as a shadow in the brand green rather than
-// neutral grey so the elevation reads as part of the highlight instead of as a
-// heavier version of the same card. Second layer is the ordinary ambient
-// shadow the other two cards get from `shadow-sm`, kept so the card still
-// sits on the page rather than floating off it.
-const FEATURED_SHADOW = "0 18px 40px -12px rgba(46,99,22,.38), 0 2px 6px rgba(23,50,10,.06)";
-
 /**
- * Phase 9 — lifted out of app.billing.jsx so it can be rendered directly in
- * a test. What a merchant is actually promised by a button ("Upgrade to
- * Pro", and which cards get one at all) is billing behaviour, not
- * decoration, and it was previously asserted nowhere.
+ * Phase 10 — rebuilt to match the Citeable app's Plans card, which is the
+ * design this page was asked to reproduce, with its purple accent remapped to
+ * Importzo green. The chrome that makes the featured card read as featured —
+ * ring, lift, top bar, glint — lives in tailwind.css under .iz-plan-cell.
  *
- * Presentational only: every decision it renders comes from billing-ui.js.
+ * ONE call-to-action per card, not one per interval. The interval is chosen
+ * once by the toggle above the grid, so a card shows a single price and a
+ * single button that charges it. Two buttons per card made the merchant read
+ * four prices at once to compare three plans.
+ *
+ * Presentational only: which CTA a card gets, and what it says, comes from
+ * planCta() in billing-ui.js where it is unit-tested.
  */
-export function PlanCard({ plan, currentTier, eligibility, onSelect, busy, planSelectionUrl, featured = false }) {
+export function PlanCard({
+  plan, currentTier, currentInterval, period, eligibility, onSelect, onCancel, busy, featured = false,
+}) {
   const isCurrent = plan.id === currentTier;
   const isFree = plan.id === PLAN_IDS.FREE;
+  const yearly = period === BILLING_INTERVAL.YEARLY;
   const needsEligibility = plan.requiresEligibility && !eligibility.eligible;
   const savings = yearlySavingsPercent(plan.id);
-  const showsButton = offersPlanSelection({ planId: plan.id, currentTier });
-  // Free's alternative to a plan-selection button — a link, for the merchant
-  // on a paid plan who wants off it. Null for a merchant already on Free.
-  const downgrade = isFree ? freeCardLink({ currentTier }) : null;
-  // Green border for the featured card and for the merchant's current one.
-  // Both reasons produce the same 2px green edge; a card that is both simply
-  // keeps it once.
-  const emphasised = featured || isCurrent;
+  const cta = planCta({ planId: plan.id, currentTier, interval: period, currentInterval });
+  // "Most Popular" is for the plan we're recommending — never on the card the
+  // merchant is already paying for, where it would be recommending a purchase
+  // they have already made.
+  const showsPopular = featured && !isCurrent;
+
+  // Free has no yearly variant, so it reads "Free" in both modes rather than
+  // showing $0/yr — a price that is technically true and reads as a mistake.
+  const headlinePrice = isFree ? "Free" : yearly ? `$${plan.priceYearly}` : `$${plan.price}`;
+  const priceCaption = isFree
+    ? "Always free"
+    : yearly
+      ? `billed yearly · $${(plan.priceYearly / 12).toFixed(2)}/mo equivalent`
+      : `per month${plan.requiresEligibility ? " per store" : ""}, billed monthly`;
+
+  function handleClick() {
+    if (cta.kind === "downgrade") return onCancel?.();
+    return onSelect?.(period);
+  }
 
   return (
     <div
+      className={`iz-plan-cell${featured ? " iz-plan-cell--featured" : ""}`}
       data-plan-id={plan.id}
       data-featured={featured ? "true" : "false"}
-      // `sm:-mt-6` is the lift, and it is what makes this card taller as well
-      // as higher: grid items stretch to the row height by default, so pulling
-      // the top edge up by 24px grows the border box by the same 24px rather
-      // than sliding a fixed-height box upwards. Below the `sm` breakpoint the
-      // grid is a single column and the lift is dropped entirely — a card
-      // hanging 24px above the one before it only reads as "featured" when
-      // there is something beside it to be raised above.
-      className={`bg-white rounded-xl border shadow-sm flex flex-col ${
-        featured ? "p-6 sm:-mt-6 relative z-10" : "p-5"
-      }`}
-      style={{
-        borderColor: emphasised ? S : "#e5e7eb",
-        borderWidth: emphasised ? 2 : 1,
-        ...(featured ? { boxShadow: FEATURED_SHADOW } : null),
-      }}
+      data-cta={cta.kind}
     >
-      <div className="flex items-start justify-between gap-2">
-        <div className="flex items-center gap-2 flex-wrap min-w-0">
+      <div
+        className="bg-white rounded-xl border shadow-sm flex flex-col p-5 h-full"
+        style={{
+          // The featured card's ring is drawn by the box-shadow in CSS, so it
+          // must not also carry a coloured border or the two would stack into
+          // a visibly thicker, slightly mismatched edge.
+          borderColor: !featured && isCurrent ? S : "#e5e7eb",
+          borderWidth: !featured && isCurrent ? 2 : 1,
+        }}
+      >
+        <div className="flex items-start justify-between gap-2 flex-wrap">
           <p className="text-base font-semibold text-gray-900" style={{ fontFamily: F }}>{plan.label}</p>
-          {featured && (
-            <span
-              className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full flex-shrink-0 text-white"
-              style={{ background: `linear-gradient(135deg, ${P} 0%, ${S} 100%)`, fontFamily: F }}
-            >
-              Most Popular
-            </span>
-          )}
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {isCurrent && (
+              <span
+                className="text-xs font-semibold px-2 py-0.5 rounded-lg"
+                style={{ background: "rgba(46,99,22,0.1)", color: S }}
+              >
+                Current plan
+              </span>
+            )}
+            {showsPopular && <span className="iz-badge-vip">Most Popular</span>}
+          </div>
         </div>
-        {isCurrent && (
-          <span className="text-xs font-semibold px-2 py-1 rounded-full flex-shrink-0" style={{ background: "rgba(46,99,22,0.1)", color: S }}>
-            Current plan
-          </span>
+
+        <p className="mt-2 text-3xl font-bold text-gray-900" style={{ fontFamily: F }}>
+          {headlinePrice}
+        </p>
+        <p className="mt-0.5 text-xs text-gray-500">{priceCaption}</p>
+        {!isFree && yearly && savings > 0 && (
+          <p className="mt-0.5 text-xs font-semibold" style={{ color: S }}>You save {savings}%</p>
         )}
+
+        {/* Fixed height so a longer description on one card cannot push its
+            CTA out of line with the other two. */}
+        <p className="mt-2 text-xs text-gray-500 leading-relaxed" style={{ minHeight: 40 }}>
+          {plan.description}
+        </p>
+
+        <div className="mt-3 border-t border-gray-100" />
+
+        <ul className="mt-3 space-y-2 flex-1">
+          {planFeatures(plan).map((feature) => (
+            <li key={feature} className="flex items-start gap-2 text-xs text-gray-600">
+              <svg className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor" style={{ color: S }} aria-hidden="true">
+                <path fillRule="evenodd" d="M16.7 5.3a1 1 0 010 1.4l-7.5 7.5a1 1 0 01-1.4 0L3.3 9.7a1 1 0 011.4-1.4l3.8 3.8 6.8-6.8a1 1 0 011.4 0z" clipRule="evenodd" />
+              </svg>
+              <span>{feature}</span>
+            </li>
+          ))}
+        </ul>
+
+        {needsEligibility && (
+          <p className="mt-3 text-[11px] text-amber-700 font-medium leading-relaxed">
+            Unlocks at {AGENCY_MIN_STORES}+ stores — this account currently has {eligibility.storeCount}.
+            You can still choose it; we&apos;ll flag the account and may ask you to move to Pro.
+          </p>
+        )}
+
+        <button
+          type="button"
+          disabled={cta.disabled || busy}
+          onClick={handleClick}
+          className="mt-4 w-full px-4 py-2.5 text-sm rounded-lg font-semibold transition-all disabled:cursor-not-allowed"
+          style={ctaStyle({ cta, featured, busy })}
+        >
+          {busy && !cta.disabled ? "Working…" : cta.label}
+        </button>
       </div>
-      <p className="mt-1 text-2xl font-bold text-gray-900" style={{ fontFamily: F }}>
-        {plan.price === 0 ? "Free" : `$${plan.price}`}
-        {plan.price > 0 && <span className="text-sm font-medium text-gray-400">/mo{plan.requiresEligibility ? " per store" : ""}</span>}
-      </p>
-      {plan.priceYearly > 0 && (
-        <p className="mt-0.5 text-xs text-gray-500">
-          or <strong className="text-gray-700">${plan.priceYearly}/year</strong>
-          {savings > 0 && <span className="ml-1 font-semibold" style={{ color: S }}>save {savings}%</span>}
-        </p>
-      )}
-      <p className="mt-1.5 text-xs text-gray-500">{plan.tagline}</p>
-      <p className="mt-2 text-xs text-gray-500 leading-relaxed flex-1">{plan.description}</p>
-
-      {needsEligibility && (
-        <p className="mt-3 text-[11px] text-amber-700 font-medium leading-relaxed">
-          Unlocks at {AGENCY_MIN_STORES}+ stores — this merchant currently has {eligibility.storeCount}.
-          Shopify&apos;s plan page will still let you pick it, but we&apos;ll flag the account and may ask you to
-          move to Pro.
-        </p>
-      )}
-
-      {showsButton && (
-        <>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={onSelect}
-            className="mt-4 px-4 py-2 text-sm rounded-lg shadow-sm font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed hover:brightness-110"
-            style={{ background: P, color: "#fff", fontFamily: F }}
-          >
-            {busy ? "Redirecting…" : planActionLabel(plan, currentTier)}
-          </button>
-          <p className="mt-2 text-[11px] text-gray-400">{TRIAL_DAYS}-day free trial · monthly or yearly, chosen on Shopify&apos;s page</p>
-        </>
-      )}
-
-      {downgrade && (
-        <div className="mt-4">
-          <a
-            href={planSelectionUrl}
-            target="_top"
-            className="text-xs font-semibold hover:underline"
-            style={{ color: S }}
-          >
-            {downgrade.label}
-          </a>
-          <p className="mt-1 text-[11px] text-gray-400">{downgrade.description}</p>
-        </div>
-      )}
     </div>
   );
+}
+
+/**
+ * The CTA's colours, by state.
+ *
+ * The featured card gets the deep-green gradient; ordinary upgrade buttons
+ * get flat brand green; the disabled "Active plan" / "Included" states get a
+ * neutral face so a card the merchant cannot act on never looks like the
+ * loudest thing on the page; and Downgrade is a quiet outline, because it is
+ * an exit, not an offer.
+ */
+function ctaStyle({ cta, featured, busy }) {
+  if (cta.disabled) {
+    return { background: "#f3f4f6", color: "#9ca3af", fontFamily: F, border: "1px solid #e5e7eb" };
+  }
+  if (cta.kind === "downgrade") {
+    return { background: "#fff", color: "#6b7280", fontFamily: F, border: "1px solid #d1d5db", opacity: busy ? 0.5 : 1 };
+  }
+  if (featured) {
+    return {
+      background: `linear-gradient(180deg, ${S}, ${P})`,
+      color: "#fff",
+      fontFamily: F,
+      border: `1px solid ${P}`,
+      opacity: busy ? 0.6 : 1,
+    };
+  }
+  return { background: S, color: "#fff", fontFamily: F, border: `1px solid ${S}`, opacity: busy ? 0.6 : 1 };
 }
 
 PlanCard.propTypes = {
@@ -131,18 +161,27 @@ PlanCard.propTypes = {
     label: PropTypes.string,
     price: PropTypes.number,
     priceYearly: PropTypes.number,
+    recordLimit: PropTypes.number,
+    scheduledSync: PropTypes.bool,
+    builtInAi: PropTypes.bool,
     tagline: PropTypes.string,
     description: PropTypes.string,
     requiresEligibility: PropTypes.bool,
   }).isRequired,
   currentTier: PropTypes.string.isRequired,
+  // What the shop is billed on today. Null when it is on Free, or when
+  // Shopify returned no line items — planCta treats null as "unknown", which
+  // is deliberately NOT the same as "a different period".
+  currentInterval: PropTypes.string,
+  // Which period the toggle is showing. Decides the price AND the charge.
+  period: PropTypes.string.isRequired,
   eligibility: PropTypes.shape({
     eligible: PropTypes.bool,
     storeCount: PropTypes.number,
   }).isRequired,
   onSelect: PropTypes.func.isRequired,
+  onCancel: PropTypes.func,
   busy: PropTypes.bool.isRequired,
-  planSelectionUrl: PropTypes.string.isRequired,
   // Purely visual. Decided by isFeaturedPlan(planId, eligibility) in the
   // route — a function of the plan and the shop's store count, never of the
   // merchant's current tier. See its doc comment.

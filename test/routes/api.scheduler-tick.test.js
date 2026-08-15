@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-const db = { schedules: [], plans: new Map() };
+const db = { schedules: [], plans: new Map(), jobs: [] };
 
 function setShopPlan(shop, data) {
   db.plans.set(shop, {
@@ -22,7 +22,18 @@ vi.mock("../../app/db.server", () => ({
         return row;
       }),
     },
-    migrationJob: { findUnique: vi.fn(async () => null) },
+    migrationJob: {
+      findUnique: vi.fn(async () => null),
+      // Orphaned-job recovery (job-recovery.server.js) runs on every tick.
+      findMany: vi.fn(async ({ where }) => db.jobs.filter(
+        (j) => where.status.in.includes(j.status) && j.updatedAt < where.updatedAt.lt,
+      )),
+      update: vi.fn(async ({ where: { id }, data }) => {
+        const row = db.jobs.find((j) => j.id === id);
+        if (row) Object.assign(row, data);
+        return row;
+      }),
+    },
     // Phase 5: the tick's startJob wrapper checks getUsageStatus (scheduled
     // sync is Pro/Agency-only) before starting a job.
     shopPlan: {
@@ -56,8 +67,10 @@ vi.mock("../../app/lib/scheduled-sync.server", () => ({
 }));
 
 const workerRuns = [];
+const activeWorkers = new Set();
 vi.mock("../../app/lib/migration-worker.server", () => ({
   runMigrationWorker: vi.fn(async (jobId) => { workerRuns.push(jobId); }),
+  isWorkerActive: vi.fn((jobId) => activeWorkers.has(jobId)),
 }));
 
 import { action } from "../../app/routes/api.scheduler-tick.jsx";
@@ -94,8 +107,12 @@ describe("api.scheduler-tick", () => {
   beforeEach(() => {
     db.schedules = [];
     db.plans = new Map();
+    db.jobs = [];
+    activeWorkers.clear();
     startedJobs.length = 0;
     workerRuns.length = 0;
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
     process.env.SCHEDULER_SECRET = SECRET;
     vi.spyOn(console, "error").mockImplementation(() => {});
   });
@@ -171,5 +188,53 @@ describe("api.scheduler-tick", () => {
 
     expect(body.ran).toEqual([]);
     expect(startedJobs).toHaveLength(0);
+  });
+
+  // ── Orphaned-job recovery ────────────────────────────────────────────────
+  // The tick is the app's only periodic server-side hook, so it is the only
+  // thing that can restart a migration whose worker died with the process and
+  // that no merchant is polling. See job-recovery.server.js.
+
+  function seedOrphanedJob(overrides = {}) {
+    const row = {
+      id: "orphan-1",
+      shop: "shop.myshopify.com",
+      status: "RUNNING",
+      createdAt: new Date(Date.now() - 60 * 60_000),
+      updatedAt: new Date(Date.now() - 30 * 60_000),
+      ...overrides,
+    };
+    db.jobs.push(row);
+    return row;
+  }
+
+  it("restarts a migration orphaned by a process restart, with nobody polling it", async () => {
+    seedOrphanedJob();
+
+    const body = await (await action({ request: tickRequest() })).json();
+
+    expect(workerRuns).toContain("orphan-1");
+    expect(body.recovery.resumed).toEqual([
+      { id: "orphan-1", shop: "shop.myshopify.com", status: "RUNNING" },
+    ]);
+  });
+
+  it("does not restart a migration that is still running in this process", async () => {
+    seedOrphanedJob();
+    activeWorkers.add("orphan-1");
+
+    const body = await (await action({ request: tickRequest() })).json();
+
+    expect(workerRuns).not.toContain("orphan-1");
+    expect(body.recovery.resumed).toEqual([]);
+  });
+
+  it("reports recovery alongside the sync results without affecting tick success", async () => {
+    seedDueSchedule({ nextRunAt: new Date(Date.now() + 3600_000) });
+
+    const body = await (await action({ request: tickRequest() })).json();
+
+    expect(body.ok).toBe(true);
+    expect(body.recovery).toMatchObject({ resumed: [], abandoned: [] });
   });
 });

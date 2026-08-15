@@ -7,8 +7,9 @@ vi.mock("@shopify/shopify-app-react-router/adapters/node", () => ({}));
 vi.mock("@shopify/shopify-app-react-router/server", () => ({
   ApiVersion: { October25: "2025-10" },
   AppDistribution: { AppStore: "app_store" },
-  // No BillingInterval: shopify.server.js stopped importing it when the
-  // `billing` config block went away under Shopify App Pricing.
+  // Phase 10 — BillingInterval is imported again: the `billing` config block
+  // is back now that the app creates its own charges via the Billing API.
+  BillingInterval: { Every30Days: "EVERY_30_DAYS", Annual: "ANNUAL" },
   shopifyApp: () => ({
     registerWebhooks: vi.fn(),
     addDocumentResponseHeaders: vi.fn(),

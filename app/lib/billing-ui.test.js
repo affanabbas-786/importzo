@@ -8,6 +8,8 @@ import {
   freeCardLink,
   beginPlanSelection,
   shouldDismissOverlay,
+  shouldDismissOverlayOnReshow,
+  planConfirmationToast,
   featuredPlanId,
   isFeaturedPlan,
   planDisplayOrder,
@@ -181,6 +183,60 @@ describe("shouldDismissOverlay", () => {
 
   it("does not dismiss on failure while still submitting", () => {
     expect(shouldDismissOverlay({ state: "submitting", data: { ok: false } })).toBe(false);
+  });
+});
+
+describe("shouldDismissOverlayOnReshow", () => {
+  it("comes down on a bfcache restore — the merchant pressed Back from Shopify's plan page", () => {
+    expect(shouldDismissOverlayOnReshow({
+      persisted: true, visibilityState: "visible", wasHidden: false,
+    })).toBe(true);
+  });
+
+  it("comes down when the page is shown again after having been hidden", () => {
+    expect(shouldDismissOverlayOnReshow({
+      persisted: false, visibilityState: "visible", wasHidden: true,
+    })).toBe(true);
+  });
+
+  it("stays up on the outbound leg — visible, but never hidden yet", () => {
+    expect(shouldDismissOverlayOnReshow({
+      persisted: false, visibilityState: "visible", wasHidden: false,
+    })).toBe(false);
+  });
+
+  it("stays up while the page is hidden — the redirect is in flight", () => {
+    expect(shouldDismissOverlayOnReshow({
+      persisted: false, visibilityState: "hidden", wasHidden: true,
+    })).toBe(false);
+  });
+});
+
+describe("planConfirmationToast", () => {
+  it("says nothing when there is no plan_handle — this is not a return trip", () => {
+    expect(planConfirmationToast({ planHandle: null, tier: PLAN_IDS.PRO, label: "Pro" })).toBeNull();
+    expect(planConfirmationToast({ planHandle: "", tier: PLAN_IDS.FREE, label: "Free" })).toBeNull();
+  });
+
+  it("confirms the plan by name once the paid tier has actually reconciled", () => {
+    expect(planConfirmationToast({ planHandle: "pro-monthly", tier: PLAN_IDS.PRO, label: "Pro" }))
+      .toEqual({ message: "You're on the Pro plan" });
+    expect(planConfirmationToast({ planHandle: "agency-yearly", tier: PLAN_IDS.AGENCY, label: "Agency" }))
+      .toEqual({ message: "You're on the Agency plan" });
+  });
+
+  // The regression this function exists for: reconcile() lagging or failing
+  // soft left the tier at Free, and the toast cheerfully told a merchant who
+  // had just paid for Pro that they were on the Free plan.
+  it("never claims Free to a merchant returning from a plan selection", () => {
+    const toast = planConfirmationToast({ planHandle: "pro-monthly", tier: PLAN_IDS.FREE, label: "Free" });
+    expect(toast.message).not.toMatch(/free/i);
+    expect(toast.message).toMatch(/confirming/i);
+  });
+
+  it("does not dress the lag up as an error — the charge went through fine", () => {
+    const toast = planConfirmationToast({ planHandle: "pro-monthly", tier: PLAN_IDS.FREE, label: "Free" });
+    expect(toast.isError).toBeUndefined();
   });
 });
 

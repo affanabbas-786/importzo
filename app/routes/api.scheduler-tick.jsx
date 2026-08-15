@@ -14,11 +14,13 @@
 import crypto from "crypto";
 import prisma from "../db.server";
 import { runScheduledSyncs, disableForPlanRequirement } from "../lib/scheduler.server";
-import { runMigrationWorker } from "../lib/migration-worker.server";
+import { runMigrationWorker, isWorkerActive } from "../lib/migration-worker.server";
+import { recoverOrphanedJobs } from "../lib/job-recovery.server";
 // Imported from lib, not from the sibling route module: importing across
 // route files would pull that route's whole module graph in with it.
 import { startJobFromSchedule } from "../lib/scheduled-sync.server";
 import { getUsageStatus } from "../lib/usage.server";
+import { runMaintenance } from "../lib/maintenance.server";
 
 function timingSafeEqual(a, b) {
   const bufA = Buffer.from(String(a || ""), "utf8"); // eslint-disable-line no-undef
@@ -78,5 +80,29 @@ export const action = async ({ request }) => {
     },
   });
 
-  return Response.json({ ok: !results.error, ...results });
+  // Retention housekeeping. This tick is the app's only periodic hook, so it
+  // is also where expired backups and expired transfer sessions get deleted —
+  // both had a documented retention window that nothing was enforcing. Run
+  // after the syncs and folded into the response rather than gating it: a
+  // purge failure is worth reporting but must not turn a healthy tick into a
+  // cron alert. See maintenance.server.js.
+  const maintenance = await runMaintenance({ prisma });
+
+  // Recover migrations orphaned by a process restart. This tick is the app's
+  // only periodic server-side hook, which makes it the only place a job with
+  // nobody watching it can be picked back up — until now the sole resume path
+  // was a merchant actively polling the status endpoint, so a closed tab or a
+  // scheduled sync meant a half-finished transfer stayed RUNNING forever.
+  // See job-recovery.server.js. Isolated the same way maintenance is: a
+  // recovery failure is worth reporting but must not fail the tick.
+  const recovery = await recoverOrphanedJobs({
+    prisma,
+    isActive: isWorkerActive,
+    runWorker: (jobId) => runMigrationWorker(jobId),
+  }).catch((err) => {
+    console.error("[scheduler-tick] job recovery failed:", err?.message);
+    return { resumed: [], abandoned: [], skipped: 0, error: String(err?.message || err) };
+  });
+
+  return Response.json({ ok: !results.error, ...results, maintenance, recovery });
 };

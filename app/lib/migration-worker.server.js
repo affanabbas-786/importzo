@@ -4,7 +4,7 @@
 // brings the app back; the status endpoint auto-resumes any RUNNING job.
 
 import prisma from "../db.server.js";
-import { encrypt, decrypt } from "../utils/encryption.server.js";
+import { decrypt } from "../utils/encryption.server.js";
 import { shopifyGraphql } from "./shopify-api.server.js";
 import { createProductWithVariants } from "./product-variants.server.js";
 import { createLogBuffer, ACTION, ENTITY } from "./transfer-log.server.js";
@@ -13,6 +13,7 @@ import { actorFromRecord, describeActor } from "./audit.server.js";
 import { marketQueryFilter } from "./markets.server.js";
 import { assertQuotaAvailable, recordUsageAndCheck } from "./usage.server.js";
 import { createAltTextGenerator } from "./alt-text.server.js";
+import { createTokenProvider, isAuthError } from "./job-tokens.server.js";
 
 const BATCH_SIZE = 250;     // products fetched per GQL page
 const CREATE_CONCURRENCY = 5; // parallel productCreate calls
@@ -33,14 +34,6 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // shopifyFetch/shopifyGraphql (429 backoff + cost-throttle awareness) now
 // live in shopify-api.server.js — shared with app.transfer.jsx and
 // app.export.jsx instead of three independently-drifting copies.
-
-function mediaTypeFromUrl(url = "") {
-  const s = String(url).split("?")[0].toLowerCase();
-  if (/\.(png|jpe?g|gif|webp|svg|bmp|avif)$/.test(s)) return "IMAGE";
-  if (/\.(mp4|mov|m4v|webm)$/.test(s)) return "VIDEO";
-  if (/\.(glb|usdz)$/.test(s)) return "MODEL_3D";
-  return "FILE";
-}
 
 // ────────────────────────────────────────────────────────────────────────────
 // Product helpers (mirror of app.transfer.jsx, kept in sync manually)
@@ -193,15 +186,38 @@ async function copyMetafields(sourceShop, sourceToken, targetShop, targetToken, 
   return { copied, errors };
 }
 
+// Conflict detection: does the destination already have a product with this
+// handle?
+//
+// Returns { ok: true, product } — where `product` is null for a definitive
+// "no such handle" — or { ok: false, error } when the question could not be
+// answered at all.
+//
+// That distinction is the whole point, and getting it wrong was a silent
+// catalog-duplication bug. This used to `catch { return null }`, collapsing
+// "Shopify says there is no such product" and "the lookup failed" into the
+// same answer. The caller treats null as permission to create, so ANY
+// transient failure here — a 429 that outlived the five retries in
+// shopify-api.server.js, a 500, a dropped connection, an expired token —
+// silently downgraded conflictMode "skip" and "overwrite" into "create".
+//
+// The merchant who picked "skip" picked it precisely so a re-run would not
+// duplicate their catalog, and the resumed/retried run is exactly when a
+// transient error is most likely. Failing the product instead is strictly
+// better: a FAILED row is visible in the job log, is retryable, and changes
+// nothing on the destination, whereas a duplicate is silent and has to be
+// cleaned out of a live store by hand.
 async function findProductByHandle(targetShop, targetToken, handle, version) {
-  if (!handle) return null;
+  if (!handle) return { ok: true, product: null };
   try {
     const data = await shopifyGraphql(targetShop, targetToken, `#graphql
       query FindProduct($query: String!) {
         products(first: 1, query: $query) { edges { node { id handle } } }
       }`, { query: `handle:${handle}` }, version);
-    return data?.products?.edges?.[0]?.node || null;
-  } catch { return null; }
+    return { ok: true, product: data?.products?.edges?.[0]?.node || null };
+  } catch (err) {
+    return { ok: false, error: err?.message || String(err) };
+  }
 }
 
 // Creates (or skips/overwrites based on conflictMode) a single product on the destination.
@@ -229,7 +245,20 @@ async function transferOneProduct(src, ctx) {
 
   // Conflict detection
   if (src.handle && conflictMode !== "create") {
-    const existing = await findProductByHandle(targetShop, targetToken, src.handle, version);
+    const lookup = await findProductByHandle(targetShop, targetToken, src.handle, version);
+    // Could not determine whether the destination already has this handle.
+    // Refuse to guess: creating would duplicate the merchant's product, which
+    // is the one outcome conflictMode=skip/overwrite exists to prevent. Throw
+    // so this product is recorded FAILED and can be retried — and so an auth
+    // failure here reaches runMigrationWorker's isAuthError path, which
+    // refreshes the token and retries the product properly.
+    if (!lookup.ok) {
+      throw new Error(
+        `Could not check whether "${src.handle}" already exists on the destination ` +
+        `(${lookup.error}). Skipped rather than risk creating a duplicate — re-run the transfer to retry.`,
+      );
+    }
+    const existing = lookup.product;
     if (existing) {
       if (conflictMode === "skip") return { id: existing.id.split("/").pop(), gid: existing.id, skipped: true, action: "skipped", reason: "A product with this handle already exists on the destination" };
       if (conflictMode === "overwrite") {
@@ -390,7 +419,7 @@ async function getProductCount(sourceShop, sourceToken, version, marketQuery) {
 // Main worker
 // ────────────────────────────────────────────────────────────────────────────
 
-export async function runMigrationWorker(jobId) {
+export async function runMigrationWorker(jobId, { createTokens = createTokenProvider } = {}) {
   if (activeWorkers.has(jobId)) return; // already running
   activeWorkers.set(jobId, { startedAt: Date.now(), running: true });
 
@@ -404,8 +433,16 @@ export async function runMigrationWorker(jobId) {
     if (!job) { activeWorkers.delete(jobId); return; }
     if (job.status === "COMPLETED" || job.status === "FAILED") { activeWorkers.delete(jobId); return; }
 
-    const sourceToken = decrypt(job.sourceToken);
-    const destToken = decrypt(job.destToken);
+    // The tokens stored on the job are a SNAPSHOT taken when it was created,
+    // and offline access tokens live only 60 minutes — see
+    // job-tokens.server.js. Both are therefore treated as fallbacks behind a
+    // provider that re-resolves (and thereby renews) the real token from the
+    // session store as the job runs. Anything longer than an hour, and every
+    // resumed or scheduled job, depends on this.
+    const sourceTokens = createTokens({ shop: job.sourceShop, fallbackToken: decrypt(job.sourceToken) });
+    const destTokens = createTokens({ shop: job.shop, fallbackToken: decrypt(job.destToken) });
+    const sourceToken = await sourceTokens.get();
+    const destToken = await destTokens.get();
 
     // Phase 4.2: market-scoped transfer, resolved and snapshotted onto the
     // job at creation time (api.migration-job.jsx) rather than re-fetched
@@ -532,17 +569,31 @@ export async function runMigrationWorker(jobId) {
 
     let hasMore = true;
     while (hasMore) {
+      // A page fetch failing is fatal to the whole job, so an expired source
+      // token gets one retry with a freshly-resolved one before giving up.
       let page;
       try {
-        page = await fetchProductsPage(job.sourceShop, sourceToken, cursor, job.apiVersion, marketQuery);
+        page = await fetchProductsPage(job.sourceShop, await sourceTokens.get(), cursor, job.apiVersion, marketQuery);
       } catch (err) {
-        console.error(`[migration-worker] job=${jobId} failed to fetch product page:`, err.message);
-        await prisma.migrationJob.update({
-          where: { id: jobId },
-          data: { status: "FAILED", errorLog: JSON.stringify([...errorLog, { error: `Fetch page failed: ${err.message}` }]) },
-        });
-        activeWorkers.delete(jobId);
-        return;
+        let fatal = err;
+        if (isAuthError(err)) {
+          sourceTokens.invalidate();
+          try {
+            page = await fetchProductsPage(job.sourceShop, await sourceTokens.get(), cursor, job.apiVersion, marketQuery);
+            fatal = null;
+          } catch (retryErr) {
+            fatal = retryErr;
+          }
+        }
+        if (fatal) {
+          console.error(`[migration-worker] job=${jobId} failed to fetch product page:`, fatal.message);
+          await prisma.migrationJob.update({
+            where: { id: jobId },
+            data: { status: "FAILED", errorLog: JSON.stringify([...errorLog, { error: `Fetch page failed: ${fatal.message}` }]) },
+          });
+          activeWorkers.delete(jobId);
+          return;
+        }
       }
 
       const { products, nextCursor, hasNextPage } = page;
@@ -551,9 +602,35 @@ export async function runMigrationWorker(jobId) {
       // Process this page in small parallel batches
       for (let i = 0; i < products.length; i += CREATE_CONCURRENCY) {
         const slice = products.slice(i, i + CREATE_CONCURRENCY);
+
+        // Re-point ctx at the current tokens before every batch. Both calls
+        // are cache hits for ~20 minutes at a time, so this is nearly free;
+        // what it buys is that a job running longer than a token's 60-minute
+        // life keeps working instead of 401-ing every remaining product.
+        ctx.targetToken = await destTokens.get();
+        ctx.sourceToken = await sourceTokens.get();
+
         await Promise.all(slice.map(async (src) => {
           const srcId = src.id?.split("/").pop();
-          if (!srcId) return;
+          if (!srcId) {
+            // A source row the destination can never be reconciled against.
+            // This used to be a bare `return`: the product vanished from the
+            // transfer counted as neither processed nor failed, with no log
+            // entry and no console line, so a merchant comparing catalogs
+            // afterwards would find something missing and have nothing at all
+            // to explain it. Malformed source data must fail LOUDLY.
+            failedDelta++;
+            const reason = "Source product has no id — it cannot be transferred or tracked. This usually means malformed data from the source store.";
+            errorLog.push({ sourceId: null, title: src.title || "(no title)", error: reason });
+            console.warn(`[migration-worker] job=${jobId} product with no id skipped: ${src.title || "(no title)"}`);
+            await logBuffer.add({
+              entityType: ENTITY.PRODUCT,
+              action: ACTION.FAILED,
+              title: src.title,
+              reason,
+            });
+            return;
+          }
 
           // Skip if already transferred (idempotency on resume)
           if (doneSet.has(srcId)) return;
@@ -573,7 +650,24 @@ export async function runMigrationWorker(jobId) {
           }
 
           try {
-            const { id: destId, gid: destGid, skipped, action, reason, metafieldErrors } = await transferOneProduct(src, ctx);
+            let result;
+            try {
+              result = await transferOneProduct(src, ctx);
+            } catch (err) {
+              // An expired token must not be recorded as "this product could
+              // not be transferred" — that is a job-level problem wearing a
+              // per-product disguise, and it is how a long migration used to
+              // mark thousands of perfectly good products FAILED. Re-resolve
+              // and give the product one honest second attempt.
+              if (!isAuthError(err)) throw err;
+              destTokens.invalidate();
+              sourceTokens.invalidate();
+              ctx.targetToken = await destTokens.get();
+              ctx.sourceToken = await sourceTokens.get();
+              console.warn(`[migration-worker] job=${jobId} auth error on ${srcId} — retrying with a refreshed token`);
+              result = await transferOneProduct(src, ctx);
+            }
+            const { id: destId, skipped, action, reason, metafieldErrors } = result;
             doneSet.add(srcId);
             // `action` is persisted for rollback safety: it's the only record
             // of whether THIS app created the destination product, or merely

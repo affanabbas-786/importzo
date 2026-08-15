@@ -114,3 +114,65 @@ describe("OAuth scope minimization", () => {
     }
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════
+// The gap that let the audited set above drift out of reality.
+//
+// shopify.server.js configures the app with `scopes: process.env.SCOPES`,
+// NOT with the toml's scopes line — so the guard above was pinning a value
+// the running app never reads. They diverged: while the toml documented
+// removing read_orders after auditing that no order API call exists, .env
+// still requested read_orders, write_orders, read_draft_orders,
+// write_draft_orders, write_customers, read/write_price_rules,
+// read/write_discounts and read/write_collections. The live Session rows
+// showed the consequence — older installs carry read_orders in their
+// granted scope string.
+//
+// These tests read the env files as text (not process.env) so they check
+// what is actually on disk regardless of what the test runner has loaded.
+// ═══════════════════════════════════════════════════════════════════
+describe("SCOPES env stays in step with shopify.app.toml", () => {
+  const declared = declaredScopes();
+
+  function envScopes(filename) {
+    const full = path.join(ROOT, filename);
+    if (!fs.existsSync(full)) return null;
+    const line = fs.readFileSync(full, "utf8")
+      .split("\n")
+      .find((l) => l.trim().startsWith("SCOPES="));
+    if (!line) return null;
+    return line.slice(line.indexOf("=") + 1)
+      .trim()
+      .replace(/^["']|["']$/g, "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
+  // .env itself is gitignored and absent from CI, so it is checked only when
+  // present — which is exactly the case that matters, on the server.
+  for (const filename of [".env", ".env.development.example"]) {
+    it(`${filename} declares the same scope set as shopify.app.toml`, () => {
+      const scopes = envScopes(filename);
+      if (scopes === null) return; // file or key not present — nothing to drift
+      expect([...scopes].sort()).toEqual([...declared].sort());
+    });
+  }
+
+  it("no env file smuggles in a scope the audit removed", () => {
+    const removed = [
+      "read_orders", "write_orders",
+      "read_draft_orders", "write_draft_orders",
+      "write_customers",
+      "read_price_rules", "write_price_rules",
+      "read_discounts", "write_discounts",
+    ];
+    for (const filename of [".env", ".env.development.example"]) {
+      const scopes = envScopes(filename);
+      if (scopes === null) continue;
+      for (const scope of removed) {
+        expect(scopes, `${filename} still requests ${scope}, which no code path uses`).not.toContain(scope);
+      }
+    }
+  });
+});

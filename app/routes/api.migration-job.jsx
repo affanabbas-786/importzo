@@ -67,6 +67,40 @@ export const action = async ({ request }) => {
   }
   if (!sourceShop.includes(".")) sourceShop = sourceShop + ".myshopify.com";
 
+  // Idempotency guard for the same store PAIR.
+  //
+  // Distinct from the load cap below, and it has to come first. maxConcurrent
+  // is 2, deliberately — transferring from two DIFFERENT source stores at once
+  // is legitimate. But a second job for the SAME source -> destination pair is
+  // never intentional; it is a double-clicked button, a retried POST after a
+  // timeout, or a refresh.
+  //
+  // Left to the count check alone, that second job is allowed through (1 < 2)
+  // and runs concurrently over the identical product set. ProductMapping's
+  // uniqueness is scoped @@unique([jobId, sourceProductId]), so it dedupes
+  // WITHIN a job and does nothing across two — and conflictMode="skip" cannot
+  // save it either, because both workers run findProductByHandle before either
+  // has created anything, both get "not found", and both create. The result is
+  // a silently duplicated catalog from one extra click.
+  //
+  // Returning the existing job's id (rather than a bare error) also lets the
+  // client recover gracefully: a double-submit can just start polling the job
+  // that is already running, which is what the merchant wanted anyway.
+  const duplicate = await prisma.migrationJob.findFirst({
+    where: { shop: targetShop, sourceShop, status: { in: ["PENDING", "RUNNING"] } },
+    orderBy: { createdAt: "desc" },
+    select: { id: true },
+  });
+  if (duplicate) {
+    console.log(`[api/migration-job] duplicate submit for ${targetShop} <- ${sourceShop}; returning in-flight job=${duplicate.id}`);
+    return Response.json({
+      ok: true,
+      jobId: duplicate.id,
+      alreadyRunning: true,
+      message: "A transfer from this source store is already in progress — showing that one instead of starting a second.",
+    }, { headers: { "Cache-Control": "no-store" } });
+  }
+
   // Real concurrency control for background work: refuse to queue another
   // migration while this shop already has one in flight. Without this, a
   // merchant could start N simultaneous full-catalog migrations and starve

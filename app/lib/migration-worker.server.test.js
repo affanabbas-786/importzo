@@ -520,6 +520,103 @@ describe("runMigrationWorker", () => {
     expect(mappings[0].status).toBe("DONE");
   });
 
+  // ── Conflict-detection failure must never become a duplicate ───────────
+  //
+  // findProductByHandle used to `catch { return null }`, and the caller reads
+  // null as "nothing there, safe to create". So any transient failure of the
+  // lookup silently downgraded conflictMode skip/overwrite into create and
+  // duplicated the merchant's product — in a live store, with no error
+  // anywhere. These pin the corrected behaviour: when the lookup cannot
+  // answer, the product FAILS (visible, retryable, non-destructive) instead.
+
+  describe("conflict detection cannot fail open into a duplicate", () => {
+    // Reasons the handle lookup can realistically fail mid-migration.
+    //
+    // 429-past-all-retries is deliberately NOT in this list even though it is
+    // the likeliest cause on a large catalog: shopify-api.server.js's retry
+    // loop uses real timers, so exercising it costs ~30s of genuine sleeping
+    // and blows the default test timeout. It also buys nothing — a 429 that
+    // outlives the retries and a 500 leave shopifyGraphql through the exact
+    // same `!res.ok -> throw` line, so findProductByHandle cannot tell them
+    // apart. The 500 case below covers both.
+    const lookupFailures = [
+      ["destination server error", 500, "Internal Server Error"],
+      ["expired or revoked token", 401, "Invalid API key or access token"],
+    ];
+
+    for (const [label, status, bodyText] of lookupFailures) {
+      it(`does not create a product when the handle lookup fails: ${label}`, async () => {
+        fakePrisma = createFakePrisma(baseJob({ conflictMode: "skip" }));
+        let productCreateCalled = false;
+        const inner = makeFetch({
+          productPages: [{ nodes: [productNode(1, { handle: "existing-handle" })], hasNextPage: false }],
+          productCreateHandler: () => { productCreateCalled = true; return jsonResponse({ data: {} }); },
+        });
+        global.fetch = vi.fn(async (url, opts) => {
+          const query = opts?.body ? JSON.parse(opts.body).query || "" : "";
+          if (query.includes("query FindProduct")) {
+            return new Response(bodyText, { status, headers: { "Content-Type": "text/plain" } });
+          }
+          return inner(url, opts);
+        });
+
+        await runMigrationWorker("job-1");
+
+        // The critical assertion: no product was created on the destination.
+        expect(productCreateCalled).toBe(false);
+
+        const mappings = fakePrisma.__getMappings();
+        expect(mappings[0].status).toBe("FAILED");
+        expect(mappings[0].error).toMatch(/could not check whether "existing-handle" already exists/i);
+        expect(mappings[0].error).toMatch(/duplicate/i);
+      });
+    }
+
+    it("still creates normally when the lookup definitively reports no such handle", async () => {
+      fakePrisma = createFakePrisma(baseJob({ conflictMode: "skip" }));
+      let productCreateCalled = false;
+      global.fetch = makeFetch({
+        productPages: [{ nodes: [productNode(1, { handle: "brand-new" })], hasNextPage: false }],
+        findProductByHandleResult: null, // empty edges = definitive "not found"
+        productCreateHandler: () => {
+          productCreateCalled = true;
+          return jsonResponse({ data: { productCreate: { product: { id: "gid://shopify/Product/new-1" }, userErrors: [] } } });
+        },
+      });
+
+      await runMigrationWorker("job-1");
+
+      expect(productCreateCalled).toBe(true);
+      expect(fakePrisma.__getMappings()[0].status).toBe("DONE");
+    });
+
+    it("conflictMode=create skips the lookup entirely, so a lookup outage cannot block it", async () => {
+      fakePrisma = createFakePrisma(baseJob({ conflictMode: "create" }));
+      let findProductCalled = false;
+      let productCreateCalled = false;
+      const inner = makeFetch({
+        productPages: [{ nodes: [productNode(1, { handle: "whatever" })], hasNextPage: false }],
+        productCreateHandler: () => {
+          productCreateCalled = true;
+          return jsonResponse({ data: { productCreate: { product: { id: "gid://shopify/Product/new-1" }, userErrors: [] } } });
+        },
+      });
+      global.fetch = vi.fn(async (url, opts) => {
+        const query = opts?.body ? JSON.parse(opts.body).query || "" : "";
+        if (query.includes("query FindProduct")) {
+          findProductCalled = true;
+          return new Response("Throttled", { status: 429 });
+        }
+        return inner(url, opts);
+      });
+
+      await runMigrationWorker("job-1");
+
+      expect(findProductCalled).toBe(false);
+      expect(productCreateCalled).toBe(true);
+    });
+  });
+
   // Regression coverage for a production bug: the source-product query used
   // to request Product.giftCard and ProductVariant.fulfillmentService, neither
   // of which exists on the pinned API version (2025-10) — verified directly
@@ -1204,6 +1301,120 @@ describe("runMigrationWorker", () => {
 
       expect(fakePrisma.__getJob("job-1").status).toBe("COMPLETED");
       expect(fakePrisma.__getJob("job-1").failedProducts).toBe(0);
+    });
+  });
+
+  // ── Expiring offline access tokens ────────────────────────────────────────
+  //
+  // The tokens on a MigrationJob row are a snapshot taken when the job was
+  // created, and an offline access token is valid for SIXTY MINUTES. Before
+  // job-tokens.server.js the worker used that snapshot for the entire run, so
+  // any migration lasting longer than an hour — and every resumed or
+  // scheduled job — 401'd on every remaining product and recorded them all as
+  // FAILED. These cover the two halves of the fix.
+  describe("token expiry during a long-running job", () => {
+    // A provider that hands out a different token each time it is asked,
+    // standing in for the session store renewing an expiring token.
+    function rotatingTokens() {
+      const issued = [];
+      return {
+        issued,
+        create: ({ shop, fallbackToken }) => {
+          let n = 0;
+          return {
+            async get() {
+              n++;
+              const token = `${shop}:token-${n}`;
+              issued.push(token);
+              return token;
+            },
+            invalidate() { n++; },
+            didRefresh: true,
+            fallbackToken,
+          };
+        },
+      };
+    }
+
+    it("re-resolves the access token as the job runs rather than reusing the snapshot", async () => {
+      fakePrisma = createFakePrisma(baseJob());
+      const tokens = rotatingTokens();
+      const seenAuthHeaders = new Set();
+      const inner = makeFetch({
+        productPages: [{ nodes: [productNode(1), productNode(2)], hasNextPage: false }],
+      });
+      global.fetch = vi.fn(async (url, opts) => {
+        const header = opts?.headers?.["X-Shopify-Access-Token"];
+        if (header) seenAuthHeaders.add(header);
+        return inner(url, opts);
+      });
+
+      await runMigrationWorker("job-1", { createTokens: tokens.create });
+
+      expect(fakePrisma.__getJob("job-1").status).toBe("COMPLETED");
+      // The snapshot value from the job row must never reach Shopify once a
+      // live token is resolvable.
+      expect(seenAuthHeaders.has("src-token")).toBe(false);
+      expect(seenAuthHeaders.has("dest-token")).toBe(false);
+      expect([...seenAuthHeaders].some((t) => t.startsWith(`${DEST_SHOP}:token-`))).toBe(true);
+      expect([...seenAuthHeaders].some((t) => t.startsWith(`${SOURCE_SHOP}:token-`))).toBe(true);
+    });
+
+    it("retries a product with a refreshed token instead of marking it FAILED on a 401", async () => {
+      fakePrisma = createFakePrisma(baseJob());
+      let productCreateCalls = 0;
+      global.fetch = makeFetch({
+        productPages: [{ nodes: [productNode(1)], hasNextPage: false }],
+        productCreateHandler: () => {
+          productCreateCalls++;
+          // First attempt: the token expired mid-job.
+          if (productCreateCalls === 1) {
+            return jsonResponse({ errors: "[API] Invalid API key or access token" }, { status: 401 });
+          }
+          return jsonResponse({ data: { productCreate: { product: { id: "gid://shopify/Product/new-1" }, userErrors: [] } } });
+        },
+      });
+
+      await runMigrationWorker("job-1");
+
+      const job = fakePrisma.__getJob("job-1");
+      expect(productCreateCalls).toBeGreaterThanOrEqual(2);
+      expect(job.status).toBe("COMPLETED");
+      expect(job.processedProducts).toBe(1);
+      expect(job.failedProducts).toBe(0);
+    });
+
+    it("still fails the product when the retry also fails, so a real error is not hidden", async () => {
+      fakePrisma = createFakePrisma(baseJob());
+      global.fetch = makeFetch({
+        productPages: [{ nodes: [productNode(1)], hasNextPage: false }],
+        productCreateHandler: () => jsonResponse({ errors: "[API] Invalid API key or access token" }, 401),
+      });
+
+      await runMigrationWorker("job-1");
+
+      const job = fakePrisma.__getJob("job-1");
+      expect(job.status).toBe("COMPLETED");
+      expect(job.failedProducts).toBe(1);
+    });
+
+    it("retries a source page fetch once on 401 before failing the whole job", async () => {
+      fakePrisma = createFakePrisma(baseJob());
+      let pageCalls = 0;
+      const inner = makeFetch({ productPages: [{ nodes: [productNode(1)], hasNextPage: false }] });
+      global.fetch = vi.fn(async (url, opts) => {
+        const query = opts?.body ? JSON.parse(opts.body).query || "" : "";
+        if (query.includes("query SourceProducts")) {
+          pageCalls++;
+          if (pageCalls === 1) return jsonResponse({ errors: "unauthorized" }, { status: 401 });
+        }
+        return inner(url, opts);
+      });
+
+      await runMigrationWorker("job-1");
+
+      expect(pageCalls).toBeGreaterThanOrEqual(2);
+      expect(fakePrisma.__getJob("job-1").status).toBe("COMPLETED");
     });
   });
 });

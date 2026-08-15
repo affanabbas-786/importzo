@@ -2,8 +2,10 @@ import "@shopify/shopify-app-react-router/adapters/node";
 import {
   ApiVersion,
   AppDistribution,
+  BillingInterval,
   shopifyApp,
 } from "@shopify/shopify-app-react-router/server";
+import { PLANS, PLAN_IDS, BILLING_PLAN_KEY, BILLING_INTERVAL, TRIAL_DAYS } from "./lib/plans.js";
 import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prisma";
 import prisma from "./db.server";
 import { assertEncryptionConfigured } from "./utils/encryption.server";
@@ -14,6 +16,27 @@ const missingVars = ["SHOPIFY_API_KEY", "SHOPIFY_API_SECRET", "SHOPIFY_APP_URL"]
 );
 if (missingVars.length > 0) {
   console.error(`[importzo] FATAL: Missing required env vars: ${missingVars.join(", ")}. App will not function correctly.`);
+}
+
+// GROQ_API_KEY backs "Built-in AI mapping & enhancement", which billing-ui.js
+// lists as an included feature on Pro and Agency — i.e. merchants pay for it.
+// It is deliberately a WARNING and not a throw: built-in AI is a secondary
+// feature, bring-your-own-key still works without it, and refusing to boot
+// would take migrations down over an optional credential.
+//
+// But it must not be silent either, which is what it was. This key was added
+// to .env on 2026-08-13 while the running process had started 2026-08-12, so
+// production served a paying feature that threw on every call, for two days,
+// with nothing in the boot log to say so — the app looked perfectly healthy.
+// A missing credential for a billed feature is a deploy-time fact and belongs
+// in the deploy log, next to the other env checks.
+if (!process.env.GROQ_API_KEY) { // eslint-disable-line no-undef
+  console.warn(
+    "[importzo] WARNING: GROQ_API_KEY is not set. Built-in AI (SEO cleanup, alt-text, " +
+    "duplicate detection, error diagnosis) is advertised on the Pro and Agency plans and " +
+    "will fail for every shop using it. Bring-your-own-key integrations are unaffected. " +
+    "If this key was added to .env after the process started, restart PM2 to pick it up.",
+  );
 }
 
 // Guard against a production .env being used for a local dev run.
@@ -64,6 +87,48 @@ if (process.env.NODE_ENV === "production" && appUrlHost && DEV_HOST_PATTERN.test
 // it belongs.
 assertEncryptionConfigured();
 
+// ═══════════════════════════════════════════════════════════════════
+// Phase 10 — the `billing` config, rebuilt for the Manual Billing API.
+//
+// Derived from plans.js rather than written out by hand. The two have to
+// agree — plans.js is what the merchant is SHOWN and this is what they are
+// CHARGED — and the only way to guarantee that is to have one of them be a
+// function of the other. Writing "15" here as well would create a second
+// place for the price to live, which is exactly how a page that advertises
+// $15 ends up billing $19.
+//
+// Four entries, not two: Pro and Agency each need a separate monthly and
+// yearly AppSubscription, because interval is a property of the charge, not
+// something a single plan can offer both of.
+// ═══════════════════════════════════════════════════════════════════
+function recurringPlan({ tier, interval }) {
+  const plan = PLANS[tier];
+  const yearly = interval === BILLING_INTERVAL.YEARLY;
+  return {
+    lineItems: [
+      {
+        amount: yearly ? plan.priceYearly : plan.price,
+        currencyCode: "USD",
+        interval: yearly ? BillingInterval.Annual : BillingInterval.Every30Days,
+      },
+    ],
+    // The advertised trial. Note this grants a trial on EVERY subscription
+    // created against this plan, because Shopify keeps no record that a shop
+    // has already had one — billing-trial.server.js is what stops that from
+    // becoming an unlimited free-usage loop via cancel-and-resubscribe.
+    trialDays: TRIAL_DAYS,
+  };
+}
+
+const BILLING_CONFIG = Object.fromEntries(
+  [PLAN_IDS.PRO, PLAN_IDS.AGENCY].flatMap((tier) =>
+    [BILLING_INTERVAL.MONTHLY, BILLING_INTERVAL.YEARLY].map((interval) => [
+      BILLING_PLAN_KEY[tier][interval],
+      recurringPlan({ tier, interval }),
+    ]),
+  ),
+);
+
 const shopify = shopifyApp({
   apiKey: process.env.SHOPIFY_API_KEY,
   apiSecretKey: process.env.SHOPIFY_API_SECRET || "",
@@ -73,22 +138,19 @@ const shopify = shopifyApp({
   authPathPrefix: "/auth",
   sessionStorage: new PrismaSessionStorage(prisma),
   distribution: AppDistribution.AppStore,
-  // Phase 8 — no `billing` config block. The app is registered for Shopify
-  // App Pricing (formerly Managed Pricing) in the Partner Dashboard, which
-  // owns the plans, the prices, the trial lengths and the charge itself.
-  // Shopify rejects appSubscriptionCreate from such apps outright ("Managed
-  // Pricing Apps cannot use the Billing API (to create charges)"), so the
-  // config that used to declare Pro at $15 and Agency at $10 could only
-  // mislead: it described charges this app is no longer permitted to create,
-  // in a place a reader would reasonably trust as authoritative. Prices now
-  // live in the dashboard, with plans.js holding the display copy that has
-  // to be kept in step with it by hand.
+  // Phase 10 — the billing config is back, because the app creates its own
+  // charges again. See BILLING_CONFIG above for why it is derived rather
+  // than literal.
   //
-  // Removing it does NOT break reading subscription state. This package
-  // always passes `unstable_managedPricingSupport: true` down to
-  // shopify-api, which is exactly the flag that lets billing.check() run
-  // against currentAppInstallation.activeSubscriptions with no billing
-  // config present — see app.billing.jsx's reconcile().
+  // IMPORTANT DEPLOY ORDER: while Shopify App Pricing is still enabled in the
+  // Partner Dashboard, Shopify REJECTS appSubscriptionCreate from this app
+  // ("Managed Pricing Apps cannot use the Billing API (to create charges)").
+  // Declaring this config does not by itself change anything or break
+  // anything — it only takes effect when billing.request is called, and
+  // app.billing.jsx deliberately falls back to the hosted plan page when
+  // Shopify refuses. So this is safe to deploy BEFORE the dashboard switch,
+  // and starts working the moment the switch is made, with no flag day.
+  billing: BILLING_CONFIG,
   hooks: {
     afterAuth: async ({ session }) => {
       console.log(`[importzo] afterAuth: shop=${session.shop} isOnline=${session.isOnline} scope=${session.scope}`);

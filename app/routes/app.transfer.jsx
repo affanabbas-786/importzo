@@ -296,9 +296,19 @@ export const action = async ({ request }) => {
     return { uploaded, total: media.length, warnings };
   }
 
-  // Helper: look up existing product by handle on target store
+  // Helper: look up existing product by handle on target store.
+  //
+  // Returns { ok: true, product } (product === null means "definitively no
+  // such handle") or { ok: false, error } when the lookup itself failed.
+  //
+  // The two must stay distinguishable. This previously returned null for
+  // both, and the caller reads null as "safe to create" — so a transient
+  // failure (a 429 past shopify-api.server.js's retries, a 5xx, an expired
+  // token) silently turned conflictMode "skip"/"overwrite" into "create" and
+  // duplicated the merchant's product. Same bug, same reasoning, as the copy
+  // in migration-worker.server.js — this is the synchronous transfer path.
   async function findProductByHandle(handle) {
-    if (!handle) return null;
+    if (!handle) return { ok: true, product: null };
     try {
       const data = await shopifyGraphql(targetShop, targetToken, `#graphql
         query FindProduct($query: String!) {
@@ -306,8 +316,10 @@ export const action = async ({ request }) => {
             edges { node { id handle title } }
           }
         }`, { query: `handle:${handle}` });
-      return data?.products?.edges?.[0]?.node || null;
-    } catch { return null; }
+      return { ok: true, product: data?.products?.edges?.[0]?.node || null };
+    } catch (err) {
+      return { ok: false, error: err?.message || String(err) };
+    }
   }
 
   // Phase 6 — fuzzy duplicate detection (dry-run preview only, never on a
@@ -361,7 +373,17 @@ export const action = async ({ request }) => {
 
     // Conflict detection: look up by handle
     if (src.handle && conflictMode !== "create") {
-      const existing = await findProductByHandle(src.handle);
+      const lookup = await findProductByHandle(src.handle);
+      // Unknown whether the handle already exists — fail this product rather
+      // than create a duplicate of the merchant's own data. A failed row is
+      // visible and retryable; a duplicate has to be cleaned up by hand.
+      if (!lookup.ok) {
+        throw new Error(
+          `Could not check whether "${src.handle}" already exists on the destination ` +
+          `(${lookup.error}). Skipped rather than risk creating a duplicate — re-run the transfer to retry.`,
+        );
+      }
+      const existing = lookup.product;
       if (existing) {
         if (conflictMode === "skip") {
           return { id: existing.id.split("/").pop(), gid: existing.id, warnings: ["Skipped — product already exists"], skipped: true };
@@ -1419,7 +1441,13 @@ export const action = async ({ request }) => {
         console.error("[importzo] fetch-collections: missing source credentials", { hasUrl: !!url, hasToken: !!token });
         return { intent: "fetch-collections", rid, ok: false, error: "Missing source store credentials. Please reconnect your source store." };
       }
-      console.log(`[importzo] fetch-collections: source=${url} tokenLen=${token.length} tokenPrefix=${token.slice(0, 6)}`);
+      // Logs that the credential is PRESENT, never anything about its value.
+      // This used to emit tokenLen and tokenPrefix. The prefix was harmless in
+      // practice (it is always the literal "shpat_"), but length plus prefix is
+      // still credential metadata written to a log file for no operational
+      // benefit — the probe below is what actually diagnoses a bad token, and
+      // it does so by outcome.
+      console.log(`[importzo] fetch-collections: source=${url} hasToken=${!!token}`);
 
       // Sanity probe: count via dedicated count query — exposes scope/auth issues fast.
       try {
@@ -1698,7 +1726,8 @@ export const action = async ({ request }) => {
       console.error("[importzo] transfer-products: missing source credentials", { hasUrl: !!sourceUrl, hasToken: !!sourceToken });
       return { intent: "transfer-products", rid, ok: false, error: "Missing source store credentials. Please reconnect your source store." };
     }
-    console.log(`[importzo] transfer-products: source=${sourceUrl} tokenLen=${sourceToken.length} tokenPrefix=${sourceToken.slice(0, 6)} dryRun=${dryRun} skipCollectionProducts=${skipCollectionProducts}`);
+    // Presence only — see the note on the fetch-collections log above.
+    console.log(`[importzo] transfer-products: source=${sourceUrl} hasToken=${!!sourceToken} dryRun=${dryRun} skipCollectionProducts=${skipCollectionProducts}`);
 
     // Sanity probe: count via dedicated count query — exposes scope/auth issues fast.
     try {

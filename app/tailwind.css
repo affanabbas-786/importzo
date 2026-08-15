@@ -107,3 +107,176 @@ s-page {
 #tawk-widget-container, iframe[title*="chat"] {
   z-index: 9990 !important;
 }
+
+/* ═══════════════════════════════════════════════════════════════════
+   Billing page — period toggle + featured plan card.
+
+   Ported from the Citeable app's Plans page, which is the design this page
+   was asked to match, with its purple accent (#8b5cf6) remapped onto
+   Importzo's brand green. The structure is deliberately unchanged: a
+   segmented pill for the billing period, and a featured card that is lifted,
+   ringed, top-barred and lightly animated.
+
+   The greens correspond to BRAND in app/lib/constants.js — secondary #2E6316
+   is the accent, primary #17320A the deep end of every gradient — so the
+   card's chrome cannot drift away from the rest of the app's palette.
+   ═══════════════════════════════════════════════════════════════════ */
+:root {
+  --iz-green: #2E6316;
+  --iz-green-strong: #244F11;
+  --iz-green-deep: #17320A;
+  --iz-green-tint: #F1F7ED;
+  --iz-featured-lift: 24px;
+}
+
+/* ------------------------------------------------------ period toggle -- */
+.iz-period-toggle {
+  display: inline-flex;
+  align-items: stretch;
+  padding: 4px;
+  border: 1px solid #e3e3e3;
+  border-radius: 999px;
+  background: #fff;
+  position: relative;
+  z-index: 2;
+}
+
+.iz-period-toggle__option {
+  appearance: none;
+  border: 0;
+  cursor: pointer;
+  border-radius: 999px;
+  padding: 8px 20px;
+  font: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 500;
+  color: #4a4a4a;
+  background: transparent;
+  white-space: nowrap;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.iz-period-toggle__option:hover:not(.iz-period-toggle__option--active) {
+  background: #f7f7f7;
+}
+
+.iz-period-toggle__option:focus-visible {
+  outline: 2px solid var(--iz-green);
+  outline-offset: 2px;
+}
+
+.iz-period-toggle__option--active {
+  background: var(--iz-green);
+  color: #fff;
+  font-weight: 650;
+}
+
+.iz-period-toggle__save {
+  margin-left: 4px;
+  font-weight: 500;
+  color: #6b6b6b;
+}
+
+.iz-period-toggle__option--active .iz-period-toggle__save {
+  color: rgba(255, 255, 255, 0.82);
+}
+
+/* ---------------------------------------------------------- plan grid -- */
+/* Headroom for the featured card's negative margin-top, so popping it up
+   never collides with the toggle above it. */
+.iz-plan-grid {
+  padding-top: var(--iz-featured-lift);
+}
+
+.iz-plan-cell {
+  position: relative;
+  display: flex;
+  border-radius: 12px;
+}
+
+.iz-plan-cell > * {
+  width: 100%;
+}
+
+@media (min-width: 768px) {
+  .iz-plan-cell--featured {
+    margin-top: calc(var(--iz-featured-lift) * -1);
+    z-index: 1;
+  }
+}
+
+/* ------------------------------------------------------ featured card -- */
+/* Ring and lift drawn with box-shadow rather than a border so nothing
+   reflows: a real border would shift this card's inner width against the two
+   neutral ones beside it. */
+.iz-plan-cell--featured {
+  box-shadow:
+    0 0 0 2px var(--iz-green),
+    0 20px 44px -14px rgba(46, 99, 22, 0.55),
+    0 4px 12px -4px rgba(10, 10, 10, 0.14);
+}
+
+/* Green accent bar across the top edge, clipped to the card's radius. */
+.iz-plan-cell--featured::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 4px;
+  border-radius: 12px 12px 0 0;
+  background: linear-gradient(90deg, var(--iz-green), var(--iz-green-deep));
+  z-index: 2;
+  pointer-events: none;
+}
+
+/* Diagonal light sweep painted OVER the card. pointer-events:none keeps the
+   CTA clickable through the overlay, and the peak opacity stays low enough
+   that the band reads as a glint passing over the text rather than a wash
+   across it. */
+.iz-plan-cell--featured::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 12px;
+  pointer-events: none;
+  z-index: 4;
+  background: linear-gradient(
+    100deg,
+    transparent 40%,
+    rgba(255, 255, 255, 0.18) 47%,
+    rgba(233, 244, 226, 0.42) 50%,
+    rgba(255, 255, 255, 0.18) 53%,
+    transparent 60%
+  );
+  background-size: 260% 100%;
+  background-repeat: no-repeat;
+  /* Long pause between passes: an occasional glint, not a loop demanding
+     attention. 1.6s of travel per 7s cycle. */
+  animation: iz-shine 7s ease-in-out infinite;
+}
+
+@keyframes iz-shine {
+  0%   { background-position: 180% 0; }
+  23%  { background-position: -80% 0; }
+  100% { background-position: -80% 0; }
+}
+
+/* Motion here is decorative — drop it entirely rather than slowing it down. */
+@media (prefers-reduced-motion: reduce) {
+  .iz-plan-cell--featured::after { animation: none; background: none; }
+  .iz-period-toggle__option { transition: none; }
+}
+
+/* --------------------------------------------------------- VIP badge -- */
+.iz-badge-vip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 8px;
+  background: var(--iz-green-tint);
+  color: var(--iz-green-deep);
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 650;
+  white-space: nowrap;
+}
