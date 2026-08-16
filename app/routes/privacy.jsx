@@ -24,7 +24,7 @@ export default function PrivacyPolicy() {
 
         {/* Effective date */}
         <div className="px-6 py-4">
-          <p className="text-sm text-[#6d7175]">Effective date: April 15, 2026</p>
+          <p className="text-sm text-[#6d7175]">Effective date: August 16, 2026</p>
         </div>
 
         {/* Intro */}
@@ -63,7 +63,10 @@ export default function PrivacyPolicy() {
             </li>
           </ul>
           <p className="mt-3 text-sm text-[#6d7175]">
-            We do <strong>not</strong> collect personal information about your customers (names, emails, addresses, payment data) unless it is incidentally present in products, collections, or other store data you explicitly choose to transfer.
+            <strong>Customer personal information.</strong> If you use the Customers export feature, the App reads your customers&apos; names, email addresses, phone numbers, order counts, total spend, tags, notes, and marketing-consent state from the Shopify Admin API. This data is <strong>never stored by the App</strong>: it is held in server memory only for the duration of the export request, sent directly to your browser as a CSV download, and discarded when the request completes. It is never written to our database, never written to disk, and never logged.
+          </p>
+          <p className="mt-2 text-sm text-[#6d7175]">
+            Apart from that export, we do <strong>not</strong> collect personal information about your customers (names, emails, addresses, payment data) unless it is incidentally present in products, collections, or other store data you explicitly choose to transfer. We never collect or have access to customer payment data in any case.
           </p>
         </section>
 
@@ -76,6 +79,7 @@ export default function PrivacyPolicy() {
           <ul className="mt-2 space-y-1 text-sm text-[#202223] leading-relaxed list-none">
             <li className="flex gap-2"><span className="text-[#6d7175] select-none">·</span><span>Authenticating API calls to your Shopify store</span></li>
             <li className="flex gap-2"><span className="text-[#6d7175] select-none">·</span><span>Importing, exporting, or transferring products, collections, inventory, and themes</span></li>
+            <li className="flex gap-2"><span className="text-[#6d7175] select-none">·</span><span>Generating a customer CSV export for you to download, when you explicitly request one</span></li>
             <li className="flex gap-2"><span className="text-[#6d7175] select-none">·</span><span>Displaying your activity history within the App dashboard</span></li>
           </ul>
           <p className="mt-3 text-sm text-[#202223] leading-relaxed">
@@ -104,8 +108,8 @@ export default function PrivacyPolicy() {
             We also process Shopify&apos;s GDPR mandatory webhooks:
           </p>
           <ul className="mt-2 space-y-1 text-sm text-[#202223] leading-relaxed list-none">
-            <li className="flex gap-2"><span className="text-[#6d7175] select-none">·</span><span><code className="bg-[#f6f6f7] px-1 rounded text-xs">customers/data_request</code> — we confirm we hold no personal customer data.</span></li>
-            <li className="flex gap-2"><span className="text-[#6d7175] select-none">·</span><span><code className="bg-[#f6f6f7] px-1 rounded text-xs">customers/redact</code> — we confirm there is no customer PII to redact.</span></li>
+            <li className="flex gap-2"><span className="text-[#6d7175] select-none">·</span><span><code className="bg-[#f6f6f7] px-1 rounded text-xs">customers/data_request</code> — we confirm we hold no personal customer data. Because customer data is only ever passed through to your browser and never retained (see section 1), there is no stored record for us to return.</span></li>
+            <li className="flex gap-2"><span className="text-[#6d7175] select-none">·</span><span><code className="bg-[#f6f6f7] px-1 rounded text-xs">customers/redact</code> — we confirm there is no customer PII to redact, for the same reason.</span></li>
             <li className="flex gap-2"><span className="text-[#6d7175] select-none">·</span><span><code className="bg-[#f6f6f7] px-1 rounded text-xs">shop/redact</code> — shop data is permanently deleted within 48 hours of receipt.</span></li>
           </ul>
         </section>

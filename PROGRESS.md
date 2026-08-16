@@ -56,7 +56,8 @@ Also found and fixed while doing this: `privacy.jsx` Section 5 said "no other th
 are used", which becomes false once BYOK AI ships (product text is sent to the merchant's own connected
 provider). Fixed the wording as part of this commit rather than leaving it inaccurate — this was a
 factual-accuracy correction directly caused by a feature landing in the same commit, not a legal-strategy
-judgment call like the still-open `read_customers` wording question from Phase 3.
+judgment call like the `read_customers` wording question from Phase 3 (which was still open at the
+time of writing; resolved 2026-08-16 — see the RESOLVED note on item 5 in Phase 3.2 below).
 
 **3. The react-router RCE fix — merged into `main` (`6445d69`).** Per your explicit instruction. One
 sequencing note: I merged `fix-rce-upgrade` *before* finalizing the 4.4 commit rather than after, so
@@ -260,7 +261,7 @@ permanently. Worth resolving before the next deploy.
 (shorter) permission set on next load. Normal for a scope change, but merchant-visible — deploy
 deliberately.
 
-**5. `read_customers` vs the published privacy policy — your call.**
+**5. ✅ RESOLVED 2026-08-16 — `read_customers` vs the published privacy policy.** ~~Your call.~~
 The PRD asked to audit scopes "against the privacy policy already published". `app/routes/privacy.jsx`
 says the app does "not collect personal information about your customers (names, emails, addresses,
 payment data)". That is literally true — the customer CSV export streams to the merchant's browser and
@@ -268,6 +269,19 @@ is never persisted, which I verified and pinned with a test. But the app does **
 `read_customers` is Shopify "protected customer data" requiring separate approval. Two questions for
 you: should the policy say "access" rather than only "collect", and is protected-customer-data
 approval in place? Both are decisions about published legal copy, so I left them alone.
+
+> **RESOLVED 2026-08-16 — first question answered, second still open.**
+> The policy now says "access" as well as "collect". `app/routes/privacy.jsx` §1 states plainly that
+> the Customers export reads names, emails, phones, order counts, spend, tags, notes and marketing
+> consent, and that none of it is persisted — held in server memory for the request, sent to the
+> browser as a CSV, discarded on completion, never written to database, disk or logs. §2 adds the
+> export to the list of operations; §4 reconciles the GDPR bullets with §1 so they no longer read as
+> contradictory; effective date bumped per the policy's own §6. Re-verified before the edit:
+> `app/routes/app.export.jsx` contains zero Prisma calls, so the non-persistence claim is accurate.
+>
+> **Still open:** whether Shopify protected-customer-data approval is actually granted. That lives in
+> the Partner Dashboard and cannot be checked from this environment. Without it the export fails at
+> runtime — `app.export.jsx:198` already returns a specific error for that rejection.
 
 ## 3.3 — GDPR compliance webhooks (`4b49d41`)
 

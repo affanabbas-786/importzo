@@ -1,0 +1,24 @@
+# Importzo — https://importzo.dazzletech.co
+# Shopify store-to-store migration app.
+#
+# This domain is two things at once: a small public marketing site, and the
+# host for an embedded Shopify admin app. Only the former is worth crawling.
+# Everything not disallowed below is fair game — that is the landing page at /
+# and the privacy policy.
+
+User-agent: *
+
+# Embedded Shopify admin UI. Every route under these requires a signed session
+# token issued by Shopify and returns HTTP 410 to any request without one, so
+# crawling them yields nothing but error responses.
+Disallow: /app
+Disallow: /auth
+
+# Server endpoints, not pages: JSON APIs, HMAC-verified webhook receivers, and
+# signed single-use theme downloads.
+Disallow: /api/
+Disallow: /webhooks/
+Disallow: /theme-zip/
+
+# No Sitemap directive on purpose: this site publishes no sitemap.xml, and
+# pointing at one that 404s is worse than omitting the line.

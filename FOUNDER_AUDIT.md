@@ -161,9 +161,13 @@ I seeded a row in all 12 shop-scoped tables for two shops in a scratch copy of t
 
 **4. Favicon still needs a real resize.** 267 KB is a 71% improvement but still ~50× larger than it should be. Correct fix is a true multi-resolution ICO (16/32/48) and a 180×180 apple-touch PNG — roughly 5–10 KB total. **No resize tooling is installed** (only `optipng`, which cannot resize), and installing ImageMagick on your production VPS or adding an image dependency to `package.json` is your call, not mine. Same for `myfonts.ttf` (345 KB, preloaded) → WOFF2 would be ~40% the size.
 
-**5. `read_customers` scope vs. the published privacy policy.** Pre-existing and already noted in `shopify.app.toml`, repeated here because it is a legal-copy question and therefore explicitly yours: the policy says the app does not collect customer personal information — true, since the export streams to the browser and is never persisted — but it sits awkwardly beside a feature that reads names, emails and phone numbers, and it is Shopify protected customer data requiring separate approval.
+**5. ✅ RESOLVED — `read_customers` scope vs. the published privacy policy.** ~~Pre-existing and already noted in `shopify.app.toml`, repeated here because it is a legal-copy question and therefore explicitly yours: the policy says the app does not collect customer personal information — true, since the export streams to the browser and is never persisted — but it sits awkwardly beside a feature that reads names, emails and phone numbers, and it is Shopify protected customer data requiring separate approval.~~
 
-**6. `read_markets` scope is still uncommitted.** Adding it triggers a re-authorization prompt for every existing install. Held for your explicit go-ahead, per the existing note.
+> **RESOLVED 2026-08-16 (legal copy) — approval question still open.** `app/routes/privacy.jsx` now states in §1 that the Customers export *accesses* names, emails, phones, order counts, spend, tags, notes and marketing consent, and that none of it is persisted anywhere — memory-only for the request, sent to the browser as a CSV, discarded on completion. §2 lists the export as an operation; §4 reconciles the GDPR bullets with §1; effective date bumped to 2026-08-16 per the policy's own §6. Non-persistence re-verified against `app/routes/app.export.jsx` (zero Prisma calls) before writing the claim. **Not resolved:** whether Shopify protected-customer-data approval is granted — Partner Dashboard only, unverifiable from here.
+
+**6. ⚠️ CORRECTED — ~~`read_markets` scope is still uncommitted~~ (it was already committed; deploy is what's pending).** ~~Adding it triggers a re-authorization prompt for every existing install. Held for your explicit go-ahead, per the existing note.~~
+
+> **CORRECTION 2026-08-16 — this was already false when written.** `read_markets` was committed in `8640ff3` (Phase 4.2) and is present in `shopify.app.toml`, `.env` and `.env.development.example`, all three consistent and pinned by `test/scopes.test.js`. The stale "NOT YET COMMITTED" comment in `shopify.app.toml` is what this item was reading; that comment has been corrected. What is *actually* still pending is `shopify app deploy` — the toml value only reaches Shopify, and the merchant re-authorization prompt only fires, on deploy. That gate is intact and still awaits your go-ahead.
 
 **7. The app runs as `root` under PM2.** Not exploited and not novel, but it means any RCE is an immediate full-host compromise, and it is why the `640` database permissions are defence-in-depth rather than a real boundary. Moving to a dedicated service user is a meaningful operational change.
 
@@ -239,4 +243,23 @@ Ran for real, exit 0. Generate → build → backup (`integrity ok`, sessions 4/
 
 Fix #1 was verified at the process level rather than inferred: `SCHEDULER_SECRET`, `GROQ_API_KEY`, `ENCRYPTION_KEY` and `SHOPIFY_API_SECRET` in `/proc/<pid>/environ` all now match `.env`, and the cron tick script authenticates against the running app with the current secret.
 
-**Minor, noticed in the logs and not addressed:** `/robots.txt` 404s with a stack trace. Harmless, but it is a public marketing domain and a trivial static file would quiet it.
+### `/robots.txt` — FIXED 2026-08-15
+
+Noticed in the logs during the deploy work: `/robots.txt` 404'd and threw a
+"No route matches URL" stack trace. Not just my probes — the nginx access log
+shows real crawlers hitting it roughly hourly (01:10, 02:10, 03:36, 04:40,
+06:09, 09:27, 11:11), each one a logged exception.
+
+Citeable has no robots.txt/sitemap pattern to reuse, so this is a plain static
+file: `public/robots.txt`, which the build copies into `build/client/` and
+`react-router-serve` serves directly — the same path `llms.txt` already uses.
+
+Content disallows `/app` and `/auth` (embedded admin, returns 410 without a
+Shopify session token, so crawling produces only errors) and `/api/`,
+`/webhooks/`, `/theme-zip/` (server endpoints, not pages). No `Sitemap:`
+directive, deliberately — the site publishes no `sitemap.xml`, and pointing at
+one that 404s would be worse than omitting it.
+
+Verified: `HTTP 200`, `content-type: text/plain; charset=UTF-8`, 917 b, body
+byte-identical to source. The nginx access log shows a clean cutover at
+17:11:56 — every request before it 404, all six since 200.
