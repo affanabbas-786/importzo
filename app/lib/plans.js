@@ -234,3 +234,43 @@ export function intervalFromShopifyInterval(interval) {
   if (interval.toUpperCase() === "EVERY_30_DAYS") return BILLING_INTERVAL.MONTHLY;
   return null;
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Complimentary grants — a paid tier handed out with no Shopify charge.
+//
+// Occasionally a shop is put on a paid tier for free and permanently (a
+// partner, a design-partner store, goodwill after an incident). There is no
+// Shopify AppSubscription behind it, because Shopify has no way to represent
+// "paid plan, $0, forever" — and that absence is the problem this constant
+// solves.
+//
+// Every path that reconciles local tier against Shopify reads "no active
+// subscription" as "this merchant's charge lapsed" and writes Free. For a
+// complimentary shop that inference is wrong, and it fires silently on the
+// merchant's next Billing page load, so the grant would quietly evaporate
+// days after being made.
+//
+// The marker lives in ShopPlan.subscriptionStatus rather than a new column:
+// that field is already "whatever Shopify last said about the subscription",
+// it is free text with no format validation anywhere in the app, and it is
+// exactly the field the downgrade paths already carry. Reusing it keeps the
+// grant self-describing in the row itself, with no schema migration.
+//
+// subscriptionId stays NULL for these shops — there is genuinely no
+// subscription to point at, and inventing a GID would make the row lie to
+// anything that later tries to cancel or query it.
+//
+// A complimentary grant is only ever cleared deliberately, by setting the
+// tier back by hand. No automatic path may downgrade it.
+export const COMPLIMENTARY_STATUS = "COMPLIMENTARY";
+
+/**
+ * Whether this shop is on a complimentary (unbilled, permanent) grant.
+ *
+ * Takes the status string rather than the row so it can be called from both
+ * a ShopPlan record and a usage status object without either shape leaking
+ * into this module.
+ */
+export function isComplimentary(subscriptionStatus) {
+  return subscriptionStatus === COMPLIMENTARY_STATUS;
+}

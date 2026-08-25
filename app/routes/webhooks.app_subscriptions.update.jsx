@@ -29,7 +29,7 @@
 
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
-import { PLAN_IDS, tierFromSubscriptionName } from "../lib/plans.js";
+import { PLAN_IDS, tierFromSubscriptionName, isComplimentary } from "../lib/plans.js";
 import { getUsageStatus, setShopTier } from "../lib/usage.server";
 
 export const action = async ({ request }) => {
@@ -68,7 +68,14 @@ export const action = async ({ request }) => {
       // event is stale — about a subscription that's already been
       // superseded — so it's ignored rather than applied.
       const current = await getUsageStatus({ prisma, shop });
-      if (!current.subscriptionId || current.subscriptionId === subscriptionId) {
+
+      // A complimentary grant carries no subscriptionId, which would otherwise
+      // satisfy the `!current.subscriptionId` test below and let any unrelated
+      // inactive-subscription event revoke it. The grant is not backed by the
+      // subscription this event describes, so the event says nothing about it.
+      if (isComplimentary(current.subscriptionStatus)) {
+        console.log(`[webhooks/app_subscriptions/update] ${shop}: ignored ${status} — shop holds a complimentary ${current.tier} grant`);
+      } else if (!current.subscriptionId || current.subscriptionId === subscriptionId) {
         await setShopTier({ prisma, shop, tier: PLAN_IDS.FREE, subscriptionId: null, subscriptionStatus: status });
         console.log(`[webhooks/app_subscriptions/update] ${shop}: tier -> free (subscription "${name}" status=${status})`);
       } else {

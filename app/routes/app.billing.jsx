@@ -12,6 +12,7 @@ import { planSelectionUrl, resolveAppHandle } from "../lib/app-pricing.server";
 import {
   PLAN_IDS, PLANS, AGENCY_MIN_STORES, BILLING_INTERVAL, billingPlanKey,
   tierFromSubscriptionName, intervalFromShopifyInterval, yearlySavingsPercent,
+  isComplimentary,
 } from "../lib/plans.js";
 import { isTestCharge, isManagedPricingRejection, describeBillingError } from "../lib/billing-mode.server";
 import { trialDaysOverrideFor } from "../lib/billing-trial.server";
@@ -75,6 +76,14 @@ async function reconcile({ billing, shop }) {
   // for a subscription that no longer exists.
   const current = await getUsageStatus({ prisma, shop });
   if (current.tier === PLAN_IDS.FREE) return { ...current, interval: null, subscriptionName: null };
+
+  // A complimentary grant has no Shopify subscription by definition, so the
+  // "no active subscription" branch is not evidence of a lapsed charge here —
+  // it is the expected steady state. Downgrading would revoke the grant on the
+  // merchant's next Billing page load. See COMPLIMENTARY_STATUS in plans.js.
+  if (isComplimentary(current.subscriptionStatus)) {
+    return { ...current, interval: null, subscriptionName: null };
+  }
 
   const downgraded = await setShopTier({ prisma, shop, tier: PLAN_IDS.FREE, subscriptionId: null, subscriptionStatus: null });
   return { ...downgraded, interval: null, subscriptionName: null };
@@ -257,6 +266,20 @@ async function cancelPlan({ billing, shop, token, version }) {
 
   if (active.length === 0) {
     const status = await getUsageStatus({ prisma, shop });
+
+    // A complimentary grant also has zero active subscriptions, so it lands
+    // here — but "nothing to cancel at Shopify" means something different for
+    // it than for a lapsed shop. There is no charge to stop, and the grant is
+    // an account decision this app must not let a stray click undo. Say so
+    // rather than silently dropping the merchant to Free.
+    if (isComplimentary(status.subscriptionStatus)) {
+      console.log(`[app.billing] ${shop} attempted to cancel a complimentary ${status.tier} grant — refused`);
+      return Response.json(
+        { ok: false, error: `Your ${status.label} plan is complimentary — there's no charge to cancel. Contact support if you'd like it changed.` },
+        { status: 409 },
+      );
+    }
+
     if (status.tier !== PLAN_IDS.FREE) {
       await setShopTier({ prisma, shop, tier: PLAN_IDS.FREE, subscriptionId: null, subscriptionStatus: null });
     }

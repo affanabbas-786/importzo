@@ -394,6 +394,30 @@ describe("app_subscriptions/update", () => {
     }
   });
 
+  // A complimentary grant carries no subscriptionId, which satisfies the
+  // `!current.subscriptionId` test the downgrade branch uses to recognise its
+  // own subscription — so any unrelated inactive event would revoke the grant.
+  // The event describes a subscription the grant was never backed by.
+  it("leaves a complimentary grant alone when an unrelated subscription goes inactive", async () => {
+    for (const status of ["CANCELLED", "DECLINED", "EXPIRED", "FROZEN"]) {
+      resetDb();
+      shopPlanRows.set(SHOP, { id: "plan-1", shop: SHOP, tier: "pro", subscriptionId: null, subscriptionStatus: "COMPLIMENTARY" });
+      mockWebhook({ admin_graphql_api_id: "gid://shopify/AppSubscription/77", name: "Importzo Pro", status });
+      const response = await appSubscriptionsUpdate({ request: { headers: { get: () => null } } });
+
+      expect(response.status).toBe(200);
+      expect(shopPlanRows.get(SHOP)).toMatchObject({ tier: "pro", subscriptionStatus: "COMPLIMENTARY" });
+    }
+  });
+
+  it("still lets a genuinely activated subscription supersede a complimentary grant", async () => {
+    shopPlanRows.set(SHOP, { id: "plan-1", shop: SHOP, tier: "pro", subscriptionId: null, subscriptionStatus: "COMPLIMENTARY" });
+    mockWebhook({ admin_graphql_api_id: "gid://shopify/AppSubscription/5", name: "Importzo Agency", status: "ACTIVE" });
+    await appSubscriptionsUpdate({ request: { headers: { get: () => null } } });
+
+    expect(shopPlanRows.get(SHOP)).toMatchObject({ tier: "agency", subscriptionStatus: "ACTIVE" });
+  });
+
   it("ignores an unrecognized subscription name rather than crashing (defensive against a future renamed plan)", async () => {
     mockWebhook({ admin_graphql_api_id: "gid://shopify/AppSubscription/1", name: "Some Other Charge", status: "ACTIVE" });
     const response = await appSubscriptionsUpdate({ request: { headers: { get: () => null } } });

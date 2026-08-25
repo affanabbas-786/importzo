@@ -179,6 +179,49 @@ describe("app.billing loader — reconciliation", () => {
     expect(data.usage.tier).toBe("free");
   });
 
+  // A complimentary grant is a paid tier with no Shopify subscription behind
+  // it, so it hits the same "nothing active" branch as a lapsed charge above —
+  // and must NOT be read the same way. Without the guard the grant is revoked
+  // on the merchant's next Billing page load, silently and permanently.
+  it("keeps a complimentary grant on its paid tier even though Shopify reports no subscription", async () => {
+    setShopPlan(SHOP, { tier: "pro", subscriptionId: null, subscriptionStatus: "COMPLIMENTARY" });
+    currentBilling = fakeBilling({ appSubscriptions: [] });
+
+    const data = await loader({ request: { url: `https://${SHOP}/app/billing` } });
+
+    expect(data.usage.tier).toBe("pro");
+    expect(data.usage.isUnlimited).toBe(true);
+    expect(rows.get(SHOP).tier).toBe("pro");
+    expect(rows.get(SHOP).subscriptionStatus).toBe("COMPLIMENTARY");
+  });
+
+  // The grant survives repeated visits, not just the first — the guard has to
+  // return before the write, not merely restore the tier afterwards.
+  it("keeps a complimentary grant across repeated Billing page loads", async () => {
+    setShopPlan(SHOP, { tier: "pro", subscriptionId: null, subscriptionStatus: "COMPLIMENTARY" });
+    currentBilling = fakeBilling({ appSubscriptions: [] });
+
+    for (let i = 0; i < 3; i += 1) {
+      await loader({ request: { url: `https://${SHOP}/app/billing` } });
+    }
+
+    expect(rows.get(SHOP).tier).toBe("pro");
+  });
+
+  // A complimentary shop that later actually subscribes is a real paying
+  // merchant: the subscription supersedes the grant rather than being ignored.
+  it("lets a real subscription supersede a complimentary grant", async () => {
+    setShopPlan(SHOP, { tier: "pro", subscriptionId: null, subscriptionStatus: "COMPLIMENTARY" });
+    currentBilling = fakeBilling({
+      appSubscriptions: [{ id: "gid://shopify/AppSubscription/9", name: "Importzo Agency Yearly", status: "ACTIVE" }],
+    });
+
+    const data = await loader({ request: { url: `https://${SHOP}/app/billing` } });
+
+    expect(data.usage.tier).toBe("agency");
+    expect(rows.get(SHOP).subscriptionStatus).toBe("ACTIVE");
+  });
+
   it("falls back to the existing ShopPlan state, without crashing, if billing.check throws", async () => {
     setShopPlan(SHOP, { tier: "agency" });
     currentBilling = fakeBilling();
@@ -577,6 +620,22 @@ describe("app.billing action — cancellation", () => {
 
     expect(currentBilling.cancel).not.toHaveBeenCalled();
     await expect(response.json()).resolves.toMatchObject({ ok: true, alreadyFree: true });
+  });
+
+  // A complimentary shop also has zero active subscriptions, so it reaches the
+  // same branch as the already-Free case above. There is no charge to stop and
+  // the grant is an account decision, so a stray click must not undo it.
+  it("refuses to cancel a complimentary grant and leaves the tier intact", async () => {
+    setShopPlan(SHOP, { tier: "pro", subscriptionId: null, subscriptionStatus: "COMPLIMENTARY" });
+
+    const request = mockActionRequest({ intent: "cancel-plan" }, { url: `https://${SHOP}/app/billing` });
+    const response = await action({ request });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({ ok: false });
+    expect(currentBilling.cancel).not.toHaveBeenCalled();
+    expect(rows.get(SHOP).tier).toBe("pro");
+    expect(rows.get(SHOP).subscriptionStatus).toBe("COMPLIMENTARY");
   });
 
   it("never leaves the app — cancellation redirects nowhere", async () => {
