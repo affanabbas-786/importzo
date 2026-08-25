@@ -15,7 +15,9 @@ import crypto from "crypto";
 import prisma from "../db.server";
 import { runScheduledSyncs, disableForPlanRequirement } from "../lib/scheduler.server";
 import { runMigrationWorker, isWorkerActive } from "../lib/migration-worker.server";
-import { recoverOrphanedJobs } from "../lib/job-recovery.server";
+import { recoverOrphanedJobs, recoverOrphanedThemeJobs } from "../lib/job-recovery.server";
+import { isWorkerActive as isThemeWorkerActive, runThemeWorker } from "../lib/theme-worker.server";
+import { sweepThemeTempFiles } from "../lib/theme-zip.server";
 // Imported from lib, not from the sibling route module: importing across
 // route files would pull that route's whole module graph in with it.
 import { startJobFromSchedule } from "../lib/scheduled-sync.server";
@@ -104,5 +106,27 @@ export const action = async ({ request }) => {
     return { resumed: [], abandoned: [], skipped: 0, error: String(err?.message || err) };
   });
 
-  return Response.json({ ok: !results.error, ...results, maintenance, recovery });
+  // Same recovery, for background THEME transfers. Kept as a separate call
+  // rather than folded into the one above because the two run different
+  // workers against different tables; sharing the loop (see recoverStale)
+  // is what keeps the rules from drifting apart.
+  const themeRecovery = await recoverOrphanedThemeJobs({
+    prisma,
+    isActive: isThemeWorkerActive,
+    runWorker: (jobId) => runThemeWorker(jobId),
+  }).catch((err) => {
+    console.error("[scheduler-tick] theme job recovery failed:", err?.message);
+    return { resumed: [], abandoned: [], skipped: 0, error: String(err?.message || err) };
+  });
+
+  // Theme staging directories and packaged ZIPs left behind by interrupted
+  // transfers. deleteThemeZipLater schedules an unref'd setTimeout that a
+  // process restart discards, so without this every killed transfer leaks its
+  // assets into tmp permanently.
+  const themeTemp = await sweepThemeTempFiles().catch((err) => {
+    console.error("[scheduler-tick] theme temp sweep failed:", err?.message);
+    return { stageDirs: 0, zips: 0, error: String(err?.message || err) };
+  });
+
+  return Response.json({ ok: !results.error, ...results, maintenance, recovery, themeRecovery, themeTemp });
 };

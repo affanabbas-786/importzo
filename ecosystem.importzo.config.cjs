@@ -23,6 +23,15 @@ module.exports = {
       instances: 1,
       autorestart: true,
       max_restarts: 10,
+      // Stamp every log line with a timestamp.
+      //
+      // Without this PM2 writes bare lines, and working out WHEN something
+      // happened means inferring it from the log file's mtime — which only
+      // ever tells you about the last line written. Diagnosing whether a
+      // theme-name 422 landed before or after a deploy took that exact
+      // detour, and it only worked because the entry happened to be last in
+      // the file. Anything further up would have been untimeable.
+      log_date_format: "YYYY-MM-DD HH:mm:ss.SSS Z",
       env: {
         ...env,
         NODE_ENV: "production",

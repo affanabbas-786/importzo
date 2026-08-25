@@ -14,6 +14,8 @@
 // most likely way it happens.
 // ═══════════════════════════════════════════════════════════════════
 
+import { clearStagedAssets, deleteThemeZipNow } from "./theme-zip.server.js";
+
 // Models keyed by the shop domain, deleted wholesale on shop/redact.
 // Order matters: children before parents, so a partial failure can't
 // orphan rows that no longer have a discoverable owner.
@@ -22,6 +24,12 @@ export const SHOP_SCOPED_MODELS = Object.freeze([
   "productMapping",   // child of MigrationJob (by jobId) — see deleteShopData
   "storeBackup",
   "migrationJob",
+  // Phase 11 — background theme transfer. Holds BOTH stores' encrypted
+  // access tokens and the same actorEmail/actorIp audit trail MigrationJob
+  // does, so it is erasure-critical for exactly the same reasons. It also
+  // owns files outside the database (a staging directory of theme assets
+  // and a packaged ZIP); deleteShopData removes those too — see below.
+  "themeJob",
   "scheduledSync",
   "transferSession",
   "sourceStore",
@@ -74,6 +82,23 @@ export async function deleteShopData(prisma, shop) {
     errors.push({ model: "migrationJob(lookup)", error: err?.message || String(err) });
   }
 
+  // Same reasoning for ThemeJob, but the artifacts are on DISK rather than in
+  // child tables: each job owns a staging directory of copied theme assets
+  // and a packaged ZIP. Both are the merchant's own theme content, so an
+  // erasure that only dropped the rows would leave the actual files behind.
+  // Collected here, deleted after the rows go — losing the ids first would
+  // make the files unreachable.
+  let themeJobIds = [];
+  try {
+    const jobs = await prisma.themeJob.findMany({
+      where: { shop },
+      select: { id: true, zipId: true, zipToken: true },
+    });
+    themeJobIds = jobs;
+  } catch (err) {
+    errors.push({ model: "themeJob(lookup)", error: err?.message || String(err) });
+  }
+
   for (const model of SHOP_SCOPED_MODELS) {
     try {
       const where = JOB_SCOPED_MODELS.includes(model)
@@ -94,6 +119,22 @@ export async function deleteShopData(prisma, shop) {
       errors.push({ model, error: err?.message || String(err) });
     }
   }
+
+  // On-disk artifacts, after the rows they belong to are gone. Best-effort
+  // and non-fatal like every model above: a leftover temp file is a bug worth
+  // reporting, but it must not abort an erasure that has already removed the
+  // database records.
+  let filesRemoved = 0;
+  for (const job of themeJobIds) {
+    try {
+      await clearStagedAssets(job.id);
+      await deleteThemeZipNow(job.zipId, job.zipToken);
+      filesRemoved += 1;
+    } catch (err) {
+      errors.push({ model: `themeJob(files:${job.id})`, error: err?.message || String(err) });
+    }
+  }
+  if (themeJobIds.length) deleted["themeJob(files)"] = filesRemoved;
 
   return { deleted, errors };
 }

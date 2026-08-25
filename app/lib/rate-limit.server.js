@@ -103,6 +103,10 @@ export const POLICIES = Object.freeze({
   scheduleAdmin: { limit: 120, windowMs: 60 * 60 * 1000, maxConcurrent: 10 },
   // Starting a migration is the single most expensive thing the app does.
   migrationJob: { limit: 20, windowMs: 60 * 60 * 1000, maxConcurrent: 2 },
+  // Theme transfer. maxConcurrent 1, stricter than migrationJob's 2: a theme
+  // job holds a staging directory of the whole theme and saturates the shop's
+  // REST bucket for its duration, so two at once on one shop is never useful.
+  themeJob: { limit: 10, windowMs: 60 * 60 * 1000, maxConcurrent: 1 },
   // Cheap CRUD — saved field-mapping templates (Phase 4).
   mappingTemplate: { limit: 120, windowMs: 60 * 60 * 1000, maxConcurrent: 10 },
   // AI SEO suggestions (Phase 4.4) — calls a third-party LLM on the

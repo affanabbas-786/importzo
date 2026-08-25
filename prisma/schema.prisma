@@ -14,21 +14,21 @@ datasource db {
 }
 
 model Session {
-  id            String    @id
-  shop          String
-  state         String
-  isOnline      Boolean   @default(false)
-  scope         String?
-  expires       DateTime?
-  accessToken   String
-  userId        BigInt?
-  firstName     String?
-  lastName      String?
-  email         String?
-  accountOwner  Boolean   @default(false)
-  locale        String?
-  collaborator  Boolean?  @default(false)
-  emailVerified Boolean?  @default(false)
+  id                  String    @id
+  shop                String
+  state               String
+  isOnline            Boolean   @default(false)
+  scope               String?
+  expires             DateTime?
+  accessToken         String
+  userId              BigInt?
+  firstName           String?
+  lastName            String?
+  email               String?
+  accountOwner        Boolean   @default(false)
+  locale              String?
+  collaborator        Boolean?  @default(false)
+  emailVerified       Boolean?  @default(false)
   refreshToken        String?
   refreshTokenExpires DateTime?
 }
@@ -74,52 +74,52 @@ model TransferSession {
 
 // Tracks async background product-transfer jobs so they survive HTTP timeouts.
 model MigrationJob {
-  id                String   @id @default(cuid())
-  shop              String   // destination shop domain
-  sourceShop        String
-  sourceToken       String   // AES-encrypted
-  destToken         String   // AES-encrypted
-  apiVersion        String   @default("2025-10")
-  status            String   @default("PENDING") // PENDING | RUNNING | COMPLETED | FAILED
-  totalProducts     Int      @default(0)
-  processedProducts Int      @default(0)
-  failedProducts    Int      @default(0)
-  lastCursor        String?  // GraphQL cursor for resume
-  conflictMode      String   @default("skip") // skip | overwrite | create
-  errorLog          String   @default("[]")   // JSON array of {sourceId,title,error}
+  id                         String    @id @default(cuid())
+  shop                       String // destination shop domain
+  sourceShop                 String
+  sourceToken                String // AES-encrypted
+  destToken                  String // AES-encrypted
+  apiVersion                 String    @default("2025-10")
+  status                     String    @default("PENDING") // PENDING | RUNNING | COMPLETED | FAILED
+  totalProducts              Int       @default(0)
+  processedProducts          Int       @default(0)
+  failedProducts             Int       @default(0)
+  lastCursor                 String? // GraphQL cursor for resume
+  conflictMode               String    @default("skip") // skip | overwrite | create
+  errorLog                   String    @default("[]") // JSON array of {sourceId,title,error}
   // Phase 2: pre-transfer backup of the destination.
   // backupPolicy: require | best-effort | skip. "require" fails the job before
   // any write if the snapshot can't be taken, rather than silently running an
   // irreversible transfer with no way back.
-  backupPolicy      String   @default("require")
-  backupId          String?
-  backupStatus      String? // mirrors StoreBackup.status for cheap display
-  rolledBackAt      DateTime?
+  backupPolicy               String    @default("require")
+  backupId                   String?
+  backupStatus               String? // mirrors StoreBackup.status for cheap display
+  rolledBackAt               DateTime?
   // Phase 3.7 audit trail: who triggered this transfer, and from where.
   // Captured at creation time because the worker is fire-and-forget — by the
   // time it writes log entries there is no request, and therefore no IP or
   // session, to attribute them to. The worker reads these back and stamps
   // them onto every TransferLogEntry it writes.
-  actorType         String   @default("unknown") // user | schedule | system | unknown
-  actorId           String?
-  actorEmail        String?
-  actorIp           String?
+  actorType                  String    @default("unknown") // user | schedule | system | unknown
+  actorId                    String?
+  actorEmail                 String?
+  actorIp                    String?
   // Phase 4.2: optional Markets-scoped transfer. Resolved server-side at job
   // creation time (never trusted from the client) and snapshotted here so a
   // resumed/restarted worker doesn't need to re-fetch Markets mid-job.
   // sourceMarketPublicationIds is null when the market has no restricting
   // catalog (see markets.server.js) — every product is "in" that market, so
   // there is nothing to filter by, and the worker skips filtering entirely.
-  sourceMarketId                 String?
-  sourceMarketHandle             String?
-  sourceMarketPublicationIds     String? // JSON array of publication GIDs, or null
+  sourceMarketId             String?
+  sourceMarketHandle         String?
+  sourceMarketPublicationIds String? // JSON array of publication GIDs, or null
   // Phase 6 — opt-in AI alt-text for images copied without any. Snapshotted
   // here (same reasoning as conflictMode above) so a resumed worker applies
   // the same choice the merchant made at job creation, not whatever the
   // shop's preference happens to be by the time it resumes.
-  altTextAutoGenerate Boolean @default(false)
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  altTextAutoGenerate        Boolean   @default(false)
+  createdAt                  DateTime  @default(now())
+  updatedAt                  DateTime  @updatedAt
 }
 
 // Idempotency map: prevents re-creating products that already succeeded on resume.
@@ -128,7 +128,7 @@ model ProductMapping {
   jobId           String
   sourceProductId String
   destProductId   String?
-  status          String  // DONE | FAILED
+  status          String // DONE | FAILED
   error           String?
   // Phase 2 (rollback safety): what this transfer actually DID to the
   // destination product. Rollback may only delete rows it can prove this app
@@ -151,24 +151,24 @@ model ProductMapping {
 // authenticate (offline tokens expire — see expiringOfflineAccessTokens in
 // shopify.server.js) disables itself instead of retrying forever.
 model ScheduledSync {
-  id                 String    @id @default(cuid())
-  shop               String // destination shop
-  sourceShop         String
-  sourceToken        String // AES-encrypted
-  destToken          String // AES-encrypted
-  frequency          String    @default("daily") // hourly | daily | weekly
-  hourUtc            Int       @default(3)
-  dayOfWeek          Int? // 0-6 (Sun-Sat), weekly only
-  conflictMode       String    @default("skip")
-  enabled            Boolean   @default(true)
-  nextRunAt          DateTime
-  lastRunAt          DateTime?
-  lastJobId          String?
-  lastError          String?
-  consecutiveFailures Int      @default(0)
-  disabledReason     String?
-  createdAt          DateTime  @default(now())
-  updatedAt          DateTime  @updatedAt
+  id                  String    @id @default(cuid())
+  shop                String // destination shop
+  sourceShop          String
+  sourceToken         String // AES-encrypted
+  destToken           String // AES-encrypted
+  frequency           String    @default("daily") // hourly | daily | weekly
+  hourUtc             Int       @default(3)
+  dayOfWeek           Int? // 0-6 (Sun-Sat), weekly only
+  conflictMode        String    @default("skip")
+  enabled             Boolean   @default(true)
+  nextRunAt           DateTime
+  lastRunAt           DateTime?
+  lastJobId           String?
+  lastError           String?
+  consecutiveFailures Int       @default(0)
+  disabledReason      String?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
 
   @@index([enabled, nextRunAt])
   @@index([shop])
@@ -241,8 +241,8 @@ model FieldMappingTemplate {
   id         String   @id @default(cuid())
   shop       String
   name       String
-  importType String   // products | collections | inventory | woocommerce
-  mapping    String   // JSON: { [csvHeaderText]: shopifyField }
+  importType String // products | collections | inventory | woocommerce
+  mapping    String // JSON: { [csvHeaderText]: shopifyField }
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
@@ -259,9 +259,9 @@ model FieldMappingTemplate {
 model AiIntegration {
   id        String   @id @default(cuid())
   shop      String   @unique
-  provider  String   // "anthropic" | "openai"
-  apiKey    String   // AES-encrypted
-  model     String?  // merchant-editable override, e.g. "claude-haiku-4-5" / "gpt-4o-mini"
+  provider  String // "anthropic" | "openai"
+  apiKey    String // AES-encrypted
+  model     String? // merchant-editable override, e.g. "claude-haiku-4-5" / "gpt-4o-mini"
   enabled   Boolean  @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -283,20 +283,20 @@ model AiIntegration {
 // app.billing.jsx. app.settings.jsx shows this same data read-only, without
 // re-reconciling, so it doesn't fire a live Admin API call on every load.
 model ShopPlan {
-  id             String   @id @default(cuid())
-  shop           String   @unique
-  tier           String   @default("free") // free | pro | agency — see plans.js
+  id                    String    @id @default(cuid())
+  shop                  String    @unique
+  tier                  String    @default("free") // free | pro | agency — see plans.js
   // From Admin GraphQL `shop { email }` — the same field this app already
   // uses elsewhere (app.transfer.jsx) to identify a *source* store's owner.
   // It's a contact/notification email, not a verified legal identity, so
   // it's a best-available proxy for "who owns this store," not proof.
   // Refreshed opportunistically (see agency-eligibility.server.js); never
   // used for anything security-sensitive, only the Agency discount.
-  shopOwnerEmail String?
-  recordsUsed      Int      @default(0)
-  usagePeriodStart DateTime @default(now())
-  subscriptionId     String? // Shopify AppSubscription GID; null while on Free (Shopify has no $0 recurring charge)
-  subscriptionStatus String? // mirrors Shopify AppSubscription.status (ACTIVE, CANCELLED, ...)
+  shopOwnerEmail        String?
+  recordsUsed           Int       @default(0)
+  usagePeriodStart      DateTime  @default(now())
+  subscriptionId        String? // Shopify AppSubscription GID; null while on Free (Shopify has no $0 recurring charge)
+  subscriptionStatus    String? // mirrors Shopify AppSubscription.status (ACTIVE, CANCELLED, ...)
   // Phase 8 — set when this shop holds an Agency subscription without meeting
   // the 3-store requirement, cleared the moment it does. Under Shopify App
   // Pricing the hosted plan-selection page knows nothing about that rule, so
@@ -311,17 +311,86 @@ model ShopPlan {
   // eligibility counts ("stores with Importzo installed") without needing to
   // delete the row immediately. The row itself is hard-deleted 48h later at
   // shop/redact, same lifecycle as ScheduledSync (see shop-data.server.js).
-  uninstalledAt DateTime?
+  uninstalledAt         DateTime?
   // Built-in AI (Groq) usage — separate counter from recordsUsed above.
   // Shared across all built-in-AI features (SEO cleanup, alt-text, duplicate
   // detection, error diagnosis) combined, not per-feature, so a merchant
   // can't get 500 calls on each. BYOK (bring-your-own-key via AiIntegration)
   // usage is never counted here — only the built-in Groq path costs Importzo
   // anything. Resets monthly on the same cadence as recordsUsed.
-  aiCallsUsed        Int      @default(0)
-  aiUsagePeriodStart DateTime @default(now())
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  aiCallsUsed           Int       @default(0)
+  aiUsagePeriodStart    DateTime  @default(now())
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
 
   @@index([shopOwnerEmail])
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Theme transfer, as a background job.
+//
+// A SIBLING of MigrationJob rather than a jobType on it. The two jobs
+// share the shape of a background job (identity, encrypted tokens,
+// actor, status) and almost nothing else: 11 of MigrationJob's 16
+// domain columns are meaningless for a theme (lastCursor, conflictMode,
+// the four backup fields, the three Markets fields, altTextAutoGenerate,
+// and the three product counters, which are the wrong unit). Overloading
+// it would mean making all of those nullable AND making rollback,
+// job-recovery, transfer-log and shop-data each branch on job type —
+// where the failure mode is a recovery path silently doing the wrong
+// thing to a shape it was never written for.
+//
+// THE PHASE COLUMN IS THE POINT. Product migration is a uniform loop:
+// N interchangeable items, one cursor, resume by skipping what's done.
+// Theme transfer is a heterogeneous pipeline whose expensive middle
+// produces a single artifact, so what has to be checkpointed is WHICH
+// STEP we reached, not just how far through a list. See theme-worker.
+// ═══════════════════════════════════════════════════════════════════
+model ThemeJob {
+  id String @id @default(cuid())
+
+  shop            String // destination shop domain
+  sourceShop      String
+  sourceThemeId   String // REST theme id on the source; digits-only, validated at creation
+  sourceThemeName String // raw source name, for display/reporting only
+  // Snapshotted output of destinationThemeName(). STORED rather than
+  // recomputed so a resumed job matches on exactly the name the original
+  // run used, even if the helper's truncation rules later change — the
+  // by-name check is what stops a resume creating a second theme.
+  targetThemeName String
+
+  sourceToken String // AES-encrypted; fallback behind createTokenProvider
+  destToken   String // AES-encrypted; fallback behind createTokenProvider
+  apiVersion  String @default("2025-10")
+
+  status String @default("PENDING") // PENDING | RUNNING | COMPLETED | FAILED
+  // LISTING | FETCHING | PACKAGING | MEDIA | CREATING | EXTRACTING
+  phase  String @default("LISTING")
+
+  assetsTotal   Int @default(0) // manifest size, written once at end of LISTING
+  assetsFetched Int @default(0) // staged to disk; the X/Y the progress UI renders
+  assetsFailed  Int @default(0) // no readable content returned — warning, not fatal
+
+  // Written the INSTANT themes.json returns, before the first poll. The gap
+  // between Shopify creating the theme and this being persisted is the only
+  // window in which a crash can orphan a theme the job doesn't know about.
+  newThemeId String?
+  // Handle for the served ZIP, so cleanup can find it after a restart rather
+  // than relying on the setTimeout that a restart discards.
+  zipId      String?
+  zipToken   String?
+
+  errorLog String @default("[]") // JSON array of {key,error}, capped
+
+  // Captured at creation: the worker is fire-and-forget, so this is the only
+  // moment a request (and therefore a user and an IP) still exists.
+  actorType  String  @default("unknown") // user | schedule | system | unknown
+  actorId    String?
+  actorEmail String?
+  actorIp    String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt // staleness signal for job-recovery
+
+  @@index([shop, status])
 }

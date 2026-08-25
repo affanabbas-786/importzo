@@ -79,6 +79,14 @@ export const ABANDON_MESSAGE =
   "so it has been marked failed. Nothing already transferred was removed — start a new transfer with " +
   'conflict handling set to "skip" to continue from where this one stopped.';
 
+// Themes have no "skip" conflict mode to point at, and the recovery advice is
+// genuinely different: re-running is safe because the by-name check adopts
+// whatever the interrupted run already created.
+export const THEME_ABANDON_MESSAGE =
+  "This theme transfer was interrupted (the server restarted) and could not be resumed within 24 hours, " +
+  "so it has been marked failed. Any theme it already created on the destination store is still there and " +
+  "unpublished — start the transfer again and it will pick that theme up rather than creating a duplicate.";
+
 /**
  * Finds and restarts migration jobs whose worker died with the process.
  *
@@ -90,27 +98,65 @@ export const ABANDON_MESSAGE =
  * Never throws: recovery failing must not turn a healthy scheduler tick into
  * a cron alert, exactly like runMaintenance alongside it.
  */
-export async function recoverOrphanedJobs({
+export async function recoverOrphanedJobs(opts = {}) {
+  return recoverStale({
+    ...opts,
+    delegate: (prisma) => prisma.migrationJob,
+    label: "job-recovery",
+    abandonMessage: ABANDON_MESSAGE,
+  });
+}
+
+/**
+ * The ThemeJob equivalent. Same thresholds, same safety rules, different
+ * table — see recoverStale for the shared loop.
+ *
+ * Resuming a theme job is safe at every phase, and deliberately so: the
+ * worker re-enters at the recorded phase, FETCHING skips assets already
+ * staged on disk, EXTRACTING re-polls the theme it already recorded, and
+ * CREATING re-runs the by-name check and ADOPTS an existing destination
+ * theme rather than creating a second one. That last case is the reason a
+ * stale CREATING job can be resumed at all instead of having to be failed.
+ */
+export async function recoverOrphanedThemeJobs(opts = {}) {
+  return recoverStale({
+    ...opts,
+    delegate: (prisma) => prisma.themeJob,
+    label: "theme-recovery",
+    abandonMessage: THEME_ABANDON_MESSAGE,
+    extraSelect: { phase: true },
+  });
+}
+
+// Shared implementation. Parameterised by the Prisma delegate rather than
+// duplicated per model, so a fix to the staleness or abandon rules can't
+// apply to one job type and silently miss the other.
+async function recoverStale({
   prisma,
   isActive,
   runWorker,
   now = new Date(),
   limit = MAX_RESUMES_PER_TICK,
+  delegate,
+  label,
+  abandonMessage,
+  extraSelect = {},
 } = {}) {
+  const model = delegate(prisma);
   const result = { resumed: [], abandoned: [], skipped: 0 };
 
   let candidates;
   try {
-    candidates = await prisma.migrationJob.findMany({
+    candidates = await model.findMany({
       where: {
         status: { in: ["RUNNING", "PENDING"] },
         updatedAt: { lt: new Date(now.getTime() - PENDING_STALE_MS) },
       },
       orderBy: { updatedAt: "asc" },
-      select: { id: true, shop: true, status: true, createdAt: true, updatedAt: true },
+      select: { id: true, shop: true, status: true, createdAt: true, updatedAt: true, ...extraSelect },
     });
   } catch (err) {
-    console.error("[job-recovery] could not load in-flight jobs:", err?.message);
+    console.error(`[${label}] could not load in-flight jobs:`, err?.message);
     return { ...result, error: err?.message || String(err) };
   }
 
@@ -134,14 +180,14 @@ export async function recoverOrphanedJobs({
     // resuming it on every tick until the end of time.
     if (now.getTime() - new Date(job.createdAt).getTime() > ABANDON_AFTER_MS) {
       try {
-        await prisma.migrationJob.update({
+        await model.update({
           where: { id: job.id },
-          data: { status: "FAILED", errorLog: JSON.stringify([{ type: "interrupted", error: ABANDON_MESSAGE }]) },
+          data: { status: "FAILED", errorLog: JSON.stringify([{ type: "interrupted", error: abandonMessage }]) },
         });
-        console.warn(`[job-recovery] job=${job.id} ABANDONED after 24h of interruption (shop=${job.shop})`);
+        console.warn(`[${label}] job=${job.id} ABANDONED after 24h of interruption (shop=${job.shop})`);
         result.abandoned.push({ id: job.id, shop: job.shop });
       } catch (err) {
-        console.error(`[job-recovery] could not abandon job=${job.id}:`, err?.message);
+        console.error(`[${label}] could not abandon job=${job.id}:`, err?.message);
       }
       continue;
     }
@@ -155,14 +201,14 @@ export async function recoverOrphanedJobs({
     // inside it must not take down the scheduler tick.
     try {
       console.log(
-        `[job-recovery] resuming job=${job.id} (shop=${job.shop}, status=${job.status}, ` +
-        `quiet for ${Math.round(quietFor / 60000)}m) — no worker is running it`,
+        `[${label}] resuming job=${job.id} (shop=${job.shop}, status=${job.status}` +
+        `${job.phase ? `, phase=${job.phase}` : ""}, quiet for ${Math.round(quietFor / 60000)}m) — no worker is running it`,
       );
       runWorker(job.id).catch((err) =>
-        console.error(`[job-recovery] resumed worker crashed for job=${job.id}:`, err));
+        console.error(`[${label}] resumed worker crashed for job=${job.id}:`, err));
       result.resumed.push({ id: job.id, shop: job.shop, status: job.status });
     } catch (err) {
-      console.error(`[job-recovery] could not resume job=${job.id}:`, err?.message);
+      console.error(`[${label}] could not resume job=${job.id}:`, err?.message);
     }
   }
 

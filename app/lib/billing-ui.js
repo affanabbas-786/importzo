@@ -370,3 +370,74 @@ export function planConfirmationToast({ planHandle, tier, label }) {
 
   return { message: "Confirming your plan with Shopify — reload in a moment if it hasn't updated." };
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Pre-transfer quota warning.
+//
+// The Transfer flow can consume hundreds of records in one run, and until
+// now the only place a merchant could see their remaining allowance was
+// /app/billing. A transfer that hit the cap mid-run just started emitting
+// per-item errors, with nothing on screen connecting them to the plan
+// limit. This decides what to tell them BEFORE they press the button.
+// ═══════════════════════════════════════════════════════════════════
+
+// Fraction of the monthly allowance that counts as "nearly out".
+export const QUOTA_WARN_AT = 0.8;
+
+/**
+ * Pre-flight quota assessment for a transfer.
+ *
+ * `usage` is the shape app.transfer.jsx's loader returns (a subset of
+ * getUsageStatus). `estimatedRecords`, when known, is how many records the
+ * selected modules are expected to write — an estimate that exceeds what's
+ * left is worth warning about even when plenty of headroom remains today.
+ *
+ * Returns null when there is nothing worth saying, or
+ * { level, title, message } where level is "blocked" | "warning".
+ * Unlimited plans always return null.
+ */
+export function quotaWarningFor(usage, estimatedRecords = null) {
+  if (!usage || usage.isUnlimited) return null;
+
+  const limit = Number(usage.limit) || 0;
+  const remaining = Math.max(Number(usage.remaining) || 0, 0);
+  if (limit <= 0) return null;
+
+  if (remaining === 0) {
+    return {
+      level: "blocked",
+      title: `You've used all ${limit.toLocaleString()} records in your ${usage.label} plan this month`,
+      message: "This transfer can't write anything until your usage resets or you upgrade.",
+    };
+  }
+
+  const estimate = Number(estimatedRecords);
+  if (Number.isFinite(estimate) && estimate > remaining) {
+    return {
+      level: "warning",
+      title: `This transfer is larger than your remaining allowance`,
+      message: `About ${estimate.toLocaleString()} records are expected but only ${remaining.toLocaleString()} remain on your ${usage.label} plan this month. The transfer will stop partway once the limit is reached.`,
+    };
+  }
+
+  if (usage.used / limit >= QUOTA_WARN_AT) {
+    return {
+      level: "warning",
+      title: `${remaining.toLocaleString()} of ${limit.toLocaleString()} records left this month`,
+      message: `You're close to your ${usage.label} plan limit. A large transfer may stop partway once it's reached.`,
+    };
+  }
+
+  return null;
+}
+
+// Matches the quota-exhaustion errors the transfer engine emits (see
+// assertQuotaAvailable in usage.server.js and the "plan limit reached"
+// skip rows in app.transfer.jsx) so the results screen can show an
+// upgrade link instead of a generic failure message.
+const QUOTA_ERROR_PATTERN = /plan limit reached|used all \d[\d,]* records|Upgrade to Pro for unlimited/i;
+
+/** True when this item failed because the shop ran out of plan allowance. */
+export function isQuotaError(message) {
+  return QUOTA_ERROR_PATTERN.test(String(message || ""));
+}

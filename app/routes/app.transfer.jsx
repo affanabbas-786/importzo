@@ -1,3 +1,14 @@
+// TODO: reconnect returning merchant to running ThemeJob — scoped out of the
+// initial ThemeJob spec (decision D4), see spec doc:
+// https://claude.ai/code/artifact/d5be6cd5-f424-4ed1-af72-f94e2037f79e
+//
+// Once theme transfer runs as a background job, a merchant who closes the tab
+// mid-transfer leaves a live ThemeJob behind — but coming back to this page
+// shows a blank wizard with no sign of it. Query for a PENDING/RUNNING
+// ThemeJob for this shop in the loader and offer to rejoin its progress.
+// The product path has the same gap, so whatever is built here should cover
+// MigrationJob too rather than being theme-specific.
+
 import { useState, useCallback, useRef, useEffect } from "react";
 import { useFetcher, useLoaderData, useRouteError, Link } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
@@ -15,12 +26,13 @@ import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
 import { ErrorBanner } from "../components/ui";
 import { loadPrefs } from "../lib/prefs";
 import { friendlyError, summarizeFailures } from "../lib/friendly-errors";
+import { quotaWarningFor, isQuotaError } from "../lib/billing-ui.js";
 import { notifyJobComplete } from "../lib/notify";
-import { saveThemeZip, deleteThemeZipLater } from "../lib/theme-zip.server";
-import { shopifyFetch as sharedShopifyFetch, shopifyGraphql as sharedShopifyGraphql } from "../lib/shopify-api.server";
+import { saveThemeZip, deleteThemeZipLater, destinationThemeName } from "../lib/theme-zip.server";
+import { shopifyFetch as sharedShopifyFetch, shopifyGraphql as sharedShopifyGraphql, handleSearchQuery } from "../lib/shopify-api.server";
 import { createProductWithVariants } from "../lib/product-variants.server";
 import { listMarkets } from "../lib/markets.server";
-import { assertQuotaAvailable, recordUsageAndCheck, assertAiQuotaAvailable, recordAiUsage } from "../lib/usage.server";
+import { assertQuotaAvailable, recordUsageAndCheck, assertAiQuotaAvailable, recordAiUsage, getUsageStatus } from "../lib/usage.server";
 import { createAltTextGenerator } from "../lib/alt-text.server";
 import { getAiIntegrationForUse } from "../lib/ai-settings.server";
 import { detectSimilarProducts } from "../lib/ai-provider.server";
@@ -34,11 +46,27 @@ export const loader = async ({ request }) => {
   // Safe wrapper — never throws, returns null if the table/model is
   // missing so the page still renders with a clean "Connect" state.
   const saved = await getSavedSourceStore(session.shop);
+
+  // Plan usage for the DESTINATION shop (the one this app is installed on and
+  // the one whose quota every write consumes). Previously only /app/billing
+  // read this, so a merchant starting a transfer had no way to know they were
+  // about to run into the cap — the transfer simply stopped partway with
+  // per-item errors and no explanation of the cause.
+  const usage = await getUsageStatus({ prisma, shop: session.shop });
+
   return {
     currentShop: session.shop, // the store this app is installed on = DESTINATION
     savedConnection: saved
       ? { sourceUrl: saved.sourceUrl, sourceName: saved.sourceName, sourceEmail: saved.sourceEmail, sourcePlan: saved.sourcePlan, lastUsed: saved.lastUsed }
       : null,
+    usage: {
+      tier: usage.tier,
+      label: usage.label,
+      used: usage.used,
+      limit: usage.limit,
+      remaining: usage.remaining,
+      isUnlimited: usage.isUnlimited,
+    },
   };
 };
 
@@ -315,7 +343,7 @@ export const action = async ({ request }) => {
           products(first: 1, query: $query) {
             edges { node { id handle title } }
           }
-        }`, { query: `handle:${handle}` });
+        }`, { query: handleSearchQuery(handle) });
       return { ok: true, product: data?.products?.edges?.[0]?.node || null };
     } catch (err) {
       return { ok: false, error: err?.message || String(err) };
@@ -696,16 +724,36 @@ export const action = async ({ request }) => {
     return out;
   }
 
+  // Looks up an existing destination page by handle — the check that makes a
+  // re-run update in place instead of creating a duplicate.
+  //
+  // TWO bugs made this silently miss, and both had the same visible symptom:
+  // single-word pages ("Contact", "News") deduped correctly while anything
+  // multi-word ("Your Privacy Choices") duplicated on every retry.
+  //
+  //   1. The search term was unquoted. In Shopify's search syntax a hyphen
+  //      separates tokens and a leading `-` NEGATES a term, so
+  //      `handle:your-privacy-choices` is not a search for that handle at
+  //      all — it parses as "your" AND NOT "privacy" AND NOT "choices".
+  //      `handle:contact` has no hyphen, so it was unaffected: exactly the
+  //      split that was observed. Quoting makes it a literal match.
+  //
+  //   2. Even with a hit, `query` search is fuzzy — it can return a
+  //      *different* page. The result is now confirmed against the exact
+  //      handle before being treated as "this page already exists", because
+  //      a false positive here overwrites an unrelated page.
   async function findTargetPageByHandle(handle) {
-    if (!handle) return null;
+    const wanted = normalizeHandle(handle);
+    if (!wanted) return null;
     try {
       const data = await shopifyGraphql(targetShop, targetToken, `#graphql
         query FindPage($query: String!) {
-          pages(first: 1, query: $query) {
+          pages(first: 10, query: $query) {
             edges { node { id handle title } }
           }
-        }`, { query: `handle:${handle}` });
-      return data?.pages?.edges?.[0]?.node || null;
+        }`, { query: handleSearchQuery(wanted) });
+      const nodes = (data?.pages?.edges || []).map((e) => e.node).filter(Boolean);
+      return nodes.find((n) => normalizeHandle(n.handle) === wanted) || null;
     } catch { return null; }
   }
 
@@ -730,15 +778,29 @@ export const action = async ({ request }) => {
         if (mediaRes.uploaded < mediaRes.total) result.warnings.push(`Embedded media copied ${mediaRes.uploaded}/${mediaRes.total}`);
       }
 
+      // ONE handle, used for both the lookup and the create.
+      //
+      // These used to be computed separately: the lookup was given the raw
+      // `src.handle` while the create fell back to a handle derived from the
+      // title. For any source page with no handle of its own — policies-as-
+      // pages build theirs from the title, and some source APIs omit it — the
+      // lookup received undefined, returned null immediately, and the create
+      // then invented a handle. Every single re-run therefore created another
+      // copy: nothing was ever looked up under the name it was stored as.
+      //
+      // Normalizing here as well means a source handle that differs only in
+      // case or punctuation still matches what a previous run wrote.
+      const effectiveHandle = normalizeHandle(src.handle || src.title || "page");
+
       const pageInput = {
         title: src.title || "Untitled page",
         body: src.body_html || src.body || "",
-        handle: src.handle || normalizeHandle(src.title || "page"),
+        handle: effectiveHandle,
         isPublished: !!(src.published_at || src.publishedAt || src.isPublished),
       };
       if (src.template_suffix || src.templateSuffix) pageInput.templateSuffix = src.template_suffix || src.templateSuffix;
 
-      const existing = await findTargetPageByHandle(src.handle);
+      const existing = await findTargetPageByHandle(effectiveHandle);
       let newPageGid, newPageLegacyId;
 
       if (existing) {
@@ -978,10 +1040,19 @@ export const action = async ({ request }) => {
             newArticleLegacyId = newArticleGid ? String(newArticleGid).split("/").pop() : null;
             ar.warnings.push("Updated existing article with same handle");
           } else {
+            // NOTE: articleCreate has no top-level `blogId` argument — it
+            // takes `article: ArticleCreateInput!` (where blogId lives) and
+            // an optional `blog: ArticleBlogInput` for creating a new blog
+            // inline. The previous form passed `blogId` as a mutation
+            // argument, which Shopify rejects with "Unknown argument
+            // 'blogId'". That was already broken on 2025-10 — it is NOT a
+            // 2026-04 regression — so every *new* article silently failed to
+            // transfer while updates to existing articles kept working. The
+            // unit tests mock shopifyGraphql, so nothing caught it.
             const data = await shopifyGraphql(targetShop, targetToken, `#graphql
-              mutation ArticleCreate($blogId: ID!, $article: ArticleCreateInput!) {
-                articleCreate(blogId: $blogId, article: $article) { article { id } userErrors { field message } }
-              }`, { blogId: targetBlogGid, article: articleInput });
+              mutation ArticleCreate($article: ArticleCreateInput!) {
+                articleCreate(article: $article) { article { id } userErrors { field message } }
+              }`, { article: { ...articleInput, blogId: targetBlogGid } });
             const errs = data?.articleCreate?.userErrors || [];
             if (errs.length) throw new Error(`Article create: ${errs.map((e) => e.message).join("; ")}`);
             newArticleGid = data?.articleCreate?.article?.id;
@@ -1694,18 +1765,44 @@ export const action = async ({ request }) => {
             const { id: newId, gid: newGid, warnings } = await createProductOnTarget(src, sourceUrl, sourceToken);
             pr.newProductId = newId;
             pr.warnings = warnings;
-            if (col.type !== "smart" && newColGid) {
+
+            // The collection link is DOWNSTREAM of the product existing. If
+            // creation didn't yield a usable product ID — throttled, skipped,
+            // or any partial failure — there is nothing to add to the
+            // collection, and building `gid://shopify/Product/undefined` from
+            // the missing id is what produced Shopify's opaque
+            // "id or name must be specified" error (3 of them last run).
+            // Say what actually happened instead of asking Shopify to
+            // interpret a malformed GID.
+            const productGid = newGid || (newId ? `gid://shopify/Product/${newId}` : null);
+            if (col.type !== "smart" && newColGid && !productGid) {
+              pr.warnings.push("Collection link skipped — dependent product was not created");
+            }
+            if (col.type !== "smart" && newColGid && productGid) {
               try {
+                // NOTE: CollectionAddProductsPayload exposes only
+                // `collection` and `userErrors` — there is no `job` field.
+                // Selecting it made every one of these calls fail with
+                // "Cannot query field 'job'", which the catch below turned
+                // into a "Collection link failed" warning. Net effect:
+                // products transferred fine but were never actually added to
+                // the collection, and the run still reported success.
+                // Already broken on 2025-10, not a 2026-04 regression.
                 const addData = await shopifyGraphql(targetShop, targetToken, `#graphql
                   mutation CollectionAddProducts($id: ID!, $productIds: [ID!]!) {
                     collectionAddProducts(id: $id, productIds: $productIds) {
-                      job { id done }
+                      collection { id }
                       userErrors { field message }
                     }
-                  }`, { id: newColGid, productIds: [newGid || `gid://shopify/Product/${newId}`] });
+                  }`, { id: newColGid, productIds: [productGid] });
                 const addErrors = addData?.collectionAddProducts?.userErrors || [];
-                if (addErrors.length) pr.warnings.push("Could not link to collection");
-              } catch (_) { pr.warnings.push("Collection link failed"); }
+                if (addErrors.length) {
+                  // Surface Shopify's own reason — "Could not link to
+                  // collection" alone gave no way to tell a throttle from a
+                  // genuinely bad reference when reading the error CSV.
+                  pr.warnings.push(`Could not link to collection: ${addErrors.map((e) => e.message).join("; ")}`);
+                }
+              } catch (err) { pr.warnings.push(`Collection link failed: ${err.message}`); }
             }
           } catch (err) { pr.status = "error"; pr.error = err.message; }
           return pr;
@@ -1857,8 +1954,13 @@ export const action = async ({ request }) => {
     }
     const themeId = rawThemeId;
     const rawThemeName = formData.get("themeName") || "Transferred Theme";
-    // Limit theme name length to prevent excessively large API payloads
+    // `themeName` is the SOURCE theme's name, used for display/reporting only.
+    // What gets sent to Shopify is destinationThemeName() below, which is
+    // bounded to Shopify's hard 50-character limit — exceeding it fails the
+    // whole transfer with "HTTP 422: Name is too long (maximum is 50
+    // characters)". See theme-zip.server.js.
     const themeName = rawThemeName.slice(0, 200);
+    const targetThemeName = destinationThemeName(rawThemeName);
     const dryRun = formData.get("dryRun") === "true";
 
     try {
@@ -1893,7 +1995,9 @@ export const action = async ({ request }) => {
       // double-clicking) would otherwise create another full duplicate theme
       // every time, eventually hitting the destination store's theme-count limit.
       // Skip if a theme with the same generated name already exists.
-      const expectedThemeName = `${themeName} (Transferred)`;
+      // Same helper as the create call below — if these two ever disagree,
+      // the idempotency check stops matching and every re-run duplicates the theme.
+      const expectedThemeName = targetThemeName;
       try {
         const existingThemesRes = await shopifyFetch(`https://${targetShop}/admin/api/${THEME_API_VERSION}/themes.json`, {
           headers: { "X-Shopify-Access-Token": targetToken },
@@ -1978,13 +2082,25 @@ export const action = async ({ request }) => {
       // Fetch source assets in small batches. Building the ZIP server-side avoids
       // hundreds of destination Asset PUT calls and removes the layout/theme.liquid
       // 404 failure path completely.
-      const PACKAGE_BATCH = 8;
+      // Batching here is now about MEMORY, not rate limiting.
+      //
+      // It used to be both, and it was bad at the second job: 8 concurrent
+      // asset reads drove the REST bucket straight to empty, and the flat
+      // 250ms inter-batch sleep bore no relation to how fast the bucket
+      // actually refills. The result was a steady stream of 429s, each
+      // costing a flat 2000ms of backoff.
+      //
+      // Rate limiting now lives in shopifyFetch, which caps concurrency per
+      // shop and paces from the `X-Shopify-Shop-Api-Call-Limit` header the
+      // API returns on every response — so it self-tunes to the shop's plan
+      // tier instead of guessing. Requests beyond the cap simply queue there,
+      // which makes this slice size purely a bound on how many asset buffers
+      // are held in memory at once. The fixed sleep is gone: it would now be
+      // pure additive delay on top of correct pacing.
+      const PACKAGE_BATCH = 4;
       for (let i = 0; i < assetsList.length; i += PACKAGE_BATCH) {
         const slice = assetsList.slice(i, i + PACKAGE_BATCH);
         await Promise.all(slice.map(fetchAssetForZip));
-        if (i + PACKAGE_BATCH < assetsList.length) {
-          await new Promise(r => setTimeout(r, 250));
-        }
       }
 
       if (!zipFiles.some((file) => file.name === "layout/theme.liquid")) {
@@ -2017,7 +2133,7 @@ export const action = async ({ request }) => {
       const createRes = await shopifyFetch(`https://${targetShop}/admin/api/${THEME_API_VERSION}/themes.json`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": targetToken },
-        body: JSON.stringify({ theme: { name: `${themeName} (Transferred)`, src: zipSrcUrl, role: "unpublished" } }),
+        body: JSON.stringify({ theme: { name: targetThemeName, src: zipSrcUrl, role: "unpublished" } }),
       });
 
       if (!createRes.ok) {
@@ -2161,7 +2277,7 @@ let _rid = 0;
 function nextRid() { return String(++_rid); }
 
 export default function StoreTransferPage() {
-  const { savedConnection, currentShop } = useLoaderData();
+  const { savedConnection, currentShop, usage } = useLoaderData();
   const shopify = useAppBridge();
   const fetcher = useFetcher();
   const saveFetcher = useFetcher();
@@ -2229,6 +2345,14 @@ export default function StoreTransferPage() {
   // Async product-job polling refs
   const pollIntervalRef = useRef(null);
   const migrationJobIdRef = useRef(null);
+  // Async theme-job polling refs — same pair, same lifecycle. Theme transfer
+  // became a background job for the same reason products did (see
+  // theme-worker.server.js), so it needs its own job id and interval handle
+  // rather than sharing the product ones: both modules can be queued in a
+  // single run, and reusing one ref would let the products poll clear the
+  // theme poll out from under it.
+  const themePollRef = useRef(null);
+  const themeJobIdRef = useRef(null);
 
   // Restore session code from sessionStorage on mount (survives page reloads within the tab).
   // sessionStorage is cleared automatically when the browser tab is closed.
@@ -2369,39 +2493,129 @@ export default function StoreTransferPage() {
     } else if (moduleKey === "themes") {
       if (!selectedThemeId) { advanceModuleQueue(); return; }
       const theme = sourceInfo?.themes?.find((t) => t.id === selectedThemeId);
-      setLoadingMsg(`Copying "${theme?.name || "theme"}" files to destination — large themes may take 1–2 min...`);
-      const fd = new FormData();
-      fd.append("intent", "transfer-theme");
-      fd.append("themeId", String(selectedThemeId));
-      fd.append("themeName", theme?.name || "Theme");
-      fd.append("dryRun", String(dryRun));
-      fd.append("rid", nextRid());
-      if (sessionIdRef.current) fd.append("sessionId", sessionIdRef.current);
-      fetcher.submit(fd, { method: "POST" });
+
+      if (dryRun) {
+        // Dry run stays synchronous: it is one assets.json call and a count,
+        // writes nothing, and returns in well under a second. Routing it
+        // through a job would add a row, a poll loop and a recovery path to
+        // buy nothing.
+        setLoadingMsg(`Counting "${theme?.name || "theme"}" files (dry run)...`);
+        const fd = new FormData();
+        fd.append("intent", "transfer-theme");
+        fd.append("themeId", String(selectedThemeId));
+        fd.append("themeName", theme?.name || "Theme");
+        fd.append("dryRun", "true");
+        fd.append("rid", nextRid());
+        if (sessionIdRef.current) fd.append("sessionId", sessionIdRef.current);
+        fetcher.submit(fd, { method: "POST" });
+      } else {
+        // Real transfer: background job, polled — no HTTP timeout risk, and
+        // it survives the merchant closing the tab. Mirrors the products
+        // branch above exactly.
+        setLoadingMsg("Starting theme transfer...");
+        const fd = new FormData();
+        fd.append("themeId", String(selectedThemeId));
+        fd.append("themeName", theme?.name || "Theme");
+        if (sessionIdRef.current) fd.append("sessionId", sessionIdRef.current);
+        fetch("/api/theme-job", { method: "POST", body: fd, credentials: "same-origin" })
+          .then((r) => r.json())
+          .then((data) => {
+            if (!data.ok) {
+              setError(data.error || "Failed to start theme transfer job");
+              transferDoneRef.current = true;
+              setCurrentModule(null);
+              setStep(STEP_RESULTS);
+              saveRecord();
+              return;
+            }
+            themeJobIdRef.current = data.jobId;
+            setLoadingMsg(data.alreadyRunning
+              ? "This theme is already being transferred — showing that transfer..."
+              : "Reading theme files from source...");
+          })
+          .catch((err) => {
+            setError(`Failed to start theme transfer: ${err.message}`);
+            transferDoneRef.current = true;
+            setCurrentModule(null);
+            setStep(STEP_RESULTS);
+            saveRecord();
+          });
+      }
     }
   }
 
-  // ── Cycling loading messages during theme transfer ──
-  // Theme transfer is a single server round-trip so per-asset progress is
-  // unavailable on the client. Cycle descriptive messages every 15s to
-  // reassure the user that work is still happening.
+  // ── Background theme-job polling ──
+  // Replaces the message carousel this used to be. Theme transfer was a single
+  // server round-trip, so the client had nothing real to show and cycled five
+  // canned strings on a 15s timer — a progress indicator that did not
+  // correspond to progress. It now polls a background job for actual state.
+  //
+  // Only FETCHING carries a percentage, and that restraint is deliberate: it
+  // is the one phase with a real denominator. Synthesising one for the other
+  // five would recreate exactly the problem the carousel had. The server owns
+  // the wording (see api.theme-status) so the phase vocabulary lives in one
+  // place rather than being duplicated here.
   useEffect(() => {
-    if (currentModule !== "themes") return;
-    const MESSAGES = [
-      "Copying theme files to destination...",
-      "Transferring CSS, JS and Liquid templates...",
-      "Uploading images and binary assets (this takes longer)...",
-      "Almost done — finalizing theme...",
-      "Large theme detected — still working, please wait...",
-    ];
-    let idx = 0;
-    setLoadingMsg(MESSAGES[0]);
-    const iv = setInterval(() => {
-      idx = Math.min(idx + 1, MESSAGES.length - 1);
-      setLoadingMsg(MESSAGES[idx]);
-    }, 15000);
-    return () => clearInterval(iv);
-  }, [currentModule]);
+    if (currentModule !== "themes" || dryRun) return;
+
+    const POLL_MS = 4000;
+    const id = setInterval(async () => {
+      const jobId = themeJobIdRef.current;
+      if (!jobId) return; // job not started yet — wait
+      try {
+        const res = await fetch(`/api/theme-status/${jobId}`, { credentials: "same-origin" });
+        if (!res.ok) return;
+        const d = await res.json();
+        if (!d.ok) return;
+
+        if (d.message) setLoadingMsg(d.message);
+
+        if (d.status === "COMPLETED" || d.status === "FAILED") {
+          clearInterval(id);
+          themeJobIdRef.current = null;
+
+          const failedAssets = d.assetsFailed || 0;
+          const syntheticResults = {
+            ok: d.status === "COMPLETED",
+            intent: "transfer-theme",
+            themeName: d.themeName,
+            newThemeId: d.newThemeId,
+            newThemeName: d.newThemeName,
+            previewUrl: d.previewUrl,
+            destinationAdminUrl: d.destinationAdminUrl,
+            assetCount: d.assetsTotal || 0,
+            // Per-asset rows the results table renders. Only failures are
+            // itemised — 635 "success" rows would bury them.
+            results: (d.errorLog || [])
+              .filter((e) => e.key && e.key !== "(job)")
+              .map((e) => ({ key: e.key, status: "error", error: e.error })),
+            async: true,
+            jobId,
+          };
+          if (d.status === "FAILED") {
+            const fatal = (d.errorLog || []).filter((e) => e.key === "(job)").pop();
+            syntheticResults.error = fatal?.error
+              || `Theme transfer failed${failedAssets ? ` after ${failedAssets} asset error(s)` : ""}.`;
+          }
+
+          const updated = { ...transferResultsRef.current, themes: syntheticResults };
+          transferResultsRef.current = updated;
+          setTransferResults(updated);
+          setLoadingMsg("");
+          advanceModuleQueue();
+        }
+      } catch (err) {
+        console.warn("[transfer] theme polling error:", err.message);
+      }
+    }, POLL_MS);
+
+    themePollRef.current = id;
+    return () => {
+      clearInterval(id);
+      themePollRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentModule, dryRun]);
 
   // ── Background product-job polling ──
   // Polls /api/migration-status/:jobId every 4 seconds while currentModule === "products"
@@ -2785,7 +2999,22 @@ export default function StoreTransferPage() {
   }, [sessionFetcher.state, sessionFetcher.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const startTransfer = useCallback(() => {
-    const modules = [...selectedModules].filter((k) => MODULES.find((m) => m.key === k)?.available);
+    // Order by MODULES, NOT by Set iteration order.
+    //
+    // `selectedModules` is a Set, so spreading it yields *insertion* order —
+    // whatever sequence the merchant happened to tick the checkboxes in. That
+    // made transfer order effectively random, and the dependencies between
+    // modules are real: navigation menus (inside `content`) link to
+    // collections, so a run that transferred content before collections
+    // created menu items pointing at collections that did not exist yet.
+    //
+    // MODULES is declared in dependency order — collections → products →
+    // content → themes — and menus are already last WITHIN the content module
+    // (see transferContentAndMedia: files → pages → blogs → policies → menus).
+    // Sorting here is what makes that intended order actually hold.
+    const modules = MODULES
+      .filter((m) => m.available && selectedModules.has(m.key))
+      .map((m) => m.key);
     if (modules.length === 0) return;
 
     setStep(STEP_TRANSFER);
@@ -2798,6 +3027,8 @@ export default function StoreTransferPage() {
     collectionQueueRef.current = [];
     migrationJobIdRef.current = null;
     if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
+    themeJobIdRef.current = null;
+    if (themePollRef.current) { clearInterval(themePollRef.current); themePollRef.current = null; }
 
     // Build module queue
     moduleQueueRef.current = modules.slice(1);
@@ -2819,6 +3050,8 @@ export default function StoreTransferPage() {
     savingRecord.current = false;
     migrationJobIdRef.current = null;
     if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
+    themeJobIdRef.current = null;
+    if (themePollRef.current) { clearInterval(themePollRef.current); themePollRef.current = null; }
     // Reset session state
     setSessionCode("");
     setSessionId(null);
@@ -2841,6 +3074,21 @@ export default function StoreTransferPage() {
   // ── Computed ──
   const activeModules = [...selectedModules].filter((k) => MODULES.find((m) => m.key === k)?.available);
 
+  // Rough record estimate for the pre-flight quota check: products and
+  // collections are the two the source reports a count for, and they dominate
+  // any real transfer. Content/themes are deliberately not guessed at — an
+  // invented number would make the warning less trustworthy, and
+  // quotaWarningFor still warns on the used/limit ratio without an estimate.
+  const estimatedRecords = (() => {
+    if (!sourceInfo) return null;
+    let n = 0;
+    if (selectedModules.has("products")) n += Number(sourceInfo.productCount) || 0;
+    if (selectedModules.has("collections")) n += Number(sourceInfo.collectionCount) || 0;
+    return n > 0 ? n : null;
+  })();
+
+  const quotaWarning = quotaWarningFor(usage, estimatedRecords);
+
   function getModuleStats(key) {
     const r = transferResults;
     if (key === "collections" && r.collections?.items) {
@@ -2860,6 +3108,17 @@ export default function StoreTransferPage() {
       };
     }
     if (key === "themes") {
+      // Background theme jobs report a TOTAL plus only the failures — 635
+      // "success" rows would bury the handful that matter, so the job's
+      // errorLog is the only per-asset detail sent back. Counting rows the
+      // way the synchronous path did would therefore render "0 / 3 assets"
+      // for a run that copied 635 files with 3 errors. Derive from the
+      // total instead, and fall back to row-counting for the dry-run path,
+      // which still returns one row per asset.
+      if (r.themes?.async && typeof r.themes.assetCount === "number") {
+        const errors = (r.themes.results || []).filter((a) => a.status === "error").length;
+        return { total: r.themes.assetCount, success: Math.max(r.themes.assetCount - errors, 0), errors, dryRun: 0 };
+      }
       if (r.themes?.results) {
         return { total: r.themes.results.length, success: r.themes.results.filter((a) => a.status === "success").length, errors: r.themes.results.filter((a) => a.status === "error").length, dryRun: r.themes.results.filter((a) => a.status === "dry-run").length };
       }
@@ -3477,6 +3736,33 @@ export default function StoreTransferPage() {
                   <p className="text-xs text-blue-700">Theme will be transferred as <strong>unpublished</strong>. Review it before publishing.</p>
                 </div>
               )}
+
+              {/* Plan-quota pre-flight. Shown before the merchant commits, so a
+                  transfer that would stop partway is a decision rather than a
+                  surprise. Suppressed for dry runs, which write nothing. */}
+              {!dryRun && quotaWarning && (
+                <div
+                  className={`mt-4 rounded-lg px-4 py-3 border ${
+                    quotaWarning.level === "blocked"
+                      ? "bg-red-50 border-red-200"
+                      : "bg-amber-50 border-amber-200"
+                  }`}
+                  role="alert"
+                >
+                  <p className={`text-xs font-semibold ${quotaWarning.level === "blocked" ? "text-red-800" : "text-amber-800"}`}>
+                    {quotaWarning.title}
+                  </p>
+                  <p className={`text-xs mt-0.5 ${quotaWarning.level === "blocked" ? "text-red-700" : "text-amber-700"}`}>
+                    {quotaWarning.message}
+                  </p>
+                  <Link
+                    to="/app/billing"
+                    className={`inline-block mt-2 text-xs font-semibold underline ${quotaWarning.level === "blocked" ? "text-red-800" : "text-amber-800"}`}
+                  >
+                    View plans and upgrade →
+                  </Link>
+                </div>
+              )}
             </div>
 
             <label className="flex items-start gap-3 px-4 py-3 rounded-lg border border-gray-200 bg-white cursor-pointer select-none">
@@ -3804,8 +4090,29 @@ export default function StoreTransferPage() {
                     }
                     const groups = summarizeFailures(rawErrors);
                     if (groups.length === 0) return null;
+
+                    // Quota exhaustion is not a transfer fault and is not
+                    // retryable the way a throttle or a bad field is — it needs
+                    // a plan change. Call it out separately with a route to fix
+                    // it, instead of burying it among generic failures where it
+                    // reads as "something went wrong".
+                    const quotaFailures = rawErrors.filter((e) => isQuotaError(e.error));
+
                     return (
                       <div className="px-6 py-3 border-t border-gray-100 bg-amber-50/40">
+                        {quotaFailures.length > 0 && (
+                          <div className="mb-3 rounded-lg px-3 py-2.5 bg-red-50 border border-red-200" role="alert">
+                            <p className="text-xs font-semibold text-red-800">
+                              Plan limit reached — {quotaFailures.length.toLocaleString()} item{quotaFailures.length === 1 ? "" : "s"} not transferred
+                            </p>
+                            <p className="text-[11px] text-red-700 mt-0.5">
+                              These were skipped because your {usage?.label || "current"} plan&apos;s monthly record allowance ran out — not because of an error. Upgrade to transfer the rest.
+                            </p>
+                            <Link to="/app/billing" className="inline-block mt-1.5 text-[11px] font-semibold text-red-800 underline">
+                              Upgrade to continue →
+                            </Link>
+                          </div>
+                        )}
                         <p className="text-[11px] font-semibold text-amber-800 uppercase tracking-wider mb-1.5">Why some items failed</p>
                         <ul className="space-y-1">
                           {groups.slice(0, 5).map((g, i) => (

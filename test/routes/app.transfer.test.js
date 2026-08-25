@@ -443,6 +443,113 @@ describe("app.transfer action — transfer-content (pages, menus, metafields)", 
     expect(pageResult.warnings).toContain("Updated existing page with same handle");
   });
 
+  // ── Bug: hyphenated page handles duplicated on every re-run ──
+  // "Contact" and "News" deduped correctly while "Your Privacy Choices" made
+  // a new page each time. Two causes, pinned separately below.
+  //
+  // Cause 1: the search term was unquoted. In Shopify's search syntax `-`
+  // separates tokens and a leading `-` negates one, so
+  // `handle:your-privacy-choices` parses as "your" AND NOT "privacy" AND NOT
+  // "choices" — a search that cannot match. Single-word handles have no
+  // hyphen and were unaffected, which is exactly the split observed.
+  function pageFetchMock({ sourcePage, existingPages = [], onFindQuery = () => {} }) {
+    return vi.fn(async (url, opts) => {
+      const body = opts?.body ? JSON.parse(opts.body) : {};
+      const query = body.query || "";
+      if (query.includes("query StoreFiles")) return emptyEdges("files");
+      if (query.includes("query SourcePages")) {
+        return jsonResponse({ data: { pages: { edges: [{ node: sourcePage }] } } });
+      }
+      if (query.includes("query FindPage")) {
+        onFindQuery(body.variables?.query || "");
+        return jsonResponse({ data: { pages: { edges: existingPages.map((n) => ({ node: n })) } } });
+      }
+      if (query.includes("mutation PageCreate")) return jsonResponse({ data: { pageCreate: { page: { id: "gid://shopify/Page/created-1" }, userErrors: [] } } });
+      if (query.includes("mutation PageUpdate")) return jsonResponse({ data: { pageUpdate: { page: { id: body.variables?.id?.split("/").pop() || "updated" }, userErrors: [] } } });
+      if (query.includes("query SourceBlogs")) return emptyEdges("blogs");
+      if (query.includes("query SourcePolicies")) return jsonResponse({ data: { shop: { shopPolicies: [] } } });
+      if (query.includes("menus(first")) return emptyEdges("menus");
+      if (query.includes("query Metafields")) return jsonResponse({ data: { page: { metafields: { edges: [] } } } });
+      if (query.includes("mutation MetafieldsSet")) return jsonResponse({ data: { metafieldsSet: { metafields: [], userErrors: [] } } });
+      throw new Error(`Unexpected fetch: ${query.slice(0, 100)}`);
+    });
+  }
+
+  it("quotes the handle in the lookup so a hyphenated handle can match at all", async () => {
+    let seenQuery = null;
+    global.fetch = pageFetchMock({
+      sourcePage: { id: "gid://shopify/Page/1", title: "Your Privacy Choices", handle: "your-privacy-choices", body: "<p>x</p>", isPublished: true },
+      existingPages: [],
+      onFindQuery: (q) => { seenQuery = q; },
+    });
+
+    await action({ request: mockActionRequest({ intent: "transfer-content", sourceUrl: SOURCE_SHOP, sourceToken: "src-token" }) });
+
+    expect(seenQuery).toBe('handle:"your-privacy-choices"');
+  });
+
+  it("re-uses an existing hyphenated-handle page instead of duplicating it", async () => {
+    global.fetch = pageFetchMock({
+      sourcePage: { id: "gid://shopify/Page/1", title: "Your Privacy Choices", handle: "your-privacy-choices", body: "<p>x</p>", isPublished: true },
+      existingPages: [{ id: "gid://shopify/Page/existing-77", handle: "your-privacy-choices", title: "Your Privacy Choices" }],
+    });
+
+    const result = await action({ request: mockActionRequest({ intent: "transfer-content", sourceUrl: SOURCE_SHOP, sourceToken: "src-token" }) });
+
+    const page = result.results.find((r) => r.type === "page");
+    expect(page.status).toBe("success");
+    expect(page.warnings).toContain("Updated existing page with same handle");
+    expect(page.newId).toBe("existing-77");
+  });
+
+  // Cause 2: the lookup received the RAW src.handle while the create derived
+  // one from the title when src.handle was absent. A page with no handle of
+  // its own was therefore looked up as `undefined` (instant null) and then
+  // created under a title-derived handle — so it was never found on any
+  // subsequent run, and duplicated every time.
+  it("looks a handle-less source page up under the same handle it will be created with", async () => {
+    let seenQuery = null;
+    global.fetch = pageFetchMock({
+      sourcePage: { id: "gid://shopify/Page/1", title: "Your Privacy Choices", handle: null, body: "<p>x</p>", isPublished: true },
+      existingPages: [{ id: "gid://shopify/Page/existing-88", handle: "your-privacy-choices", title: "Your Privacy Choices" }],
+      onFindQuery: (q) => { seenQuery = q; },
+    });
+
+    const result = await action({ request: mockActionRequest({ intent: "transfer-content", sourceUrl: SOURCE_SHOP, sourceToken: "src-token" }) });
+
+    expect(seenQuery).toBe('handle:"your-privacy-choices"');
+    const page = result.results.find((r) => r.type === "page");
+    expect(page.newId).toBe("existing-88");
+    expect(page.warnings).toContain("Updated existing page with same handle");
+  });
+
+  // `query:` search is fuzzy and can return a different page. Treating a
+  // near-miss as "already exists" would overwrite unrelated merchant content,
+  // which is worse than creating a duplicate.
+  it("ignores a fuzzy search hit whose handle does not actually match", async () => {
+    global.fetch = pageFetchMock({
+      sourcePage: { id: "gid://shopify/Page/1", title: "Privacy", handle: "privacy", body: "<p>x</p>", isPublished: true },
+      existingPages: [{ id: "gid://shopify/Page/other-1", handle: "privacy-policy-archive", title: "Privacy Policy Archive" }],
+    });
+
+    const result = await action({ request: mockActionRequest({ intent: "transfer-content", sourceUrl: SOURCE_SHOP, sourceToken: "src-token" }) });
+
+    const page = result.results.find((r) => r.type === "page");
+    expect(page.newId).toBe("created-1"); // created fresh, did NOT overwrite the other page
+    expect(page.warnings).not.toContain("Updated existing page with same handle");
+  });
+
+  it("matches an existing page whose handle differs only in case", async () => {
+    global.fetch = pageFetchMock({
+      sourcePage: { id: "gid://shopify/Page/1", title: "Your Privacy Choices", handle: "Your-Privacy-Choices", body: "<p>x</p>", isPublished: true },
+      existingPages: [{ id: "gid://shopify/Page/existing-99", handle: "your-privacy-choices", title: "Your Privacy Choices" }],
+    });
+
+    const result = await action({ request: mockActionRequest({ intent: "transfer-content", sourceUrl: SOURCE_SHOP, sourceToken: "src-token" }) });
+
+    expect(result.results.find((r) => r.type === "page").newId).toBe("existing-99");
+  });
+
   it("filters out unsupported customer-account-page menu items instead of failing the whole menu", async () => {
     global.fetch = vi.fn(async (url, opts) => {
       const body = opts?.body ? JSON.parse(opts.body) : {};
@@ -696,7 +803,11 @@ describe("app.transfer action — plan usage limits", () => {
       const query = body.query || "";
       if (query.includes("mutation CollectionCreate")) return jsonResponse({ data: { collectionCreate: { collection: { id: "gid://shopify/Collection/new-1" }, userErrors: [] } } });
       if (query.includes("query SourceCollectionProducts")) return jsonResponse({ data: { collection: { products: { edges: [{ cursor: "1", node: sourceProduct(1) }], pageInfo: { hasNextPage: false } } } } });
-      if (query.includes("mutation CollectionAddProducts")) return jsonResponse({ data: { collectionAddProducts: { job: { id: "1", done: true }, userErrors: [] } } });
+      // Shape matches the real CollectionAddProductsPayload (collection +
+      // userErrors). It previously returned a `job` field that does not
+      // exist on any API version, mirroring a bug in the query itself — so
+      // the mock certified a call that always failed against real Shopify.
+      if (query.includes("mutation CollectionAddProducts")) return jsonResponse({ data: { collectionAddProducts: { collection: { id: "gid://shopify/Collection/1" }, userErrors: [] } } });
       if (query.includes("query Metafields")) return jsonResponse({ data: { collection: { metafields: { edges: [] } }, product: { metafields: { edges: [] } } } });
       if (query.includes("mutation MetafieldsSet")) return jsonResponse({ data: { metafieldsSet: { metafields: [], userErrors: [] } } });
       if (query.includes("mutation ProductCreate")) return jsonResponse({ data: { productCreate: { product: { id: "gid://shopify/Product/new-1" }, userErrors: [] } } });

@@ -1,6 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import { PLAN_IDS, PLANS, PLAN_ORDER } from "./plans.js";
 import {
+  quotaWarningFor,
+  isQuotaError,
   REDIRECT_OVERLAY_COPY,
   planActionLabel,
   isUpgradeFrom,
@@ -342,5 +344,74 @@ describe("PLAN_DISPLAY_ORDER / planDisplayOrder", () => {
 
   it("falls back to a usable order when eligibility is missing", () => {
     expect(planDisplayOrder(undefined)).toEqual([PLAN_IDS.FREE, PLAN_IDS.PRO, PLAN_IDS.AGENCY]);
+  });
+});
+
+describe("quotaWarningFor — pre-transfer plan check", () => {
+  const free = { tier: "free", label: "Free", limit: 250, used: 0, remaining: 250, isUnlimited: false };
+
+  it("says nothing on an unlimited plan", () => {
+    expect(quotaWarningFor({ tier: "pro", label: "Pro", isUnlimited: true, limit: null })).toBeNull();
+  });
+
+  it("says nothing when usage is comfortably low", () => {
+    expect(quotaWarningFor({ ...free, used: 10, remaining: 240 })).toBeNull();
+  });
+
+  it("blocks when the allowance is fully used", () => {
+    const w = quotaWarningFor({ ...free, used: 250, remaining: 0 });
+    expect(w.level).toBe("blocked");
+    expect(w.title).toMatch(/used all 250 records/i);
+  });
+
+  it("warns once past the 80% mark", () => {
+    const w = quotaWarningFor({ ...free, used: 200, remaining: 50 });
+    expect(w.level).toBe("warning");
+    expect(w.title).toMatch(/50 of 250 records left/i);
+  });
+
+  // The case the merchant most needs told in advance: plenty of allowance
+  // left in absolute terms, but this particular transfer is bigger than it.
+  it("warns when the estimated transfer exceeds what remains", () => {
+    const w = quotaWarningFor({ ...free, used: 0, remaining: 250 }, 5061);
+    expect(w.level).toBe("warning");
+    expect(w.message).toMatch(/5,061 records are expected but only 250 remain/i);
+  });
+
+  it("does not warn when the estimate fits", () => {
+    expect(quotaWarningFor({ ...free, used: 0, remaining: 250 }, 100)).toBeNull();
+  });
+
+  it("ignores a non-numeric estimate rather than warning spuriously", () => {
+    expect(quotaWarningFor({ ...free, used: 0, remaining: 250 }, null)).toBeNull();
+    expect(quotaWarningFor({ ...free, used: 0, remaining: 250 }, "lots")).toBeNull();
+  });
+
+  it("tolerates a missing usage object", () => {
+    expect(quotaWarningFor(null)).toBeNull();
+    expect(quotaWarningFor(undefined)).toBeNull();
+  });
+});
+
+describe("isQuotaError — telling a plan limit apart from a real failure", () => {
+  it("matches the transfer engine's own skip message", () => {
+    expect(isQuotaError("Skipped — plan limit reached (upgrade to continue)")).toBe(true);
+  });
+
+  it("matches assertQuotaAvailable's message", () => {
+    expect(isQuotaError("You've used all 250 records included in your Free plan this month. Upgrade to Pro for unlimited records — $15/month or $144/year — or wait for your usage to reset.")).toBe(true);
+  });
+
+  // The whole point of the distinction: a throttle is retryable and is NOT a
+  // billing problem, so it must not show an upgrade prompt.
+  it("does not match a rate-limit failure", () => {
+    expect(isQuotaError("Shopify rate limit (THROTTLED) — still refused after 3 retries. This item can be retried.")).toBe(false);
+    expect(isQuotaError("GraphQL HTTP 429")).toBe(false);
+  });
+
+  it("does not match unrelated errors", () => {
+    expect(isQuotaError("Gift card products cannot be transferred")).toBe(false);
+    expect(isQuotaError("")).toBe(false);
+    expect(isQuotaError(null)).toBe(false);
   });
 });
