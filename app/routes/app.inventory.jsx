@@ -193,6 +193,15 @@ export const action = async ({ request }) => {
       // unit of "the same logical operation" — two rows setting different
       // SKUs must not share a key.
       const idempotencyKey = crypto.randomUUID();
+      // changeFromQuantity is a SEPARATE 2026-04 requirement from @idempotent
+      // (concurrency/compare-and-swap, not retry-safety): as of 2026-04 this
+      // field is required at runtime on every quantities[] entry — pass the
+      // expected prior quantity to enable a concurrency check, or explicit
+      // null to opt out. This CSV import has no known "prior quantity" (the
+      // merchant is asserting an absolute value from the file, not applying
+      // a delta), so null preserves the pre-2026-04 unconditional-overwrite
+      // behavior. Omitting the field entirely is NOT equivalent to null and
+      // fails at runtime on 2026-04 — it must be passed explicitly.
       const setRes = await shopifyFetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
         method: "POST",
         headers: authHeaders,
@@ -212,6 +221,7 @@ export const action = async ({ request }) => {
                 inventoryItemId,
                 locationId: locationId.startsWith("gid://") ? locationId : `gid://shopify/Location/${locationId}`,
                 quantity: qty,
+                changeFromQuantity: null,
               }],
             },
           },

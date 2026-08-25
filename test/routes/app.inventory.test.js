@@ -151,6 +151,26 @@ describe("app.inventory action", () => {
     expect(result.results[0].status).toBe("updated");
   });
 
+  it("passes changeFromQuantity: null and an idempotency key on the set-quantities call (API 2026-04 requirements)", async () => {
+    fetchMock
+      .mockResolvedValueOnce(variantsResponse([{ id: "gid://shopify/ProductVariant/1", sku: "SKU-1", inventoryItem: { id: "gid://shopify/InventoryItem/1" } }]))
+      .mockResolvedValueOnce(setQuantitiesResponse());
+    const req = mockActionRequest({ items: JSON.stringify([{ sku: "SKU-1", quantity: "10" }]), fileName: "inv.csv" });
+    await action({ request: req });
+
+    // calls[0] = locations, calls[1] = variant lookup, calls[2] = the set-quantities write
+    const [, setOpts] = fetchMock.mock.calls[2];
+    const body = JSON.parse(setOpts.body);
+
+    expect(body.query).toContain("@idempotent(key: $idempotencyKey)");
+    expect(typeof body.variables.idempotencyKey).toBe("string");
+    expect(body.variables.idempotencyKey.length).toBeGreaterThan(0);
+    // Omitting changeFromQuantity entirely (rather than passing null) is not
+    // equivalent on 2026-04 and fails at runtime — this pins the explicit
+    // opt-out so it can't be silently dropped in a future edit.
+    expect(body.variables.input.quantities[0]).toHaveProperty("changeFromQuantity", null);
+  });
+
   it("reports a per-row error if inventorySetQuantities returns userErrors", async () => {
     fetchMock
       .mockResolvedValueOnce(variantsResponse([{ id: "gid://shopify/ProductVariant/1", sku: "SKU-1", inventoryItem: { id: "gid://shopify/InventoryItem/1" } }]))
