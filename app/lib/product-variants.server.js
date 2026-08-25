@@ -1,8 +1,8 @@
 // ═══════════════════════════════════════════════════════════════════
 // Shared helpers for creating a Shopify product with options + variants.
 //
-// On the pinned Admin API version (2025-10, per app/shopify.server.js
-// ApiVersion.October25 — verified against shopify.dev's GraphQL reference,
+// On the pinned Admin API version (2026-04, per app/shopify.server.js
+// ApiVersion.April26 — verified against shopify.dev's GraphQL reference,
 // not assumed), ProductInput no longer has "options" or "variants" fields.
 // productCreate only supports creating a product with a single initial
 // variant. Multi-variant products now require two calls:

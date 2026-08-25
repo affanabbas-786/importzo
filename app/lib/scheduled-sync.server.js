@@ -26,7 +26,7 @@ export async function startJobFromSchedule(schedule) {
       // two models will always share an encryption scheme.
       sourceToken: encrypt(decrypt(schedule.sourceToken)),
       destToken: encrypt(decrypt(schedule.destToken)),
-      apiVersion: apiVersion || "2025-10",
+      apiVersion: apiVersion || "2026-04",
       conflictMode: schedule.conflictMode || "skip",
       status: "PENDING",
     },

@@ -5,7 +5,11 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 // Shopify SDK and Prisma are stubbed instead, to keep booting inert.
 vi.mock("@shopify/shopify-app-react-router/adapters/node", () => ({}));
 vi.mock("@shopify/shopify-app-react-router/server", () => ({
-  ApiVersion: { October25: "2025-10" },
+  // Must carry whatever version shopify.server.js pins. A stale key here
+  // makes `ApiVersion.<X>` evaluate to undefined rather than fail, so the
+  // app would boot with apiVersion: undefined and every test still pass.
+  // Guarded by the "pins a real API version" test below.
+  ApiVersion: { October25: "2025-10", April26: "2026-04" },
   AppDistribution: { AppStore: "app_store" },
   // Phase 10 — BillingInterval is imported again: the `billing` config block
   // is back now that the app creates its own charges via the Billing API.
@@ -39,6 +43,21 @@ beforeEach(() => {
 afterEach(() => {
   if (originalKey === undefined) delete process.env.ENCRYPTION_KEY;
   else process.env.ENCRYPTION_KEY = originalKey;
+});
+
+describe("app boot: API version pin", () => {
+  // Regression guard for the 2025-10 → 2026-04 migration. The exported
+  // apiVersion feeds every hand-rolled Admin API URL in the app
+  // (migration-worker, transfer, export, inventory), so if it ever resolves
+  // to undefined the app builds request URLs like
+  // /admin/api/undefined/graphql.json and every call 404s at runtime while
+  // the whole suite stays green.
+  it("exports a concrete, well-formed API version — never undefined", async () => {
+    process.env.ENCRYPTION_KEY = GOOD_KEY;
+    const mod = await import("../app/shopify.server.js");
+    expect(mod.apiVersion).toBeDefined();
+    expect(mod.apiVersion).toMatch(/^\d{4}-\d{2}$/);
+  });
 });
 
 describe("app boot: encryption key guard", () => {

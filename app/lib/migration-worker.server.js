@@ -5,7 +5,7 @@
 
 import prisma from "../db.server.js";
 import { decrypt } from "../utils/encryption.server.js";
-import { shopifyGraphql } from "./shopify-api.server.js";
+import { shopifyGraphql, handleSearchQuery } from "./shopify-api.server.js";
 import { createProductWithVariants } from "./product-variants.server.js";
 import { createLogBuffer, ACTION, ENTITY } from "./transfer-log.server.js";
 import { createBackup } from "./backup.server.js";
@@ -213,7 +213,7 @@ async function findProductByHandle(targetShop, targetToken, handle, version) {
     const data = await shopifyGraphql(targetShop, targetToken, `#graphql
       query FindProduct($query: String!) {
         products(first: 1, query: $query) { edges { node { id handle } } }
-      }`, { query: `handle:${handle}` }, version);
+      }`, { query: handleSearchQuery(handle) }, version);
     return { ok: true, product: data?.products?.edges?.[0]?.node || null };
   } catch (err) {
     return { ok: false, error: err?.message || String(err) };
@@ -369,7 +369,7 @@ async function transferOneProduct(src, ctx) {
 // Source product pagination
 // ────────────────────────────────────────────────────────────────────────────
 
-// Field-validity note (verified against the pinned API version, 2025-10, via
+// Field-validity note (verified against the pinned API version, 2026-04, via
 // shopify.dev's GraphQL reference): Product has no "giftCard" field — the
 // correct name is "isGiftCard". ProductVariant.fulfillmentService was removed
 // in 2022-10 with no query-side replacement. ProductVariant.requiresShipping

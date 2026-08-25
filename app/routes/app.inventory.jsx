@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import { useState, useCallback, useRef, useEffect } from "react";
 import { useFetcher, useRouteError, Link } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
@@ -174,18 +175,36 @@ export const action = async ({ request }) => {
         throw new Error("No location found");
       }
 
-      // Set inventory level using GraphQL
+      // Set inventory level using GraphQL.
+      //
+      // The @idempotent directive is REQUIRED as of API version 2026-04 —
+      // it was introduced as optional in 2026-01 and made mandatory in
+      // 2026-04 for the inventory and refund mutation family (17 mutations;
+      // this app only uses inventorySetQuantities). Omitting it on 2026-04
+      // is a hard GraphQL error, not a deprecation warning.
+      //
+      // The key is generated ONCE here, outside shopifyFetch, and that
+      // placement is load-bearing: shopifyFetch retries 429s by replaying
+      // this exact body, so the retry carries the same key and Shopify
+      // collapses it instead of double-applying the quantity. Generating it
+      // inside the retry loop would defeat the entire point of the directive.
+      //
+      // Scope is one CSV row (one SKU at one location), which is the correct
+      // unit of "the same logical operation" — two rows setting different
+      // SKUs must not share a key.
+      const idempotencyKey = crypto.randomUUID();
       const setRes = await shopifyFetch(`https://${shopDomain}/admin/api/${version}/graphql.json`, {
         method: "POST",
         headers: authHeaders,
         body: JSON.stringify({
-          query: `mutation inventorySetQuantities($input: InventorySetQuantitiesInput!) {
-            inventorySetQuantities(input: $input) {
+          query: `mutation inventorySetQuantities($input: InventorySetQuantitiesInput!, $idempotencyKey: String!) {
+            inventorySetQuantities(input: $input) @idempotent(key: $idempotencyKey) {
               inventoryAdjustmentGroup { reason }
               userErrors { field message }
             }
           }`,
           variables: {
+            idempotencyKey,
             input: {
               reason: "correction",
               name: "available",
