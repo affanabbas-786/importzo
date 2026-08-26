@@ -64,6 +64,11 @@ const { db, webhookMock, shopPlanRows } = vi.hoisted(() => {
 
 vi.mock("../../app/shopify.server", () => ({
   authenticate: { webhook: (...args) => webhookMock(...args) },
+  // The routes reach the SDK through lib/webhook-auth.server.js, which also
+  // imports this. Returning null means "no rotation in progress", i.e. the
+  // ordinary single-secret behaviour these tests describe. Omitting it would
+  // leave the shim calling undefined() on every rejection.
+  previousSecretWebhookAuthenticator: () => null,
 }));
 
 vi.mock("../../app/db.server", () => ({ default: db }));
@@ -76,6 +81,16 @@ import { action as scopesUpdate } from "../../app/routes/webhooks.app.scopes_upd
 import { action as appSubscriptionsUpdate } from "../../app/routes/webhooks.app_subscriptions.update.jsx";
 
 const SHOP = "merchant.myshopify.com";
+
+// A real POST Request, not a stub: lib/webhook-auth.server.js branches on
+// request.method and reads the body, and a bare object silently skips both.
+function webhookRequest() {
+  return new Request("https://importzo.dazzletech.co/webhooks/test", {
+    method: "POST",
+    headers: { "X-Shopify-Hmac-Sha256": "sig" },
+    body: JSON.stringify({ shop_id: 1 }),
+  });
+}
 
 function resetDb() {
   for (const model of Object.values(db)) {
@@ -112,7 +127,7 @@ describe("webhook HMAC signature verification", () => {
 
   it.each(ALL_WEBHOOKS)("%s verifies the signature before doing any work", async (topic, handler) => {
     webhookMock.mockResolvedValue({ shop: SHOP, topic, session: null, payload: { current: [] } });
-    await handler({ request: { headers: { get: () => null } } });
+    await handler({ request: webhookRequest() });
 
     // The only source of shop identity is the verified webhook result —
     // nothing reads an unverified header to decide what to act on.
@@ -122,7 +137,7 @@ describe("webhook HMAC signature verification", () => {
   it.each(ALL_WEBHOOKS)("%s performs no destructive work when the signature is rejected", async (topic, handler) => {
     webhookMock.mockRejectedValue(hmacRejection());
 
-    await expect(handler({ request: { headers: { get: () => null } } })).rejects.toBeInstanceOf(Response);
+    await expect(handler({ request: webhookRequest() })).rejects.toBeInstanceOf(Response);
 
     // Nothing may be deleted or modified on an unverified request.
     expect(db.session.deleteMany).not.toHaveBeenCalled();
@@ -137,7 +152,7 @@ describe("webhook HMAC signature verification", () => {
 
   it("propagates the rejection status rather than swallowing it into a 200", async () => {
     webhookMock.mockRejectedValue(hmacRejection());
-    const err = await shopRedact({ request: { headers: { get: () => null } } }).catch((e) => e);
+    const err = await shopRedact({ request: webhookRequest() }).catch((e) => e);
 
     expect(err).toBeInstanceOf(Response);
     expect(err.status).toBe(401);
@@ -152,7 +167,7 @@ describe("webhook HMAC signature verification", () => {
       webhookMock.mockReset();
       webhookMock.mockRejectedValue(new Response("nope", { status }));
 
-      const err = await appUninstalled({ request: { headers: { get: () => null } } }).catch((e) => e);
+      const err = await appUninstalled({ request: webhookRequest() }).catch((e) => e);
       expect(err).toBeInstanceOf(Response);
       expect(err.status).toBe(status);
       expect(db.session.deleteMany).not.toHaveBeenCalled();
@@ -182,7 +197,7 @@ describe("GDPR — shop/redact", () => {
   afterEach(() => vi.restoreAllMocks());
 
   it("erases every table holding this shop's data", async () => {
-    await shopRedact({ request: { headers: { get: () => null } } });
+    await shopRedact({ request: webhookRequest() });
 
     // The three the old implementation handled...
     expect(db.session.deleteMany).toHaveBeenCalledWith({ where: { shop: SHOP } });
@@ -206,19 +221,19 @@ describe("GDPR — shop/redact", () => {
   });
 
   it("erases the encrypted access tokens held in MigrationJob and ScheduledSync", async () => {
-    await shopRedact({ request: { headers: { get: () => null } } });
+    await shopRedact({ request: webhookRequest() });
     expect(db.migrationJob.deleteMany).toHaveBeenCalled();
     expect(db.scheduledSync.deleteMany).toHaveBeenCalled();
   });
 
   it("erases StoreBackup, which holds a full snapshot of the shop's catalog", async () => {
-    await shopRedact({ request: { headers: { get: () => null } } });
+    await shopRedact({ request: webhookRequest() });
     expect(db.storeBackup.deleteMany).toHaveBeenCalledWith({ where: { shop: SHOP } });
   });
 
   it("deletes job-scoped children via their parent job ids", async () => {
     db.migrationJob.findMany.mockResolvedValue([{ id: "job-1" }, { id: "job-2" }]);
-    await shopRedact({ request: { headers: { get: () => null } } });
+    await shopRedact({ request: webhookRequest() });
 
     expect(db.productMapping.deleteMany).toHaveBeenCalledWith({ where: { jobId: { in: ["job-1", "job-2"] } } });
     expect(db.transferLogEntry.deleteMany).toHaveBeenCalledWith({ where: { jobId: { in: ["job-1", "job-2"] } } });
@@ -228,7 +243,7 @@ describe("GDPR — shop/redact", () => {
     db.storeBackup.deleteMany.mockRejectedValueOnce(new Error("no such table"));
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
-    const response = await shopRedact({ request: { headers: { get: () => null } } });
+    const response = await shopRedact({ request: webhookRequest() });
 
     // 200 because Shopify retries non-2xx, and a retry re-runs a mostly
     // successful erasure — but an incomplete deletion must not look clean.
@@ -251,7 +266,7 @@ describe("GDPR — customers/redact and customers/data_request", () => {
 
   it("customers/redact acknowledges with 200", async () => {
     webhookMock.mockResolvedValue({ shop: SHOP, topic: "customers/redact", payload: { customer: { id: 42 } } });
-    const response = await customersRedact({ request: { headers: { get: () => null } } });
+    const response = await customersRedact({ request: webhookRequest() });
     expect(response.status).toBe(200);
   });
 
@@ -260,7 +275,7 @@ describe("GDPR — customers/redact and customers/data_request", () => {
     // merchant's browser and never persists it. If that ever changes, this
     // test should start failing and force the handler to be revisited.
     webhookMock.mockResolvedValue({ shop: SHOP, topic: "customers/redact", payload: { customer: { id: 42 } } });
-    await customersRedact({ request: { headers: { get: () => null } } });
+    await customersRedact({ request: webhookRequest() });
 
     for (const [name, model] of Object.entries(db)) {
       if (model.deleteMany) {
@@ -271,7 +286,7 @@ describe("GDPR — customers/redact and customers/data_request", () => {
 
   it("customers/data_request acknowledges with 200", async () => {
     webhookMock.mockResolvedValue({ shop: SHOP, topic: "customers/data_request" });
-    const response = await customersDataRequest({ request: { headers: { get: () => null } } });
+    const response = await customersDataRequest({ request: webhookRequest() });
     expect(response.status).toBe(200);
   });
 
@@ -297,12 +312,12 @@ describe("app/uninstalled", () => {
   afterEach(() => vi.restoreAllMocks());
 
   it("deletes the shop's sessions", async () => {
-    await appUninstalled({ request: { headers: { get: () => null } } });
+    await appUninstalled({ request: webhookRequest() });
     expect(db.session.deleteMany).toHaveBeenCalledWith({ where: { shop: SHOP } });
   });
 
   it("disables scheduled syncs, which would otherwise keep firing against a revoked token", async () => {
-    await appUninstalled({ request: { headers: { get: () => null } } });
+    await appUninstalled({ request: webhookRequest() });
 
     expect(db.scheduledSync.updateMany).toHaveBeenCalledWith({
       where: { shop: SHOP, enabled: true },
@@ -311,21 +326,21 @@ describe("app/uninstalled", () => {
   });
 
   it("does not erase shop data — that is shop/redact's job 48h later", async () => {
-    await appUninstalled({ request: { headers: { get: () => null } } });
+    await appUninstalled({ request: webhookRequest() });
     expect(db.storeBackup.deleteMany).not.toHaveBeenCalled();
     expect(db.migrationJob.deleteMany).not.toHaveBeenCalled();
   });
 
   it("survives the scheduled-sync table being absent on an older deployment", async () => {
     db.scheduledSync.updateMany.mockRejectedValueOnce(new Error("no such table"));
-    const response = await appUninstalled({ request: { headers: { get: () => null } } });
+    const response = await appUninstalled({ request: webhookRequest() });
     expect(response.status).toBe(200);
   });
 
   // Phase 5: without this, a shop's row never drops out of Agency
   // eligibility's "currently installed" count after it uninstalls.
   it("marks the shop's ShopPlan row uninstalled, so it drops out of Agency eligibility counts", async () => {
-    await appUninstalled({ request: { headers: { get: () => null } } });
+    await appUninstalled({ request: webhookRequest() });
 
     expect(db.shopPlan.updateMany).toHaveBeenCalledWith({
       where: { shop: SHOP },
@@ -335,7 +350,7 @@ describe("app/uninstalled", () => {
 
   it("survives the shopPlan table being absent on an older deployment", async () => {
     db.shopPlan.updateMany.mockRejectedValueOnce(new Error("no such table"));
-    const response = await appUninstalled({ request: { headers: { get: () => null } } });
+    const response = await appUninstalled({ request: webhookRequest() });
     expect(response.status).toBe(200);
   });
 });
@@ -362,7 +377,7 @@ describe("app_subscriptions/update", () => {
 
   it("promotes ShopPlan.tier to pro when an Importzo Pro subscription activates", async () => {
     mockWebhook({ admin_graphql_api_id: "gid://shopify/AppSubscription/1", name: "Importzo Pro", status: "ACTIVE" });
-    const response = await appSubscriptionsUpdate({ request: { headers: { get: () => null } } });
+    const response = await appSubscriptionsUpdate({ request: webhookRequest() });
 
     expect(response.status).toBe(200);
     expect(shopPlanRows.get(SHOP)).toMatchObject({ tier: "pro", subscriptionId: "gid://shopify/AppSubscription/1", subscriptionStatus: "ACTIVE" });
@@ -370,7 +385,7 @@ describe("app_subscriptions/update", () => {
 
   it("promotes ShopPlan.tier to agency when an Importzo Agency subscription activates", async () => {
     mockWebhook({ admin_graphql_api_id: "gid://shopify/AppSubscription/2", name: "Importzo Agency", status: "ACTIVE" });
-    await appSubscriptionsUpdate({ request: { headers: { get: () => null } } });
+    await appSubscriptionsUpdate({ request: webhookRequest() });
 
     expect(shopPlanRows.get(SHOP)).toMatchObject({ tier: "agency" });
   });
@@ -378,7 +393,7 @@ describe("app_subscriptions/update", () => {
   it("drops the shop to free the moment a subscription is cancelled, without waiting for a page load", async () => {
     shopPlanRows.set(SHOP, { id: "plan-1", shop: SHOP, tier: "pro", subscriptionId: "gid://shopify/AppSubscription/1", subscriptionStatus: "ACTIVE" });
     mockWebhook({ admin_graphql_api_id: "gid://shopify/AppSubscription/1", name: "Importzo Pro", status: "CANCELLED" });
-    await appSubscriptionsUpdate({ request: { headers: { get: () => null } } });
+    await appSubscriptionsUpdate({ request: webhookRequest() });
 
     expect(shopPlanRows.get(SHOP)).toMatchObject({ tier: "free", subscriptionId: null, subscriptionStatus: "CANCELLED" });
   });
@@ -388,7 +403,7 @@ describe("app_subscriptions/update", () => {
       resetDb();
       shopPlanRows.set(SHOP, { id: "plan-1", shop: SHOP, tier: "agency", subscriptionId: "gid://shopify/AppSubscription/9", subscriptionStatus: "ACTIVE" });
       mockWebhook({ admin_graphql_api_id: "gid://shopify/AppSubscription/9", name: "Importzo Agency", status });
-      await appSubscriptionsUpdate({ request: { headers: { get: () => null } } });
+      await appSubscriptionsUpdate({ request: webhookRequest() });
 
       expect(shopPlanRows.get(SHOP).tier).toBe("free");
     }
@@ -403,7 +418,7 @@ describe("app_subscriptions/update", () => {
       resetDb();
       shopPlanRows.set(SHOP, { id: "plan-1", shop: SHOP, tier: "pro", subscriptionId: null, subscriptionStatus: "COMPLIMENTARY" });
       mockWebhook({ admin_graphql_api_id: "gid://shopify/AppSubscription/77", name: "Importzo Pro", status });
-      const response = await appSubscriptionsUpdate({ request: { headers: { get: () => null } } });
+      const response = await appSubscriptionsUpdate({ request: webhookRequest() });
 
       expect(response.status).toBe(200);
       expect(shopPlanRows.get(SHOP)).toMatchObject({ tier: "pro", subscriptionStatus: "COMPLIMENTARY" });
@@ -413,14 +428,14 @@ describe("app_subscriptions/update", () => {
   it("still lets a genuinely activated subscription supersede a complimentary grant", async () => {
     shopPlanRows.set(SHOP, { id: "plan-1", shop: SHOP, tier: "pro", subscriptionId: null, subscriptionStatus: "COMPLIMENTARY" });
     mockWebhook({ admin_graphql_api_id: "gid://shopify/AppSubscription/5", name: "Importzo Agency", status: "ACTIVE" });
-    await appSubscriptionsUpdate({ request: { headers: { get: () => null } } });
+    await appSubscriptionsUpdate({ request: webhookRequest() });
 
     expect(shopPlanRows.get(SHOP)).toMatchObject({ tier: "agency", subscriptionStatus: "ACTIVE" });
   });
 
   it("ignores an unrecognized subscription name rather than crashing (defensive against a future renamed plan)", async () => {
     mockWebhook({ admin_graphql_api_id: "gid://shopify/AppSubscription/1", name: "Some Other Charge", status: "ACTIVE" });
-    const response = await appSubscriptionsUpdate({ request: { headers: { get: () => null } } });
+    const response = await appSubscriptionsUpdate({ request: webhookRequest() });
 
     expect(response.status).toBe(200);
     expect(shopPlanRows.get(SHOP)).toMatchObject({ tier: "free" });
@@ -428,7 +443,7 @@ describe("app_subscriptions/update", () => {
 
   it("no-ops gracefully when the payload has no app_subscription", async () => {
     webhookMock.mockReset().mockResolvedValue({ shop: SHOP, topic: "app_subscriptions/update", session: null, payload: {} });
-    const response = await appSubscriptionsUpdate({ request: { headers: { get: () => null } } });
+    const response = await appSubscriptionsUpdate({ request: webhookRequest() });
     expect(response.status).toBe(200);
     expect(shopPlanRows.has(SHOP)).toBe(false);
   });
@@ -436,7 +451,7 @@ describe("app_subscriptions/update", () => {
   it("logs but still returns 200 if updating ShopPlan fails, rather than triggering endless Shopify retries", async () => {
     mockWebhook({ admin_graphql_api_id: "gid://shopify/AppSubscription/1", name: "Importzo Pro", status: "ACTIVE" });
     db.shopPlan.upsert.mockRejectedValueOnce(new Error("db unavailable"));
-    const response = await appSubscriptionsUpdate({ request: { headers: { get: () => null } } });
+    const response = await appSubscriptionsUpdate({ request: webhookRequest() });
     expect(response.status).toBe(200);
   });
 
@@ -450,12 +465,12 @@ describe("app_subscriptions/update", () => {
   it("does not downgrade to free when a stale cancellation for an already-superseded subscription arrives after the new plan's activation", async () => {
     // New Agency subscription activates first.
     mockWebhook({ admin_graphql_api_id: "gid://shopify/AppSubscription/agency-1", name: "Importzo Agency", status: "ACTIVE" });
-    await appSubscriptionsUpdate({ request: { headers: { get: () => null } } });
+    await appSubscriptionsUpdate({ request: webhookRequest() });
     expect(shopPlanRows.get(SHOP)).toMatchObject({ tier: "agency", subscriptionId: "gid://shopify/AppSubscription/agency-1" });
 
     // Old Pro subscription's cancellation notification arrives late.
     mockWebhook({ admin_graphql_api_id: "gid://shopify/AppSubscription/pro-1", name: "Importzo Pro", status: "CANCELLED" });
-    await appSubscriptionsUpdate({ request: { headers: { get: () => null } } });
+    await appSubscriptionsUpdate({ request: webhookRequest() });
 
     // Must still be on Agency — the stale event must not have clobbered it.
     expect(shopPlanRows.get(SHOP)).toMatchObject({ tier: "agency", subscriptionId: "gid://shopify/AppSubscription/agency-1" });
@@ -464,7 +479,7 @@ describe("app_subscriptions/update", () => {
   it("still downgrades to free when the cancellation is for the subscription actually on file (the normal, non-racing case)", async () => {
     shopPlanRows.set(SHOP, { id: "plan-1", shop: SHOP, tier: "pro", subscriptionId: "gid://shopify/AppSubscription/pro-1", subscriptionStatus: "ACTIVE" });
     mockWebhook({ admin_graphql_api_id: "gid://shopify/AppSubscription/pro-1", name: "Importzo Pro", status: "CANCELLED" });
-    await appSubscriptionsUpdate({ request: { headers: { get: () => null } } });
+    await appSubscriptionsUpdate({ request: webhookRequest() });
 
     expect(shopPlanRows.get(SHOP)).toMatchObject({ tier: "free", subscriptionId: null });
   });

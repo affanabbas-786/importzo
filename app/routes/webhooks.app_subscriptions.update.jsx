@@ -27,13 +27,13 @@
 // send the topic, and if it does still fire it closes exactly the gap it
 // was written for. app.billing.jsx's reconcile() remains the reliable path.
 
-import { authenticate } from "../shopify.server";
+import { authenticateWebhook } from "../lib/webhook-auth.server";
 import prisma from "../db.server";
 import { PLAN_IDS, tierFromSubscriptionName, isComplimentary } from "../lib/plans.js";
 import { getUsageStatus, setShopTier } from "../lib/usage.server";
 
 export const action = async ({ request }) => {
-  const { shop, topic, payload } = await authenticate.webhook(request);
+  const { shop, topic, payload } = await authenticateWebhook(request);
   console.log(`Received ${topic} webhook for ${shop}`);
 
   const subscription = payload?.app_subscription;

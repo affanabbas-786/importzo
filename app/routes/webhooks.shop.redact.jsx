@@ -1,13 +1,13 @@
-import { authenticate } from "../shopify.server";
+import { authenticateWebhook } from "../lib/webhook-auth.server";
 
 export const loader = () => new Response(null, { status: 200 });
 
 export const action = async ({ request }) => {
-  // authenticate.webhook() verifies the Shopify HMAC signature and rejects
+  // authenticateWebhook() verifies the Shopify HMAC signature and rejects
   // unsigned/tampered requests before anything below runs. This handler
   // performs irreversible deletion, so that verification is what stands
   // between an attacker and wiping a merchant's data by POSTing here.
-  const { shop, topic } = await authenticate.webhook(request);
+  const { shop, topic } = await authenticateWebhook(request);
 
   console.log(`Received ${topic} webhook for ${shop}`);
 

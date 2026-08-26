@@ -129,9 +129,33 @@ const BILLING_CONFIG = Object.fromEntries(
   ),
 );
 
-const shopify = shopifyApp({
+// ═══════════════════════════════════════════════════════════════════
+// API secret rotation — dual webhook verification
+//
+// Shopify signs webhooks with the app's OLDEST UNREVOKED client secret. So
+// from the moment a new secret is generated until the old one is revoked in
+// the Dev Dashboard, genuine deliveries keep arriving signed with the OLD
+// one. Verifying against the new secret alone would reject every one of them
+// — including customers/data_request, customers/redact and shop/redact,
+// whose repeated failure is an App Store compliance problem, not merely lost
+// data.
+//
+// While SHOPIFY_API_SECRET_OLD is set, webhook HMAC is therefore checked
+// against the new secret first and the previous one as a fallback (see
+// lib/webhook-auth.server.js). Nothing else in the app reads it: OAuth,
+// token exchange and refresh all use SHOPIFY_API_SECRET only, which is what
+// re-pins each store's access token to the new secret as it refreshes.
+//
+// REMOVE SHOPIFY_API_SECRET_OLD from .env and restart once the old secret has
+// been revoked. Leaving it set indefinitely means the app keeps honouring a
+// retired credential.
+// ═══════════════════════════════════════════════════════════════════
+const PREVIOUS_API_SECRET = process.env.SHOPIFY_API_SECRET_OLD || "";
+
+// Everything both instances share. Extracted rather than duplicated so the
+// fallback can never drift from the real configuration.
+const baseConfig = {
   apiKey: process.env.SHOPIFY_API_KEY,
-  apiSecretKey: process.env.SHOPIFY_API_SECRET || "",
   apiVersion: ApiVersion.April26,
   scopes: process.env.SCOPES?.split(","),
   appUrl: process.env.SHOPIFY_APP_URL || "",
@@ -151,12 +175,6 @@ const shopify = shopifyApp({
   // Shopify refuses. So this is safe to deploy BEFORE the dashboard switch,
   // and starts working the moment the switch is made, with no flag day.
   billing: BILLING_CONFIG,
-  hooks: {
-    afterAuth: async ({ session }) => {
-      console.log(`[importzo] afterAuth: shop=${session.shop} isOnline=${session.isOnline} scope=${session.scope}`);
-      shopify.registerWebhooks({ session });
-    },
-  },
   // expiringOfflineAccessTokens must match the Shopify Partners Dashboard setting.
   // Token exchange passes this as `expiring:` to Shopify's API; a mismatch causes
   // a non-JWT API error that bubbles up as an empty-body 500 → "Handling response".
@@ -166,7 +184,42 @@ const shopify = shopifyApp({
   ...(process.env.SHOP_CUSTOM_DOMAIN
     ? { customShopDomains: [process.env.SHOP_CUSTOM_DOMAIN] }
     : {}),
+};
+
+const shopify = shopifyApp({
+  ...baseConfig,
+  apiSecretKey: process.env.SHOPIFY_API_SECRET || "",
+  hooks: {
+    afterAuth: async ({ session }) => {
+      console.log(`[importzo] afterAuth: shop=${session.shop} isOnline=${session.isOnline} scope=${session.scope}`);
+      shopify.registerWebhooks({ session });
+    },
+  },
 });
+
+// Built lazily and only when a rotation is actually in progress, so the
+// ordinary path pays nothing for it. Deliberately given no afterAuth hook:
+// this instance exists solely to re-check an HMAC, and must never take part
+// in an OAuth flow or register a webhook.
+let previousSecretApp = null;
+
+/**
+ * The webhook authenticator for the PREVIOUS API secret, or null when no
+ * rotation is in progress.
+ *
+ * Returns null when the old secret is unset or identical to the current one,
+ * so a stale or copy-pasted env var can't silently turn into a second
+ * verification path that accepts the same signatures twice.
+ */
+export function previousSecretWebhookAuthenticator() {
+  if (!PREVIOUS_API_SECRET) return null;
+  if (PREVIOUS_API_SECRET === (process.env.SHOPIFY_API_SECRET || "")) return null;
+  if (!previousSecretApp) {
+    console.warn("[importzo] SHOPIFY_API_SECRET_OLD is set — webhooks will also be accepted from the previous secret. Remove it once the old secret is revoked.");
+    previousSecretApp = shopifyApp({ ...baseConfig, apiSecretKey: PREVIOUS_API_SECRET });
+  }
+  return previousSecretApp.authenticate.webhook;
+}
 
 export default shopify;
 export const apiVersion = ApiVersion.April26;

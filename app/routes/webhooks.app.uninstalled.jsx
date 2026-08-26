@@ -1,12 +1,12 @@
-import { authenticate } from "../shopify.server";
+import { authenticateWebhook } from "../lib/webhook-auth.server";
 import db from "../db.server";
 
 export const action = async ({ request }) => {
   let shop, session, topic;
   try {
-    ({ shop, session, topic } = await authenticate.webhook(request));
+    ({ shop, session, topic } = await authenticateWebhook(request));
   } catch (error) {
-    // authenticate.webhook() tries to refresh the offline token before
+    // authenticateWebhook() tries to refresh the offline token before
     // returning. On app/uninstalled the token is already revoked, so the
     // refresh always fails and the SDK throws a bare 500 Response here —
     // HMAC validation has already passed by this point, so this isn't an
