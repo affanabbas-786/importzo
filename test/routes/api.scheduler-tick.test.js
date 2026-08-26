@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-const db = { schedules: [], plans: new Map(), jobs: [] };
+const db = { schedules: [], plans: new Map(), jobs: [], themeJobs: [] };
 
 function setShopPlan(shop, data) {
   db.plans.set(shop, {
@@ -30,6 +30,21 @@ vi.mock("../../app/db.server", () => ({
       )),
       update: vi.fn(async ({ where: { id }, data }) => {
         const row = db.jobs.find((j) => j.id === id);
+        if (row) Object.assign(row, data);
+        return row;
+      }),
+    },
+    // Background THEME transfers are recovered on the same tick, from their
+    // own table. Without this delegate recoverOrphanedThemeJobs reads
+    // `undefined.findMany`, swallows the TypeError into its own error field
+    // and reports zero work — so every assertion about theme recovery would
+    // pass against a tick that never recovered anything.
+    themeJob: {
+      findMany: vi.fn(async ({ where }) => db.themeJobs.filter(
+        (j) => where.status.in.includes(j.status) && j.updatedAt < where.updatedAt.lt,
+      )),
+      update: vi.fn(async ({ where: { id }, data }) => {
+        const row = db.themeJobs.find((j) => j.id === id);
         if (row) Object.assign(row, data);
         return row;
       }),
@@ -73,6 +88,20 @@ vi.mock("../../app/lib/migration-worker.server", () => ({
   isWorkerActive: vi.fn((jobId) => activeWorkers.has(jobId)),
 }));
 
+const themeWorkerRuns = [];
+const activeThemeWorkers = new Set();
+vi.mock("../../app/lib/theme-worker.server", () => ({
+  runThemeWorker: vi.fn(async (jobId) => { themeWorkerRuns.push(jobId); }),
+  isWorkerActive: vi.fn((jobId) => activeThemeWorkers.has(jobId)),
+}));
+
+// Mocked for isolation, not convenience: the real sweep walks and unlinks
+// files under the OS temp directory, which a unit test has no business doing.
+const themeSweeps = [];
+vi.mock("../../app/lib/theme-zip.server", () => ({
+  sweepThemeTempFiles: vi.fn(async () => { themeSweeps.push(1); return { stageDirs: 0, zips: 0 }; }),
+}));
+
 import { action } from "../../app/routes/api.scheduler-tick.jsx";
 
 const SECRET = "s3cr3t-value";
@@ -108,7 +137,11 @@ describe("api.scheduler-tick", () => {
     db.schedules = [];
     db.plans = new Map();
     db.jobs = [];
+    db.themeJobs = [];
     activeWorkers.clear();
+    activeThemeWorkers.clear();
+    themeWorkerRuns.length = 0;
+    themeSweeps.length = 0;
     startedJobs.length = 0;
     workerRuns.length = 0;
     vi.spyOn(console, "log").mockImplementation(() => {});
@@ -236,5 +269,108 @@ describe("api.scheduler-tick", () => {
 
     expect(body.ok).toBe(true);
     expect(body.recovery).toMatchObject({ resumed: [], abandoned: [] });
+  });
+
+  // ── Theme-transfer recovery ──────────────────────────────────────────────
+  // Same reasoning as the migration recovery above, against ThemeJob: a theme
+  // transfer whose worker died with the process has no other way back, since
+  // the only other resume path is a merchant sitting on /api/theme-status.
+
+  function seedOrphanedThemeJob(overrides = {}) {
+    const row = {
+      id: "theme-orphan-1",
+      shop: "dest.myshopify.com",
+      status: "RUNNING",
+      phase: "FETCHING",
+      createdAt: new Date(Date.now() - 60 * 60_000),
+      updatedAt: new Date(Date.now() - 30 * 60_000),
+      ...overrides,
+    };
+    db.themeJobs.push(row);
+    return row;
+  }
+
+  it("restarts a theme transfer orphaned by a process restart", async () => {
+    seedOrphanedThemeJob();
+
+    const body = await (await action({ request: tickRequest() })).json();
+
+    expect(themeWorkerRuns).toContain("theme-orphan-1");
+    expect(body.themeRecovery.resumed).toEqual([
+      { id: "theme-orphan-1", shop: "dest.myshopify.com", status: "RUNNING" },
+    ]);
+  });
+
+  it("drives the theme worker, not the migration worker, for a theme job", async () => {
+    // The tick wires two recoveries that differ only in their table and their
+    // worker. Crossing those wires would "recover" a theme job by running the
+    // product migration worker against its id.
+    seedOrphanedThemeJob();
+
+    await action({ request: tickRequest() });
+
+    expect(themeWorkerRuns).toEqual(["theme-orphan-1"]);
+    expect(workerRuns).not.toContain("theme-orphan-1");
+  });
+
+  it("does not restart a theme transfer still running in this process", async () => {
+    seedOrphanedThemeJob();
+    activeThemeWorkers.add("theme-orphan-1");
+
+    const body = await (await action({ request: tickRequest() })).json();
+
+    expect(themeWorkerRuns).not.toContain("theme-orphan-1");
+    expect(body.themeRecovery.resumed).toEqual([]);
+  });
+
+  it("fails a theme transfer interrupted for over 24h with the theme-specific advice", async () => {
+    const row = seedOrphanedThemeJob({ createdAt: new Date(Date.now() - 25 * 60 * 60_000) });
+
+    const body = await (await action({ request: tickRequest() })).json();
+
+    expect(themeWorkerRuns).toEqual([]);
+    expect(body.themeRecovery.abandoned).toEqual([
+      { id: "theme-orphan-1", shop: "dest.myshopify.com" },
+    ]);
+    expect(row.status).toBe("FAILED");
+    const written = JSON.parse(row.errorLog)[0].error;
+    expect(written).toMatch(/rather than creating a duplicate/i);
+    // The migration wording points at conflict mode "skip", which does not
+    // exist for themes.
+    expect(written).not.toMatch(/conflict handling set to/i);
+  });
+
+  it("recovers migrations and theme transfers independently on one tick", async () => {
+    seedOrphanedJob();
+    seedOrphanedThemeJob();
+
+    const body = await (await action({ request: tickRequest() })).json();
+
+    expect(body.recovery.resumed.map((j) => j.id)).toEqual(["orphan-1"]);
+    expect(body.themeRecovery.resumed.map((j) => j.id)).toEqual(["theme-orphan-1"]);
+    expect(workerRuns).toContain("orphan-1");
+    expect(themeWorkerRuns).toEqual(["theme-orphan-1"]);
+  });
+
+  it("reports theme recovery with no error on a healthy tick", async () => {
+    // Regression guard for the gap this block was added to close: before the
+    // themeJob delegate existed in the db mock, every tick here returned a
+    // themeRecovery carrying a swallowed TypeError, and nothing asserted on
+    // it. An error appearing in this field again means the tick is reading a
+    // table that is not there.
+    const body = await (await action({ request: tickRequest() })).json();
+
+    expect(body.ok).toBe(true);
+    expect(body.themeRecovery).toMatchObject({ resumed: [], abandoned: [], skipped: 0 });
+    expect(body.themeRecovery.error).toBeUndefined();
+  });
+
+  it("sweeps theme staging dirs and ZIPs left behind by interrupted transfers", async () => {
+    // deleteThemeZipLater schedules an unref'd setTimeout that a restart
+    // discards, so this tick is the only thing that reclaims that space.
+    const body = await (await action({ request: tickRequest() })).json();
+
+    expect(themeSweeps).toHaveLength(1);
+    expect(body.themeTemp).toMatchObject({ stageDirs: 0, zips: 0 });
   });
 });

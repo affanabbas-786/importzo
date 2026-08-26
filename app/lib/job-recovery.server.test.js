@@ -1,19 +1,26 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   recoverOrphanedJobs,
+  recoverOrphanedThemeJobs,
   RUNNING_STALE_MS,
   PENDING_STALE_MS,
   ABANDON_AFTER_MS,
   MAX_RESUMES_PER_TICK,
   ABANDON_MESSAGE,
+  THEME_ABANDON_MESSAGE,
 } from "./job-recovery.server.js";
 
 const NOW = new Date("2026-08-15T12:00:00Z");
 const ago = (ms) => new Date(NOW.getTime() - ms);
 
-function fakePrisma(jobs, { findThrows = null, updateThrows = null } = {}) {
+// The delegate name is a parameter because recoverOrphanedJobs and
+// recoverOrphanedThemeJobs drive the SAME loop against DIFFERENT tables. A
+// fake that only ever exposed migrationJob would let a theme-side regression
+// — wrong delegate, dropped phase select — pass every test in this file while
+// the theme path was in fact broken.
+function fakePrisma(jobs, { findThrows = null, updateThrows = null, model = "migrationJob" } = {}) {
   return {
-    migrationJob: {
+    [model]: {
       findMany: vi.fn(async ({ where }) => {
         if (findThrows) throw new Error(findThrows);
         // Mirror the route's own filter so tests exercise the real predicate.
@@ -170,5 +177,156 @@ describe("recoverOrphanedJobs", () => {
 
     expect(result.resumed).toEqual([]);
     expect(prisma.migrationJob.update).not.toHaveBeenCalled();
+  });
+});
+
+// ── Theme transfers ────────────────────────────────────────────────────────
+// recoverOrphanedThemeJobs shares recoverStale with the migration path, so
+// the threshold/cap/abandon rules are covered above. What is NOT shared — and
+// therefore what these cover — is the three things that differ per job type:
+// the Prisma delegate it reads, the extra `phase` column it selects, and the
+// abandon message the merchant actually receives.
+
+function themeJob(overrides = {}) {
+  return {
+    id: "theme-1",
+    shop: "dest.myshopify.com",
+    status: "RUNNING",
+    phase: "FETCHING",
+    createdAt: ago(60 * 60 * 1000),
+    updatedAt: ago(RUNNING_STALE_MS + 60_000),
+    ...overrides,
+  };
+}
+
+const themePrisma = (jobs, opts = {}) => fakePrisma(jobs, { ...opts, model: "themeJob" });
+
+describe("recoverOrphanedThemeJobs", () => {
+  it("resumes a theme transfer whose worker died with the process", async () => {
+    const prisma = themePrisma([themeJob()]);
+
+    const result = await recoverOrphanedThemeJobs({ prisma, isActive: neverActive, runWorker, now: NOW });
+
+    expect(runWorker).toHaveBeenCalledWith("theme-1");
+    expect(result.resumed).toEqual([{ id: "theme-1", shop: "dest.myshopify.com", status: "RUNNING" }]);
+  });
+
+  it("reads themeJob, never migrationJob", async () => {
+    // Guards the one bug a shared loop makes easy: passing the wrong delegate
+    // would silently recover the wrong table's jobs with the wrong worker.
+    const prisma = themePrisma([themeJob()]);
+    prisma.migrationJob = { findMany: vi.fn(), update: vi.fn() };
+
+    await recoverOrphanedThemeJobs({ prisma, isActive: neverActive, runWorker, now: NOW });
+
+    expect(prisma.themeJob.findMany).toHaveBeenCalled();
+    expect(prisma.migrationJob.findMany).not.toHaveBeenCalled();
+  });
+
+  it("selects `phase` so a resume can be traced to the step it died on", async () => {
+    // phase is the only column the theme path adds to the shared select. It is
+    // what makes "resuming job=… phase=FETCHING" legible in the logs, and it is
+    // trivially droppable in a refactor, so it is pinned here.
+    const prisma = themePrisma([themeJob()]);
+
+    await recoverOrphanedThemeJobs({ prisma, isActive: neverActive, runWorker, now: NOW });
+
+    const { select } = prisma.themeJob.findMany.mock.calls[0][0];
+    expect(select).toMatchObject({ id: true, shop: true, status: true, phase: true });
+  });
+
+  it("names the phase in the resume log", async () => {
+    const prisma = themePrisma([themeJob({ phase: "CREATING" })]);
+
+    await recoverOrphanedThemeJobs({ prisma, isActive: neverActive, runWorker, now: NOW });
+
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("phase=CREATING"));
+  });
+
+  it("resumes a stale CREATING job rather than failing it — the by-name check adopts", async () => {
+    // The riskiest phase to re-enter: a crash after Shopify created the theme
+    // but before newThemeId was persisted. Re-running is safe because the
+    // worker adopts a destination theme matching the stored name instead of
+    // creating a second one, which is why this is a resume and not an abandon.
+    const prisma = themePrisma([themeJob({ phase: "CREATING", newThemeId: null })]);
+
+    const result = await recoverOrphanedThemeJobs({ prisma, isActive: neverActive, runWorker, now: NOW });
+
+    expect(result.resumed).toHaveLength(1);
+    expect(prisma.themeJob.update).not.toHaveBeenCalled();
+  });
+
+  it("never restarts a theme job still running in THIS process", async () => {
+    const prisma = themePrisma([themeJob()]);
+
+    const result = await recoverOrphanedThemeJobs({ prisma, isActive: () => true, runWorker, now: NOW });
+
+    expect(runWorker).not.toHaveBeenCalled();
+    expect(result.skipped).toBe(1);
+  });
+
+  it("leaves a RUNNING theme job alone until it passes the RUNNING threshold", async () => {
+    const prisma = themePrisma([themeJob({ updatedAt: ago(PENDING_STALE_MS + 60_000) })]);
+
+    const result = await recoverOrphanedThemeJobs({ prisma, isActive: neverActive, runWorker, now: NOW });
+
+    expect(runWorker).not.toHaveBeenCalled();
+    expect(result.skipped).toBe(1);
+  });
+
+  it("abandons a theme job with the THEME message, not the migration one", async () => {
+    const prisma = themePrisma([themeJob({ createdAt: ago(ABANDON_AFTER_MS + 60_000) })]);
+
+    const result = await recoverOrphanedThemeJobs({ prisma, isActive: neverActive, runWorker, now: NOW });
+
+    expect(result.abandoned).toEqual([{ id: "theme-1", shop: "dest.myshopify.com" }]);
+    const update = prisma.themeJob.update.mock.calls[0][0];
+    expect(update.data.status).toBe("FAILED");
+    const written = JSON.parse(update.data.errorLog)[0].error;
+    expect(written).toBe(THEME_ABANDON_MESSAGE);
+    // The migration message tells the merchant to re-run with conflict mode
+    // "skip". Themes have no such mode, so sending it here would be advice the
+    // merchant cannot follow.
+    expect(written).not.toBe(ABANDON_MESSAGE);
+  });
+
+  it("tells the merchant a re-run adopts the half-created theme instead of duplicating it", async () => {
+    expect(THEME_ABANDON_MESSAGE).toMatch(/rather than creating a duplicate/i);
+    expect(THEME_ABANDON_MESSAGE).toMatch(/still there and unpublished/i);
+    // Must NOT inherit the migration wording — there is no "skip" conflict
+    // mode on a theme transfer.
+    expect(THEME_ABANDON_MESSAGE).not.toMatch(/conflict handling set to/i);
+  });
+
+  it("caps theme resumes per tick with the same ceiling as migrations", async () => {
+    const many = Array.from({ length: MAX_RESUMES_PER_TICK + 2 }, (_, i) =>
+      themeJob({ id: `theme-${i}`, updatedAt: ago(RUNNING_STALE_MS + 60_000 + i) }));
+    const prisma = themePrisma(many);
+
+    const result = await recoverOrphanedThemeJobs({ prisma, isActive: neverActive, runWorker, now: NOW });
+
+    expect(result.resumed).toHaveLength(MAX_RESUMES_PER_TICK);
+    expect(result.skipped).toBe(2);
+  });
+
+  it("reports a themeJob query failure rather than throwing into the scheduler tick", async () => {
+    const prisma = themePrisma([], { findThrows: "database is locked" });
+
+    const result = await recoverOrphanedThemeJobs({ prisma, isActive: neverActive, runWorker, now: NOW });
+
+    expect(result.error).toBe("database is locked");
+    expect(result.resumed).toEqual([]);
+  });
+
+  it("ignores theme jobs that already finished", async () => {
+    const prisma = themePrisma([
+      themeJob({ id: "done", status: "COMPLETED" }),
+      themeJob({ id: "dead", status: "FAILED" }),
+    ]);
+
+    const result = await recoverOrphanedThemeJobs({ prisma, isActive: neverActive, runWorker, now: NOW });
+
+    expect(result.resumed).toEqual([]);
+    expect(prisma.themeJob.update).not.toHaveBeenCalled();
   });
 });
