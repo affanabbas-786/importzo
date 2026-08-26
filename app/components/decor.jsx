@@ -21,47 +21,42 @@
 import PropTypes from "prop-types";
 import { COLORS } from "../lib/design-tokens";
 
-const CORNER_POSITION = {
-  "top-right": { top: 0, right: 0 },
-  "top-left": { top: 0, left: 0 },
-  "bottom-right": { bottom: 0, right: 0 },
-  "bottom-left": { bottom: 0, left: 0 },
+// Where the light comes from, as a CSS gradient origin.
+const CORNER_ORIGIN = {
+  "top-right": "100% 0%",
+  "top-left": "0% 0%",
+  "bottom-right": "100% 100%",
+  "bottom-left": "0% 100%",
 };
 
 /**
- * A soft radial bloom anchored to one corner, behind real content.
+ * Light falling across one corner of a surface.
  *
- * A blurred gradient rather than shapes: it reads as light on the surface
- * instead of as objects sitting on it, so nothing competes with the text
- * in front. The container needs `position: relative; overflow: hidden`.
+ * A CSS gradient anchored AT the corner, not an SVG shape placed near it.
+ * The earlier version drew a circle in a box pinned to the corner, which put
+ * its brightest point ~95px inside the card — a green smudge floating over
+ * the text rather than an accent — and its two hairline rings read as a
+ * target. Anchoring the gradient origin to the corner itself means the
+ * falloff has no centre to notice.
+ *
+ * The container needs `position: relative; overflow: hidden`.
  */
-export function DecorativeCorner({ position = "top-right", size = 120, className = "" }) {
-  const id = `bloom-${position}`;
+export function DecorativeCorner({ position = "top-right", extent = 125, className = "" }) {
   return (
-    <svg
-      width={size} height={size} viewBox="0 0 120 120" fill="none"
-      className={`absolute pointer-events-none select-none ${className}`}
-      style={CORNER_POSITION[position]}
+    <div
       aria-hidden="true"
-    >
-      <defs>
-        <radialGradient id={id} cx="50%" cy="50%" r="50%">
-          <stop offset="0%" stopColor={COLORS.washMid} stopOpacity="0.75" />
-          <stop offset="55%" stopColor={COLORS.washLight} stopOpacity="0.35" />
-          <stop offset="100%" stopColor={COLORS.washLight} stopOpacity="0" />
-        </radialGradient>
-      </defs>
-      <circle cx="60" cy="60" r="60" fill={`url(#${id})`} />
-      {/* Two hairline arcs, barely visible — enough to give the wash an
-          edge so it doesn't read as a printing artifact. */}
-      <circle cx="60" cy="60" r="38" stroke={COLORS.secondary} strokeOpacity="0.07" strokeWidth="1" />
-      <circle cx="60" cy="60" r="54" stroke={COLORS.secondary} strokeOpacity="0.05" strokeWidth="1" />
-    </svg>
+      className={`absolute inset-0 pointer-events-none select-none ${className}`}
+      style={{
+        background:
+          `radial-gradient(${extent}% ${extent - 10}% at ${CORNER_ORIGIN[position]}, ` +
+          `rgba(46,99,22,0.15) 0%, rgba(46,99,22,0.045) 36%, transparent 64%)`,
+      }}
+    />
   );
 }
 DecorativeCorner.propTypes = {
   position: PropTypes.oneOf(["top-right", "top-left", "bottom-right", "bottom-left"]),
-  size: PropTypes.number,
+  extent: PropTypes.number,
   className: PropTypes.string,
 };
 
@@ -101,23 +96,34 @@ export function EmptyStateIllustration({ size = 96, className = "" }) {
 EmptyStateIllustration.propTypes = { size: PropTypes.number, className: PropTypes.string };
 
 /**
- * Warm decorative surface for welcome banners / top-of-page sections on
- * branded pages. A soft wash with a corner bloom behind the real content.
- * Never used on transactional pages.
+ * Decorative surface for welcome banners and top-of-page sections on branded
+ * pages. Near-white paper, a green-biased hairline border for definition, and
+ * light across one corner. Never used on transactional pages.
  */
 export function DecorativeBanner({ children, className = "", cornerPosition = "top-right" }) {
+  const atTop = cornerPosition.startsWith("top");
+  const atRight = cornerPosition.endsWith("right");
   return (
     <div
       className={`relative overflow-hidden rounded-2xl ${className}`}
       style={{
-        background: `linear-gradient(135deg, ${COLORS.cream} 0%, ${COLORS.washLight} 100%)`,
-        boxShadow: "0 1px 2px rgba(16,24,8,0.04), 0 4px 12px rgba(16,24,8,0.05)",
+        background: COLORS.paper,
+        border: `1px solid ${COLORS.hairline}`,
+        boxShadow: "0 1px 2px rgba(16,24,8,0.04)",
       }}
     >
-      <DecorativeCorner position={cornerPosition} size={190} className="opacity-90" />
-      {cornerPosition === "top-right" && (
-        <DecorativeCorner position="bottom-left" size={130} className="opacity-50" />
-      )}
+      <DecorativeCorner position={cornerPosition} />
+      {/* A single lit edge on the same side as the wash. Without it the card
+          has no crisp boundary and the whole block reads as slightly out of
+          focus. */}
+      <div
+        aria-hidden="true"
+        style={{
+          position: "absolute", left: 0, right: 0, height: 1,
+          [atTop ? "top" : "bottom"]: 0,
+          background: `linear-gradient(${atRight ? "270deg" : "90deg"}, ${COLORS.hairlineStrong}, rgba(46,99,22,0) 60%)`,
+        }}
+      />
       <div className="relative">{children}</div>
     </div>
   );

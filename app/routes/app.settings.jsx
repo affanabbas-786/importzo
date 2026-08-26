@@ -125,7 +125,7 @@ export default function SettingsPage() {
       <div className="space-y-6 animate-fade-in">
         {/* ── Header (logo/wordmark unchanged; faint page-level corner accent behind it) ── */}
         <div className="relative overflow-hidden rounded-2xl -m-2 p-2">
-          <DecorativeCorner position="top-right" size={130} className="opacity-30" />
+          <DecorativeCorner position="top-right" className="opacity-60" />
           <div className="relative flex items-center gap-2.5">
             <img src="/logo.png" alt="Importzo" style={{ height: 40, width: "auto", objectFit: "contain" }} />
             <span style={{ fontSize: 18, fontWeight: 600, color: P, fontFamily: F }}>Settings</span>

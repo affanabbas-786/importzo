@@ -23,6 +23,13 @@ export const COLORS = {
   washMid: "#BFDCAE",
   washDeep: "#4C7A34",
   cream: "#FBFAF6",       // warm wash background for decorative banners
+  // Decorative surfaces are a near-white paper with a green-biased hairline
+  // rather than a tinted fill. A banner that is tinted all over reads as a
+  // smudge; one that is paper with light falling across a corner reads as a
+  // surface.
+  paper: "#FCFCFA",
+  hairline: "rgba(46,99,22,0.15)",
+  hairlineStrong: "rgba(46,99,22,0.30)",
 };
 
 // 12–16px per the design brief; two sizes so nested/smaller cards can
