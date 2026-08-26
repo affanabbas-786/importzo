@@ -4,7 +4,6 @@ import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { BRAND, JOB_TYPE_CONFIG, JOB_STATUS_MAP } from "../lib/constants";
 import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
-import { LeafIcon } from "../components/decor";
 
 export const loader = async ({ request }) => {
   const { session } = await authenticate.admin(request);
@@ -36,7 +35,7 @@ export default function ActivityPage() {
         <div className="flex items-center gap-2.5">
           <img src="/logo.png" alt="Importzo" style={{ height: 40, width: "auto", objectFit: "contain" }} />
           <span style={{ fontSize: 18, fontWeight: 600, color: primary, fontFamily: font }} className="flex items-center gap-1.5">
-            Activity <LeafIcon size={14} />
+            Activity
           </span>
         </div>
 

@@ -1,9 +1,9 @@
 // ═══════════════════════════════════════════════════════════════════
-// Design tokens — leafy visual refresh (decorative areas only).
+// Design tokens — decorative surfaces only.
 //
 // Single source of truth for the palette/spacing/shadow values used by
 // the decorative treatment (welcome banners, empty states, corner
-// accents). Reuses the app's existing brand greens from constants.js
+// blooms). Reuses the app's existing brand greens from constants.js
 // rather than introducing a new shade, so buttons/links/active-states
 // that already use BRAND.primary/secondary stay visually identical —
 // this file only adds the *decorative* tokens layered on top.
@@ -16,9 +16,12 @@ export const COLORS = {
   secondary: BRAND.secondary, // #2E6316 — brand green
   primaryTint: "rgba(23,50,10,0.08)",
   secondaryTint: "rgba(46,99,22,0.07)",
-  leafLight: "#E8F1E2",   // pale leaf-green fill, decorative shapes only
-  leafMid: "#BFDCAE",
-  leafDeep: "#4C7A34",
+  // Wash tones for gradient surfaces and corner blooms. Named for what they
+  // do, not for what they used to draw — these backed a leaf motif that was
+  // removed; the tints stayed because the branded surfaces still need them.
+  washLight: "#E8F1E2",
+  washMid: "#BFDCAE",
+  washDeep: "#4C7A34",
   cream: "#FBFAF6",       // warm wash background for decorative banners
 };
 

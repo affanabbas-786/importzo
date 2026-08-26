@@ -10,7 +10,7 @@ import { BRAND } from "../lib/constants";
 import { SUPPORT_EMAIL, mailtoLink, openLiveChat } from "../lib/support";
 import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
 import { DEFAULT_PREFS, loadPrefs, savePrefs, resetPrefs, canPersist } from "../lib/prefs";
-import { DecorativeBanner, DecorativeCorner, LeafIcon } from "../components/decor";
+import { DecorativeBanner, DecorativeCorner } from "../components/decor";
 
 export const loader = async ({ request }) => {
   const { session } = await authenticate.admin(request);
@@ -141,7 +141,6 @@ export default function SettingsPage() {
         <section className="space-y-4">
           <div>
             <h2 className="text-base font-semibold text-gray-900 flex items-center gap-1.5" style={{ fontFamily: F }}>
-              <LeafIcon size={14} />
               Plan &amp; Usage
             </h2>
             <p className="text-sm text-gray-500 mt-0.5">Manage your subscription and see this month&apos;s record usage.</p>
@@ -190,7 +189,6 @@ export default function SettingsPage() {
         <section className="space-y-4">
           <div>
             <h2 className="text-base font-semibold text-gray-900 flex items-center gap-1.5" style={{ fontFamily: F }}>
-              <LeafIcon size={14} />
               Import &amp; Transfer defaults
             </h2>
             <p className="text-sm text-gray-500 mt-0.5">
@@ -293,7 +291,6 @@ export default function SettingsPage() {
         <section className="space-y-4">
           <div>
             <h2 className="text-base font-semibold text-gray-900 flex items-center gap-1.5" style={{ fontFamily: F }}>
-              <LeafIcon size={14} />
               AI SEO Cleanup
             </h2>
             <p className="text-sm text-gray-500 mt-0.5">Optional, bring-your-own-key AI title/description suggestions after import.</p>
@@ -324,7 +321,6 @@ export default function SettingsPage() {
         <section className="space-y-4">
           <div>
             <h2 className="text-base font-semibold text-gray-900 flex items-center gap-1.5" style={{ fontFamily: F }}>
-              <LeafIcon size={14} />
               Notifications
             </h2>
             <p className="text-sm text-gray-500 mt-0.5">Get notified when imports and transfers finish.</p>
@@ -377,7 +373,6 @@ export default function SettingsPage() {
           <div className="flex items-end justify-between gap-4">
             <div>
               <h2 className="text-base font-semibold text-gray-900 flex items-center gap-1.5" style={{ fontFamily: F }}>
-                <LeafIcon size={14} />
                 Help &amp; Support
               </h2>
               <p className="text-sm text-gray-500 mt-0.5">Talk to a real human — usually within a few hours.</p>

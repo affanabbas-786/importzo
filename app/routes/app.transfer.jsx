@@ -36,7 +36,7 @@ import { assertQuotaAvailable, recordUsageAndCheck, assertAiQuotaAvailable, reco
 import { createAltTextGenerator } from "../lib/alt-text.server";
 import { getAiIntegrationForUse } from "../lib/ai-settings.server";
 import { detectSimilarProducts } from "../lib/ai-provider.server";
-import { LeafIcon } from "../components/decor";
+import { UsageMeter } from "../components/UsageMeter";
 
 // ═══════════════════════════════════════════════════════════════════
 // Server
@@ -3185,9 +3185,14 @@ export default function StoreTransferPage() {
         <div className="flex items-center gap-2.5">
           <img src="/logo.png" alt="Importzo" style={{ height: 40, width: "auto", objectFit: "contain" }} />
           <span style={{ fontSize: 18, fontWeight: 600, color: P, fontFamily: F }} className="flex items-center gap-1.5">
-            Transfer Store <LeafIcon size={14} />
+            Transfer Store
           </span>
         </div>
+
+        {/* Quota, where it is about to be spent. A transfer can consume
+            thousands of records in one run, so "how many do I have left"
+            belongs on this page and not only on Billing. */}
+        <UsageMeter usage={usage} showUpgrade />
 
         {/* ── Direction banner — makes source/destination unambiguous ── */}
         <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">

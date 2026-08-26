@@ -7,7 +7,7 @@ import prisma from "../db.server";
 import { BRAND, JOB_TYPE_CONFIG, JOB_STATUS_MAP } from "../lib/constants";
 import { SUPPORT_EMAIL, mailtoLink, openLiveChat } from "../lib/support";
 import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
-import { DecorativeBanner, LeafIcon, EmptyStateIllustration } from "../components/decor";
+import { DecorativeBanner, EmptyStateIllustration } from "../components/decor";
 import { COLORS } from "../lib/design-tokens";
 import { PLANS, PLAN_IDS, yearlySavingsPercent } from "../lib/plans.js";
 
@@ -401,7 +401,6 @@ export default function Dashboard() {
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
           <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
             <h2 className="text-base font-semibold text-gray-900 flex items-center gap-1.5" style={{ fontFamily: font }}>
-              <LeafIcon size={14} />
               Recent Activity
             </h2>
             {imports.length > 0 && (
@@ -544,7 +543,6 @@ export default function Dashboard() {
         {/* ── Quick Tips (full decorative treatment) ── */}
         <DecorativeBanner cornerPosition="bottom-right" className="p-5 sm:p-6">
           <h2 className="text-base font-semibold text-gray-900 flex items-center gap-1.5 mb-3" style={{ fontFamily: font }}>
-            <LeafIcon size={14} />
             Quick Tips
           </h2>
           <ul className="space-y-2.5">
@@ -554,7 +552,11 @@ export default function Dashboard() {
               "Save a CSV column mapping as a template from any importer so you don't have to remap it next time.",
             ].map((tip) => (
               <li key={tip} className="flex items-start gap-2.5 text-sm text-gray-700">
-                <LeafIcon size={14} className="mt-0.5 flex-shrink-0" color={COLORS.leafDeep} />
+                <span
+                  aria-hidden="true"
+                  className="mt-1.5 flex-shrink-0 rounded-full"
+                  style={{ width: 5, height: 5, background: COLORS.washDeep }}
+                />
                 <span>{tip}</span>
               </li>
             ))}

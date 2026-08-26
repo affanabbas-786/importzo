@@ -7,6 +7,7 @@ import { authenticate, apiVersion } from "../shopify.server";
 import prisma from "../db.server";
 import { shopifyGraphql } from "../lib/shopify-api.server";
 import { getUsageStatus, setShopTier } from "../lib/usage.server";
+import { UsageMeter } from "../components/UsageMeter";
 import { checkAgencyEligibility, syncAgencyIneligibilityFlag } from "../lib/agency-eligibility.server";
 import { planSelectionUrl, resolveAppHandle } from "../lib/app-pricing.server";
 import {
@@ -310,52 +311,6 @@ async function cancelPlan({ billing, shop, token, version }) {
 
 const { primary: P, secondary: S, font: F } = BRAND;
 
-function UsageCard({ usage }) {
-  const pct = usage.isUnlimited ? 0 : Math.min(100, Math.round((usage.used / Math.max(usage.limit, 1)) * 100));
-  const atLimit = !usage.isUnlimited && usage.remaining === 0;
-  const intervalLabel = usage.interval === BILLING_INTERVAL.YEARLY
-    ? " · billed yearly"
-    : usage.interval === BILLING_INTERVAL.MONTHLY ? " · billed monthly" : "";
-
-  return (
-    <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
-      <div className="flex items-center justify-between flex-wrap gap-2">
-        <div>
-          <p className="text-sm font-semibold text-gray-900">Current plan: {usage.label}{intervalLabel}</p>
-          <p className="text-xs text-gray-500 mt-0.5">
-            {usage.isUnlimited
-              ? "Unlimited records this month"
-              : `${usage.used.toLocaleString()} / ${usage.limit.toLocaleString()} records used this month`}
-          </p>
-        </div>
-        {atLimit && (
-          <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-red-50 text-red-700">
-            Monthly limit reached
-          </span>
-        )}
-      </div>
-      {!usage.isUnlimited && (
-        <div className="mt-3 h-2 w-full rounded-full bg-gray-100 overflow-hidden">
-          <div
-            className="h-full rounded-full transition-all"
-            style={{ width: `${pct}%`, background: atLimit ? "#dc2626" : S }}
-          />
-        </div>
-      )}
-    </div>
-  );
-}
-
-UsageCard.propTypes = {
-  usage: PropTypes.shape({
-    label: PropTypes.string,
-    used: PropTypes.number,
-    limit: PropTypes.number,
-    remaining: PropTypes.number,
-    isUnlimited: PropTypes.bool,
-    interval: PropTypes.string,
-  }).isRequired,
-};
 
 /**
  * Phase 8 — the notice for a shop holding Agency without meeting the
@@ -655,7 +610,7 @@ export default function BillingPage() {
           <span style={{ fontSize: 18, fontWeight: 600, color: P, fontFamily: F }}>Billing</span>
         </div>
 
-        <UsageCard usage={usage} />
+        <UsageMeter usage={usage} showUpgrade />
 
         {showAgencyNotice && (
           <AgencyIneligibleNotice
