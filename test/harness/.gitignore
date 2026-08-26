@@ -1,0 +1,5 @@
+# Generated on first run — never commit these.
+certs/
+tmp/
+harness.sqlite
+harness.sqlite-*
