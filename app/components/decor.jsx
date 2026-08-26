@@ -78,18 +78,20 @@ export function EmptyStateIllustration({ size = 96, className = "" }) {
       </defs>
       <circle cx="48" cy="48" r="46" fill="url(#es-bg)" />
 
-      {/* Source card — lighter, "full" */}
-      <rect x="16" y="34" width="26" height="30" rx="5" fill="#fff" stroke={COLORS.secondary} strokeOpacity="0.35" />
-      <rect x="20" y="40" width="18" height="2.5" rx="1.25" fill={COLORS.secondary} fillOpacity="0.45" />
-      <rect x="20" y="46" width="13" height="2.5" rx="1.25" fill={COLORS.secondary} fillOpacity="0.3" />
-      <rect x="20" y="52" width="16" height="2.5" rx="1.25" fill={COLORS.secondary} fillOpacity="0.3" />
+      {/* Source — populated */}
+      <rect x="13" y="33" width="27" height="30" rx="5" fill="#fff" stroke={COLORS.secondary} strokeOpacity="0.4" strokeWidth="1.5" />
+      <rect x="18" y="40" width="17" height="3" rx="1.5" fill={COLORS.secondary} fillOpacity="0.5" />
+      <rect x="18" y="46.5" width="12" height="3" rx="1.5" fill={COLORS.secondary} fillOpacity="0.32" />
+      <rect x="18" y="53" width="15" height="3" rx="1.5" fill={COLORS.secondary} fillOpacity="0.32" />
 
-      {/* Destination card — outlined, "waiting" */}
-      <rect x="54" y="34" width="26" height="30" rx="5" fill="#fff" stroke={COLORS.secondary} strokeOpacity="0.25" strokeDasharray="3 3" />
+      {/* Destination — waiting */}
+      <rect x="56" y="33" width="27" height="30" rx="5" fill="#fff" stroke={COLORS.secondary} strokeOpacity="0.3" strokeWidth="1.5" strokeDasharray="4 3" />
 
-      {/* The move itself */}
-      <path d="M44 44c4-6 8-6 12 0" stroke={COLORS.primary} strokeOpacity="0.55" strokeWidth="2" strokeLinecap="round" fill="none" />
-      <path d="M52 40.5l4.5 3.5-4.5 3.5z" fill={COLORS.primary} fillOpacity="0.7" />
+      {/* The move, entirely inside the 16px gap between the two cards. The
+          previous arc ran from x=44 to x=56 — overlapping both cards — and
+          collapsed into a smudge at the 88px this actually renders at. */}
+      <path d="M43 48h8" stroke={COLORS.primary} strokeWidth="2.5" strokeLinecap="round" />
+      <path d="M50 43.5L54.5 48 50 52.5z" fill={COLORS.primary} />
     </svg>
   );
 }
