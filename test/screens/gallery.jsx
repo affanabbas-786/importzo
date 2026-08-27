@@ -14,6 +14,7 @@ import { MemoryRouter } from "react-router";
 import { PlanBadge } from "../../app/components/PlanBadge.jsx";
 import { UsageMeter } from "../../app/components/UsageMeter.jsx";
 import { DecorativeBanner, DecorativeCorner, EmptyStateIllustration } from "../../app/components/decor.jsx";
+import { SetupGuide } from "../../app/components/SetupGuide.jsx";
 import { BRAND } from "../../app/lib/constants.js";
 import { COLORS } from "../../app/lib/design-tokens.js";
 
@@ -36,6 +37,22 @@ Sec.propTypes = { title: PropTypes.string, children: PropTypes.node };
 const Page = () => (
   <MemoryRouter>
     <div style={{ maxWidth: 900, margin: "0 auto", padding: 28, background: "#fff" }}>
+
+      <Sec title="Onboarding · brand-new shop, nothing run yet (BFS 4.2.2)">
+        <SetupGuide setup={{ sourceShop: null, transfers: 0, csvImports: 0, lastRunAt: null }} />
+      </Sec>
+
+      <Sec title="Onboarding · source connected but still nothing run">
+        <SetupGuide setup={{ sourceShop: "old-store.myshopify.com", transfers: 0, csvImports: 0, lastRunAt: null }} />
+      </Sec>
+
+      <Sec title="Established shop · &quot;is it working?&quot; strip (BFS 4.2.3)">
+        <SetupGuide setup={{ sourceShop: "old-store.myshopify.com", transfers: 3, csvImports: 12, lastRunAt: "2026-08-26T07:37:00.000Z" }} />
+      </Sec>
+
+      <Sec title="Established shop · no source store (CSV-only merchant)">
+        <SetupGuide setup={{ sourceShop: null, transfers: 0, csvImports: 4, lastRunAt: "2026-08-25T11:00:00.000Z" }} />
+      </Sec>
 
       <Sec title="Plan badge · layout header, right-aligned (real component)">
         <div className="flex justify-end px-4 pt-3 -mb-1" style={{ border: "1px dashed #D9DCD2", borderRadius: 10 }}>

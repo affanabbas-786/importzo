@@ -10,20 +10,48 @@ import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
 import { DecorativeBanner, EmptyStateIllustration } from "../components/decor";
 import { COLORS } from "../lib/design-tokens";
 import { PLANS, PLAN_IDS, yearlySavingsPercent } from "../lib/plans.js";
+import { getSavedSourceStore } from "../lib/safe-db";
+import { SetupGuide } from "../components/SetupGuide";
+
+// Counting a model that may not exist yet (safe-db creates SourceStore
+// lazily) must not take the whole dashboard down with it.
+const countSafely = async (fn) => { try { return await fn(); } catch { return 0; } };
 
 export const loader = async ({ request }) => {
   const { session } = await authenticate.admin(request);
+  const shop = session.shop;
+
   let imports = [];
   try {
     imports = await prisma.importJob.findMany({
-      where: { shop: session.shop },
-      orderBy: { createdAt: "desc" },
-      take: 20,
+      where: { shop }, orderBy: { createdAt: "desc" }, take: 20,
     });
   } catch (err) {
     console.warn("[importzo] dashboard loader failed:", err?.message || err);
   }
-  return { imports };
+
+  // Setup state, for the first-run guide and for the "is this thing working?"
+  // line an established shop sees instead. Built for Shopify asks for both:
+  // 4.2.2 wants a concise onboarding, 4.2.3 wants the homepage to say whether
+  // the app is set up and working.
+  const [saved, migrations, themes] = await Promise.all([
+    getSavedSourceStore(shop).catch(() => null),
+    countSafely(() => prisma.migrationJob.count({ where: { shop } })),
+    countSafely(() => prisma.themeJob.count({ where: { shop } })),
+  ]);
+
+  const lastRun = imports[0]?.createdAt ?? null;
+
+  return {
+    imports,
+    setup: {
+      // The saved row carries a decrypted token — only the domain goes out.
+      sourceShop: saved?.sourceUrl || null,
+      transfers: migrations + themes,
+      csvImports: imports.length,
+      lastRunAt: lastRun ? new Date(lastRun).toISOString() : null,
+    },
+  };
 };
 
 const { primary, secondary, font } = BRAND;
@@ -280,7 +308,7 @@ function DashboardSkeleton() {
 }
 
 export default function Dashboard() {
-  const { imports } = useLoaderData();
+  const { imports, setup } = useLoaderData();
   const navigation = useNavigation();
   const [expanded, setExpanded] = useState({});
 
@@ -294,6 +322,7 @@ export default function Dashboard() {
   }
 
   // Stats
+  const hasStarted = !setup || setup.transfers > 0 || setup.csvImports > 0;
   const totalJobs = imports.length;
   const totalRecords = imports.reduce((s, i) => s + i.successCount + i.errorCount, 0);
   const totalFailed = imports.filter((i) => i.status === "failed").length;
@@ -311,7 +340,12 @@ export default function Dashboard() {
           <span style={{ fontSize: 18, fontWeight: 600, color: primary, fontFamily: font }}>Dashboard</span>
         </div>
 
+        {/* Onboarding on a shop that hasn't run anything yet, a "this is
+            working" line once it has. See SetupGuide. */}
+        <SetupGuide setup={setup} />
+
         {/* ── Welcome banner + 3 Primary Action Cards (full decorative treatment) ── */}
+        {hasStarted && (
         <DecorativeBanner className="p-5 sm:p-6">
           <p className="text-sm text-gray-600 mb-4 max-w-xl">
             Welcome back — start an import, export your catalog, or move data between stores.
@@ -372,6 +406,7 @@ export default function Dashboard() {
             </Link>
           </div>
         </DecorativeBanner>
+        )}
 
         {/* ── Summary Stats ── */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
