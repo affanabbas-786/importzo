@@ -17,11 +17,14 @@
 //     failures disable it with a reason the merchant can act on.
 // ═══════════════════════════════════════════════════════════════════
 
-export const FREQUENCY = Object.freeze({
-  HOURLY: "hourly",
-  DAILY: "daily",
-  WEEKLY: "weekly",
-});
+// Imported and re-exported, not defined here: the merchant-facing screen needs
+// these too, and a component importing from a *.server module drags Prisma and
+// shopify.server into the client build and fails it. The import (not just the
+// re-export) matters — this module uses FREQUENCY itself, and `export … from`
+// creates no local binding.
+import { FREQUENCY } from "./constants.js";
+
+export { FREQUENCY };
 
 // After this many consecutive failures a schedule disables itself rather than
 // hammering a store it can't authenticate against.

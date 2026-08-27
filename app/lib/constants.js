@@ -25,3 +25,14 @@ export const JOB_STATUS_MAP = {
   pending:              { dot: "bg-gray-400",                 bg: "bg-gray-50",  text: "text-gray-600",  label: "Pending" },
   importing:            { dot: "bg-green-500 animate-pulse",  bg: "bg-green-50", text: "text-green-700", label: "Running" },
 };
+
+// Scheduled-sync cadences. Defined here rather than in scheduler.server.js
+// because the merchant-facing screen needs them too, and importing anything
+// from a *.server module into a component drags the whole server graph —
+// Prisma, shopify.server — into the browser build and fails it outright.
+// scheduler.server.js re-exports these so server callers are unaffected.
+export const FREQUENCY = Object.freeze({
+  HOURLY: "hourly",
+  DAILY: "daily",
+  WEEKLY: "weekly",
+});

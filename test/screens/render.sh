@@ -33,6 +33,7 @@ cp "$CSS" "$WORK/tw.css"
 
 "$CHROME" --headless --disable-gpu --no-sandbox --hide-scrollbars \
   --force-device-scale-factor="${SCALE:-1.6}" --window-size="${SIZE:-980,1560}" \
+  --force-prefers-reduced-motion \
   --screenshot="$WORK/screens.png" "file://$WORK/screens.html" 2>&1 | grep -viE "upower|dbus|^\\[" || true
 
 cp "$WORK/screens.png" "$HERE/out/screens.png"

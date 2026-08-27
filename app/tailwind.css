@@ -265,6 +265,15 @@ s-page {
 @media (prefers-reduced-motion: reduce) {
   .iz-plan-cell--featured::after { animation: none; background: none; }
   .iz-period-toggle__option { transition: none; }
+
+  /* The page-level entrances were missing from this block. Each one starts its
+     keyframes at opacity 0, so a merchant who has asked for no motion was
+     still being given a fade on every navigation. `animation: none` leaves the
+     element at its own (fully opaque) resting state, so the content simply
+     appears — which is the point. */
+  .animate-fade-in,
+  .animate-slide-up,
+  .animate-scale-in { animation: none; }
 }
 
 /* --------------------------------------------------------- VIP badge -- */
