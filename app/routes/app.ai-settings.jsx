@@ -93,6 +93,15 @@ export default function AiSettingsPage() {
     actionFetcher.submit(fd, { method: "POST", action: "/api/ai-settings" });
   }, [apiKey, provider, model, suggestedModels, actionFetcher, shopify]);
 
+  // Discard: back to what is actually stored, not to component defaults. The
+  // key field is always cleared — it is write-only, and there is nothing to
+  // restore it to.
+  const handleDiscard = useCallback(() => {
+    setProvider(integration?.provider || "anthropic");
+    setModel(integration?.model || "");
+    setApiKey("");
+  }, [integration]);
+
   const handleRemove = useCallback(() => {
     const fd = new FormData();
     fd.append("intent", "delete");
@@ -150,7 +159,20 @@ export default function AiSettingsPage() {
             </div>
           )}
 
-          <div className="space-y-4">
+          {/* data-save-bar hands unsaved-change tracking to the admin's own
+              contextual save bar (Built for Shopify 4.1.5): App Bridge shows
+              it as soon as any value differs from its initial state and hides
+              it again on submit or reset. The provider is carried in a hidden
+              input because the selector is a row of buttons, and App Bridge
+              diffs form DATA — without this, switching provider would not
+              count as an unsaved change. */}
+          <form
+            className="space-y-4"
+            data-save-bar
+            onSubmit={(e) => { e.preventDefault(); handleSave(); }}
+            onReset={(e) => { e.preventDefault(); handleDiscard(); }}
+          >
+            <input type="hidden" name="provider" value={provider} readOnly />
             <div>
               <p className="text-sm font-medium text-gray-700 mb-2">Provider</p>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 max-w-lg">
@@ -223,12 +245,14 @@ export default function AiSettingsPage() {
               </>
             )}
 
-            <button type="button" onClick={handleSave} disabled={isSaving}
+            {/* Still here for the non-embedded case and for keyboard submit;
+                inside the admin the save bar is the primary affordance. */}
+            <button type="submit" disabled={isSaving}
               style={{ background: P, color: "#fff", borderRadius: 8, fontWeight: 600, fontFamily: F }}
               className="px-5 py-2.5 text-sm rounded-lg shadow-sm hover:brightness-110 transition-all active:scale-[0.98] disabled:opacity-50">
               {isSaving ? "Saving..." : "Save"}
             </button>
-          </div>
+          </form>
         </div>
 
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
