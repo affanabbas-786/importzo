@@ -226,7 +226,7 @@ export const action = async ({ request }) => {
 // ═══════════════════════════════════════════════════════════════════
 const P = "#17320A";
 const S = "#2E6316";
-const F = "'ImportzoFont', sans-serif";
+const F = "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
 
 const EXPORT_MODULES = {
   products:    { label: "Products",    desc: "All products with variants, images, pricing, and SKUs", intent: "export-products" },

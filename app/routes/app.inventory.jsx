@@ -389,7 +389,7 @@ export default function InventoryUpdatePage() {
       <div className="space-y-6 animate-fade-in">
         <div className="flex items-center gap-2.5">
           <img src="/logo.png" alt="Importzo" style={{ height: 40, width: "auto", objectFit: "contain" }} />
-          <span style={{ fontSize: 18, fontWeight: 600, color: "#17320A", fontFamily: "'ImportzoFont', sans-serif" }}>Inventory Update</span>
+          <span style={{ fontSize: 18, fontWeight: 600, color: "#17320A", fontFamily: "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" }}>Inventory Update</span>
         </div>
 
         {/* Info Banner */}
@@ -547,7 +547,7 @@ export default function InventoryUpdatePage() {
             <div className="flex items-center gap-3">
               <button onClick={() => setStep(STEP_UPLOAD)} className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">Back</button>
               <button onClick={() => setStep(STEP_PREVIEW)} disabled={!canProceed}
-                style={canProceed ? { background: primary, color: "#fff", borderRadius: 8, fontWeight: 600, fontFamily: "'ImportzoFont', sans-serif" } : { borderRadius: 8 }}
+                style={canProceed ? { background: primary, color: "#fff", borderRadius: 8, fontWeight: 600, fontFamily: "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" } : { borderRadius: 8 }}
                 className={`px-5 py-2 text-sm rounded-lg transition-all ${canProceed ? "shadow-sm hover:brightness-110 active:scale-[0.98]" : "bg-gray-200 text-gray-400 cursor-not-allowed"}`}>
                 Preview
               </button>
@@ -589,7 +589,7 @@ export default function InventoryUpdatePage() {
             </div>
             <div className="flex items-center gap-3">
               <button onClick={() => setStep(STEP_MAP)} className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">Back</button>
-              <button onClick={doUpdate} style={{ background: primary, color: "#fff", borderRadius: 8, fontWeight: 600, fontFamily: "'ImportzoFont', sans-serif" }}
+              <button onClick={doUpdate} style={{ background: primary, color: "#fff", borderRadius: 8, fontWeight: 600, fontFamily: "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" }}
                 className="px-5 py-2.5 text-sm rounded-lg shadow-sm hover:brightness-110 transition-all active:scale-[0.98]">
                 Update {items.length} SKU{items.length !== 1 ? "s" : ""}
               </button>
@@ -678,7 +678,7 @@ export default function InventoryUpdatePage() {
             </div>
 
             <div className="flex items-center gap-3">
-              <button onClick={resetUpdate} style={{ background: primary, color: "#fff", borderRadius: 8, fontWeight: 600, fontFamily: "'ImportzoFont', sans-serif" }} className="px-5 py-2.5 text-sm rounded-lg shadow-sm hover:brightness-110 transition-all">New Update</button>
+              <button onClick={resetUpdate} style={{ background: primary, color: "#fff", borderRadius: 8, fontWeight: 600, fontFamily: "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" }} className="px-5 py-2.5 text-sm rounded-lg shadow-sm hover:brightness-110 transition-all">New Update</button>
               <Link to="/app" className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">Dashboard</Link>
             </div>
           </div>

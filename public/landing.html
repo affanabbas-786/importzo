@@ -16,9 +16,13 @@
 <link rel="icon" href="/favicon.png" type="image/png">
 <link rel="apple-touch-icon" href="/favicon.png">
 
-<!-- The brand face is only used for headings; preload so the first paint of
-     the h1 doesn't flash the fallback stack. -->
-<link rel="preload" href="/myfonts.ttf" as="font" type="font/ttf" crossorigin>
+<!-- Inter for headings. Open-licensed (SIL OFL) and the same face the app
+     uses inside the Shopify admin, so the marketing page and the product read
+     as one thing. Replaced a self-hosted commercial font that was licensed for
+     personal, non-commercial use only. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap">
 
 <!-- Open Graph -->
 <meta property="og:type" content="website">
@@ -233,15 +237,6 @@
 </script>
 
 <style>
-/* ─── Font (same brand face the app uses for headings) ─────────── */
-@font-face {
-  font-family: 'ImportzoFont';
-  src: url('/myfonts.ttf') format('truetype');
-  font-weight: normal;
-  font-style: normal;
-  font-display: swap;
-}
-
 /* ─── Reset & Base ──────────────────────────────────────────── */
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 html{scroll-behavior:smooth;-webkit-text-size-adjust:100%}
@@ -255,7 +250,7 @@ body{
 }
 img{max-width:100%;display:block}
 a{color:inherit;text-decoration:none}
-h1,h2,h3{font-family:'ImportzoFont',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
+h1,h2,h3{font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
 
 /* ─── CSS Variables — same palette as the app (design-tokens.js) ─ */
 :root{

@@ -6,7 +6,7 @@
 export const BRAND = {
   primary: "#17320A",
   secondary: "#2E6316",
-  font: "'ImportzoFont', sans-serif",
+  font: "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
 };
 
 // Job type config — used in dashboard, activity, and hub pages

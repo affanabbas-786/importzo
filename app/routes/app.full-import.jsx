@@ -103,7 +103,7 @@ const MODULES = {
 const MODULE_KEYS = Object.keys(MODULES);
 const P = "#17320A";
 const S = "#2E6316";
-const F = "'ImportzoFont', sans-serif";
+const F = "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
 const STEPS = ["Configure", "Upload", "Map Fields", "Review", "Import", "Results"];
 const STEP_CONFIG = 0, STEP_UPLOAD = 1, STEP_MAP = 2, STEP_REVIEW = 3, STEP_IMPORT = 4, STEP_RESULTS = 5;
 

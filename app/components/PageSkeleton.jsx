@@ -7,7 +7,7 @@
 import PropTypes from "prop-types";
 
 const PRIMARY = "#17320A";
-const FONT = "'ImportzoFont', sans-serif";
+const FONT = "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
 
 function Shimmer({ className = "", style = {} }) {
   return <div className={`animate-shimmer rounded-lg ${className}`} style={{ backgroundColor: "#f3f4f6", ...style }} />;

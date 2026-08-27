@@ -2246,7 +2246,7 @@ export const action = async ({ request }) => {
 // ═══════════════════════════════════════════════════════════════════
 const P = "#17320A";
 const S = "#2E6316";
-const F = "'ImportzoFont', sans-serif";
+const F = "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
 
 const STEP_CONNECT = 0;
 const STEP_SCOPE = 1;

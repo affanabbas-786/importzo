@@ -1015,7 +1015,7 @@ export default function ImportPage() {
               fontSize: 18,
               fontWeight: 600,
               color: "#17320A",
-              fontFamily: "'ImportzoFont', sans-serif",
+              fontFamily: "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
             }}
           >
             Product Importer

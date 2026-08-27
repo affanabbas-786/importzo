@@ -435,7 +435,7 @@ export default function WooCommerceImportPage() {
       <div className="space-y-6 animate-fade-in">
         <div className="flex items-center gap-2.5">
           <img src="/logo.png" alt="Importzo" style={{ height: 40, width: "auto", objectFit: "contain" }} />
-          <span style={{ fontSize: 18, fontWeight: 600, color: "#17320A", fontFamily: "'ImportzoFont', sans-serif" }}>WooCommerce Import</span>
+          <span style={{ fontSize: 18, fontWeight: 600, color: "#17320A", fontFamily: "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" }}>WooCommerce Import</span>
         </div>
 
         {/* ── Step Indicator ── */}

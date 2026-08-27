@@ -11,7 +11,7 @@ export const loader = async ({ request }) => {
 
 const P = "#17320A";
 const S = "#2E6316";
-const F = "'ImportzoFont', sans-serif";
+const F = "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
 
 export default function ImportHub() {
   return (

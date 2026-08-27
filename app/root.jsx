@@ -13,6 +13,12 @@ import tailwindHref from "./tailwind.css?url";
 
 export const links = () => [
   { rel: "preconnect", href: "https://cdn.shopify.com/" },
+  // Inter, from Shopify's own CDN — the face the admin itself uses, so the app
+  // sits inside it rather than next to it. This replaced a self-hosted TTF that
+  // was a renamed copy of a commercial font (Zetafonts Codec Pro) licensed for
+  // personal, non-commercial use only, with redistribution expressly forbidden
+  // — and which shipped only a Regular weight, so every `font-weight: 600`
+  // heading in the app was rendering without a real bold.
   {
     rel: "stylesheet",
     href: "https://cdn.shopify.com/static/fonts/inter/v4/styles.css",
@@ -26,19 +32,6 @@ export function Layout({ children }) {
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width,initial-scale=1" />
-        <style
-          dangerouslySetInnerHTML={{
-            __html: `
-              @font-face {
-                font-family: 'ImportzoFont';
-                src: url('/myfonts.ttf') format('truetype');
-                font-weight: normal;
-                font-style: normal;
-                font-display: swap;
-              }
-            `,
-          }}
-        />
         <Meta />
         <Links />
       </head>
@@ -98,7 +91,7 @@ export function ErrorBoundary() {
         maxWidth: 480,
         margin: "80px auto",
         textAlign: "center",
-        fontFamily: "'ImportzoFont', Inter, system-ui, sans-serif",
+        fontFamily: "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
         padding: "0 24px",
       }}
     >

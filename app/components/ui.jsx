@@ -7,7 +7,7 @@ import PropTypes from "prop-types";
 
 const P = "#17320A";
 const S = "#2E6316";
-const F = "'ImportzoFont', sans-serif";
+const F = "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
 
 // ── Status Badge ──
 // Unified status rendering: "success" | "error" | "warning" | "info" | "pending" | "protected"
