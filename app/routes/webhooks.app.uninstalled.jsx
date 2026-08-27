@@ -2,9 +2,9 @@ import { authenticateWebhook } from "../lib/webhook-auth.server";
 import db from "../db.server";
 
 export const action = async ({ request }) => {
-  let shop, session, topic;
+  let shop, topic;
   try {
-    ({ shop, session, topic } = await authenticateWebhook(request));
+    ({ shop, topic } = await authenticateWebhook(request));
   } catch (error) {
     // authenticateWebhook() tries to refresh the offline token before
     // returning. On app/uninstalled the token is already revoked, so the
