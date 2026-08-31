@@ -15,6 +15,17 @@
 // ═══════════════════════════════════════════════════════════════════
 
 import { clearStagedAssets, deleteThemeZipNow } from "./theme-zip.server.js";
+import { isComplimentary } from "./plans.js";
+
+// Personal-data fields on ShopPlan. On shop/redact these are erased even when
+// the row itself is retained for a complimentary grant (see deleteShopData) —
+// GDPR requires the personal data to go; it does not require throwing away a
+// deliberate, unbilled free grant that has no billing record anywhere else.
+const SHOPPLAN_PII_FIELDS = Object.freeze({
+  shopOwnerEmail: null, // Admin `shop { email }` — a person's contact address
+  recordsUsed: 0,       // activity signal; meaningless without an active install
+  aiCallsUsed: 0,       // same
+});
 
 // Models keyed by the shop domain, deleted wholesale on shop/redact.
 // Order matters: children before parents, so a partial failure can't
@@ -101,6 +112,38 @@ export async function deleteShopData(prisma, shop) {
 
   for (const model of SHOP_SCOPED_MODELS) {
     try {
+      // ShopPlan carries a complimentary Pro grant (tier=pro,
+      // subscriptionStatus=COMPLIMENTARY) that has NO Shopify AppSubscription
+      // behind it — this row is the only record of the grant anywhere. Hard-
+      // deleting it on shop/redact silently revokes a deliberate, permanent
+      // free grant the moment the merchant reinstalls. So for those rows we
+      // erase the personal data (shopOwnerEmail + usage counters) and keep
+      // only the non-personal grant state (shop, tier, subscriptionStatus).
+      // Every other shop's ShopPlan row is still deleted wholesale below.
+      //
+      // A failed grant-check falls through to the normal delete: erasing is
+      // the fail-safe outcome for a GDPR path.
+      if (model === "shopPlan") {
+        let grantRetained = false;
+        try {
+          const plan = await prisma.shopPlan.findUnique({
+            where: { shop },
+            select: { subscriptionStatus: true },
+          });
+          if (plan && isComplimentary(plan.subscriptionStatus)) {
+            await prisma.shopPlan.update({ where: { shop }, data: { ...SHOPPLAN_PII_FIELDS } });
+            deleted[model] = 0;
+            deleted["shopPlan(grant retained, PII erased)"] = 1;
+            grantRetained = true;
+          }
+        } catch (err) {
+          // Could not check or could not strip PII — fall through to the
+          // wholesale delete below. Erasing is the fail-safe for a GDPR path.
+          console.warn(`[shop/redact] ${shop}: complimentary-grant check failed, deleting ShopPlan row:`, err?.message);
+        }
+        if (grantRetained) continue;
+      }
+
       const where = JOB_SCOPED_MODELS.includes(model)
         ? { jobId: { in: jobIds } }
         : (CUSTOM_SHOP_FILTERS[model]?.(shop) ?? { shop });

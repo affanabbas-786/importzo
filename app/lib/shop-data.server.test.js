@@ -5,15 +5,22 @@ import {
   SHOP_SCOPED_MODELS, EXEMPT_MODELS, deleteShopData, summarizeErasure,
 } from "./shop-data.server.js";
 
-function fakePrisma({ jobs = [], failOn = [] } = {}) {
+function fakePrisma({ jobs = [], failOn = [], shopPlan = { subscriptionStatus: null } } = {}) {
   const calls = [];
   const model = (name) => ({
     deleteMany: vi.fn(async ({ where }) => {
-      calls.push({ model: name, where });
+      calls.push({ model: name, op: "deleteMany", where });
       if (failOn.includes(name)) throw new Error(`no such table: ${name}`);
       return { count: 1 };
     }),
     findMany: vi.fn(async () => jobs),
+    // Only ShopPlan's grant-check reads these; harmless for the rest.
+    findUnique: vi.fn(async () => (name === "shopPlan" ? shopPlan : null)),
+    update: vi.fn(async ({ where, data }) => {
+      calls.push({ model: name, op: "update", where, data });
+      if (failOn.includes(name)) throw new Error(`no such table: ${name}`);
+      return { count: 1 };
+    }),
   });
 
   const prisma = {};
@@ -233,6 +240,65 @@ describe("deleteShopData", () => {
     expect(Object.keys(deleted)).toHaveLength(0);
     expect(errors[0].error).toMatch(/No shop domain/);
     expect(prisma.__calls()).toEqual([]);
+  });
+
+  it("hard-deletes a normal (non-complimentary) ShopPlan row", async () => {
+    const prisma = fakePrisma({ jobs: [], shopPlan: { subscriptionStatus: null } });
+    await deleteShopData(prisma, SHOP);
+
+    const planCalls = prisma.__calls().filter((c) => c.model === "shopPlan");
+    expect(planCalls).toHaveLength(1);
+    expect(planCalls[0].op).toBe("deleteMany");
+    expect(planCalls[0].where).toEqual({ shop: SHOP });
+  });
+
+  it("retains a complimentary-grant ShopPlan row but erases its PII", async () => {
+    // A complimentary Pro grant (tier=pro, subscriptionStatus=COMPLIMENTARY)
+    // has no Shopify subscription behind it — the row IS the grant. Erasing
+    // it on shop/redact silently revokes a deliberate permanent free grant
+    // if the merchant reinstalls. GDPR requires the personal data to go, not
+    // the grant state.
+    const prisma = fakePrisma({ jobs: [], shopPlan: { subscriptionStatus: "COMPLIMENTARY" } });
+    const { deleted, errors } = await deleteShopData(prisma, SHOP);
+
+    expect(errors).toEqual([]);
+
+    const planCalls = prisma.__calls().filter((c) => c.model === "shopPlan");
+    expect(planCalls).toHaveLength(1);
+    expect(planCalls[0].op).toBe("update"); // not deleteMany
+    expect(planCalls[0].where).toEqual({ shop: SHOP });
+    // shopOwnerEmail is the PII field; usage counters are reset too.
+    expect(planCalls[0].data.shopOwnerEmail).toBeNull();
+    expect(planCalls[0].data.recordsUsed).toBe(0);
+    expect(planCalls[0].data.aiCallsUsed).toBe(0);
+    // tier / subscriptionStatus are NOT touched — the grant must survive.
+    expect(planCalls[0].data).not.toHaveProperty("tier");
+    expect(planCalls[0].data).not.toHaveProperty("subscriptionStatus");
+
+    expect(deleted.shopPlan).toBe(0);
+    expect(deleted["shopPlan(grant retained, PII erased)"]).toBe(1);
+  });
+
+  it("still erases every other model when a complimentary ShopPlan is retained", async () => {
+    const prisma = fakePrisma({ jobs: [{ id: "job-1" }], shopPlan: { subscriptionStatus: "COMPLIMENTARY" } });
+    await deleteShopData(prisma, SHOP);
+    const touched = prisma.__calls();
+
+    expect(touched.find((c) => c.model === "session" && c.op === "deleteMany")).toBeTruthy();
+    expect(touched.find((c) => c.model === "migrationJob" && c.op === "deleteMany")).toBeTruthy();
+    expect(touched.find((c) => c.model === "aiIntegration" && c.op === "deleteMany")).toBeTruthy();
+  });
+
+  it("falls back to deleting the ShopPlan row if the grant-check throws", async () => {
+    // Erasing is the fail-safe outcome for a GDPR path.
+    const prisma = fakePrisma({ jobs: [], shopPlan: { subscriptionStatus: "COMPLIMENTARY" } });
+    prisma.shopPlan.findUnique = vi.fn(async () => { throw new Error("db locked"); });
+
+    await deleteShopData(prisma, SHOP);
+
+    const planCalls = prisma.__calls().filter((c) => c.model === "shopPlan");
+    expect(planCalls).toHaveLength(1);
+    expect(planCalls[0].op).toBe("deleteMany");
   });
 
   it("survives the job lookup itself failing", async () => {
