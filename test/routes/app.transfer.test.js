@@ -105,9 +105,15 @@ function makeContentTransferFetch({ sourceFiles = [], destExistingFilenames = []
         return jsonResponse({
           data: {
             files: {
+              // __typename defaults to GenericFile (the shape every
+              // pre-existing test here assumes); a fixture can override it
+              // (and supply `sources`) to model a Video/Model3d node instead
+              // — see the video-source-selection regression tests below.
               edges: sourceFiles.map((f, i) => ({
                 cursor: String(i),
-                node: { id: `gid://shopify/GenericFile/${i}`, alt: f.filename, fileStatus: "READY", url: f.originalSource },
+                node: f.__typename && f.__typename !== "GenericFile"
+                  ? { __typename: f.__typename, id: `gid://shopify/${f.__typename}/${i}`, alt: f.filename, fileStatus: "READY", sources: f.sources }
+                  : { __typename: "GenericFile", id: `gid://shopify/GenericFile/${i}`, alt: f.filename, fileStatus: "READY", url: f.originalSource },
               })),
               pageInfo: { hasNextPage: false },
             },
@@ -120,7 +126,7 @@ function makeContentTransferFetch({ sourceFiles = [], destExistingFilenames = []
             files: {
               edges: destExistingFilenames.map((filename, i) => ({
                 cursor: String(i),
-                node: { id: `gid://shopify/GenericFile/dest-${i}`, alt: filename, fileStatus: "READY", url: `https://${DEST_SHOP}/cdn/shop/files/${filename}` },
+                node: { __typename: "GenericFile", id: `gid://shopify/GenericFile/dest-${i}`, alt: filename, fileStatus: "READY", url: `https://${DEST_SHOP}/cdn/shop/files/${filename}` },
               })),
               pageInfo: { hasNextPage: false },
             },
@@ -597,6 +603,135 @@ describe("app.transfer action — transfer-content (pages, menus, metafields)", 
   });
 });
 
+// Regression coverage for menu-link resolution: previously the source menu's
+// raw type/url were forwarded to the destination verbatim, with nothing
+// resolving them against what was actually created there. Two specific,
+// fixable cases:
+//   - SHOP_POLICY items are unresolvable BY CONSTRUCTION (Shopify policies
+//     are read-only via API, so no real policy resource is ever created on
+//     the destination) — these must be rewritten to point at the policy-page
+//     substitute this app creates instead.
+//   - COLLECTION items may point at a collection that was never transferred
+//     because collections are a separate module/intent — flagged with a
+//     clear warning rather than left silently broken.
+describe("app.transfer action — transfer-content menu link resolution", () => {
+  beforeEach(() => {
+    global.fetch = vi.fn();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function menuLinkFetchMock({ collectionHandles = null, includeCollectionItem = true } = {}) {
+    return vi.fn(async (url, opts) => {
+      const body = opts?.body ? JSON.parse(opts.body) : {};
+      const query = body.query || "";
+      if (query.includes("query StoreFiles")) return emptyEdges("files");
+      if (query.includes("query SourcePages")) return emptyEdges("pages");
+      if (query.includes("query SourceBlogs")) return emptyEdges("blogs");
+      if (query.includes("query SourcePolicies")) {
+        return jsonResponse({
+          data: {
+            shop: {
+              shopPolicies: [{
+                id: "gid://shopify/ShopPolicy/1", title: "Refund Policy", body: "<p>Refunds within 30 days.</p>",
+                type: "REFUND_POLICY", url: `https://${SOURCE_SHOP}/policies/refund-policy`,
+              }],
+            },
+          },
+        });
+      }
+      if (query.includes("query FindPage")) return jsonResponse({ data: { pages: { edges: [] } } }); // policy-page doesn't exist yet
+      if (query.includes("mutation PageCreate")) return jsonResponse({ data: { pageCreate: { page: { id: "gid://shopify/Page/policy-1" }, userErrors: [] } } });
+      if (query.includes("query Menus")) {
+        const items = [
+          { title: "Refund Policy", type: "SHOP_POLICY", url: "/policies/refund-policy", tags: [], items: [] },
+        ];
+        if (includeCollectionItem) {
+          items.push({ title: "Summer Sale", type: "COLLECTION", url: "/collections/summer-sale", tags: [], items: [] });
+        }
+        return jsonResponse({
+          data: {
+            menus: {
+              edges: [{ cursor: "1", node: { id: "gid://shopify/Menu/1", title: "Main menu", handle: "main-menu", isDefault: true, items } }],
+              pageInfo: { hasNextPage: false },
+            },
+          },
+        });
+      }
+      if (query.includes("query TargetMenus")) return jsonResponse({ data: { menus: { edges: [] } } });
+      if (query.includes("query TargetCollectionHandles")) {
+        return jsonResponse({
+          data: {
+            collections: {
+              edges: (collectionHandles || []).map((handle, i) => ({ cursor: String(i), node: { handle } })),
+              pageInfo: { hasNextPage: false },
+            },
+          },
+        });
+      }
+      if (query.includes("mutation CreateMenu")) {
+        return jsonResponse({ data: { menuCreate: { menu: { id: "gid://shopify/Menu/new-1", handle: "main-menu" }, userErrors: [] } }, __itemsSent: body.variables.items });
+      }
+      throw new Error(`Unexpected fetch in menu-link-resolution test: ${query.slice(0, 100)}`);
+    });
+  }
+
+  it("rewrites a SHOP_POLICY menu item to point at the policy-page it was actually copied as", async () => {
+    const fetchSpy = menuLinkFetchMock({ collectionHandles: ["summer-sale"] });
+    global.fetch = fetchSpy;
+
+    const req = mockActionRequest({ intent: "transfer-content", sourceUrl: SOURCE_SHOP, sourceToken: "src-token" });
+    await action({ request: req });
+
+    const createCall = fetchSpy.mock.calls.find((c) => {
+      const b = c[1]?.body ? JSON.parse(c[1].body) : {};
+      return (b.query || "").includes("mutation CreateMenu");
+    });
+    const submitted = JSON.parse(createCall[1].body).variables.items;
+    const policyItem = submitted.find((it) => it.title === "Refund Policy");
+    expect(policyItem.type).toBe("PAGE");
+    expect(policyItem.url).toBe("/pages/policy-refund-policy");
+  });
+
+  it("flags (without crashing the transfer) a COLLECTION link whose collection doesn't exist on the destination yet", async () => {
+    global.fetch = menuLinkFetchMock({ collectionHandles: [] }); // destination has no collections at all
+
+    const req = mockActionRequest({ intent: "transfer-content", sourceUrl: SOURCE_SHOP, sourceToken: "src-token" });
+    const result = await action({ request: req });
+
+    const menuResult = result.results.find((r) => r.type === "menus");
+    expect(menuResult.status).toBe("success"); // still succeeds — a warning, not a failure
+    const menuDetail = menuResult.results[0];
+    expect(menuDetail.warnings.some((w) => /collection.*doesn't exist on the destination/i.test(w))).toBe(true);
+  });
+
+  it("does not flag a COLLECTION link whose collection already exists on the destination", async () => {
+    global.fetch = menuLinkFetchMock({ collectionHandles: ["summer-sale"] });
+
+    const req = mockActionRequest({ intent: "transfer-content", sourceUrl: SOURCE_SHOP, sourceToken: "src-token" });
+    const result = await action({ request: req });
+
+    const menuDetail = result.results.find((r) => r.type === "menus").results[0];
+    expect(menuDetail.warnings.some((w) => /collection/i.test(w))).toBe(false);
+  });
+
+  it("never queries target collections when no source menu links to one (zero extra API cost in the common case)", async () => {
+    const fetchSpy = menuLinkFetchMock({ includeCollectionItem: false });
+    global.fetch = fetchSpy;
+
+    const req = mockActionRequest({ intent: "transfer-content", sourceUrl: SOURCE_SHOP, sourceToken: "src-token" });
+    await action({ request: req });
+
+    const calledCollectionHandles = fetchSpy.mock.calls.some((c) => {
+      const b = c[1]?.body ? JSON.parse(c[1].body) : {};
+      return (b.query || "").includes("query TargetCollectionHandles");
+    });
+    expect(calledCollectionHandles).toBe(false);
+  });
+});
+
 describe("app.transfer action — transfer-content idempotency (file dedupe)", () => {
   beforeEach(() => {
     global.fetch = vi.fn();
@@ -662,6 +797,92 @@ describe("app.transfer action — transfer-content idempotency (file dedupe)", (
     const fileResult = result.results.find((r) => r.type === "files");
     expect(fileResult.status).toBe("dry-run");
     expect(fetchSpy.mock.calls.some((c) => c[0].startsWith(`https://${DEST_SHOP}`))).toBe(false);
+  });
+});
+
+// Regression coverage for the "Invalid video url" bug: fileNodeToOriginalSourceAndType
+// used to take the FIRST https URL out of a Video node's sources[] regardless of
+// format, which can select an HLS manifest (.m3u8 — a playlist of segment files,
+// not one fetchable video) instead of an actual mp4 file. fileCreate's
+// originalSource needs a single real file, so submitting the manifest is what
+// produced Shopify's "Invalid video url" userError.
+describe("app.transfer action — transfer-content video source selection", () => {
+  beforeEach(() => {
+    global.fetch = vi.fn();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("prefers the mp4-format source over an HLS manifest when both are present", async () => {
+    let submittedFiles = null;
+    global.fetch = makeContentTransferFetch({
+      sourceFiles: [{
+        filename: "clip",
+        __typename: "Video",
+        sources: [
+          { url: `https://${SOURCE_SHOP}/videos/clip.m3u8`, mimeType: "application/x-mpegURL", format: "m3u8" },
+          { url: `https://${SOURCE_SHOP}/videos/clip.mp4`, mimeType: "video/mp4", format: "mp4" },
+        ],
+      }],
+      fileCreateHandler: (body) => {
+        submittedFiles = body.variables?.files;
+        return jsonResponse({ data: { fileCreate: { files: [{ id: "gid://shopify/Video/new-1", fileStatus: "READY" }], userErrors: [] } } });
+      },
+    });
+    const req = mockActionRequest({ intent: "transfer-content", sourceUrl: SOURCE_SHOP, sourceToken: "src-token" });
+    const result = await action({ request: req });
+
+    expect(submittedFiles).toHaveLength(1);
+    expect(submittedFiles[0].originalSource).toBe(`https://${SOURCE_SHOP}/videos/clip.mp4`);
+    expect(submittedFiles[0].contentType).toBe("VIDEO");
+    const fileResult = result.results.find((r) => r.type === "files");
+    expect(fileResult.copied).toBe(1);
+    expect(fileResult.warnings).toEqual([]);
+  });
+
+  it("skips (with a warning, not a submission) a video with only a manifest source and no real file", async () => {
+    let fileCreateCalled = false;
+    global.fetch = makeContentTransferFetch({
+      sourceFiles: [{
+        filename: "clip",
+        __typename: "Video",
+        sources: [{ url: `https://${SOURCE_SHOP}/videos/clip.m3u8`, mimeType: "application/x-mpegURL", format: "m3u8" }],
+      }],
+      fileCreateHandler: (body) => {
+        fileCreateCalled = true;
+        return jsonResponse({ data: { fileCreate: { files: [], userErrors: [] } } });
+      },
+    });
+    const req = mockActionRequest({ intent: "transfer-content", sourceUrl: SOURCE_SHOP, sourceToken: "src-token" });
+    const result = await action({ request: req });
+
+    expect(fileCreateCalled).toBe(false); // never submitted a guess likely to fail
+    const fileResult = result.results.find((r) => r.type === "files");
+    expect(fileResult.total).toBe(0); // not counted as a transferable item at all
+    expect(fileResult.warnings.some((w) => /no direct, single-file source/i.test(w))).toBe(true);
+  });
+
+  it("classifies contentType from the GraphQL node type, not by sniffing the URL", async () => {
+    // A hash-based Shopify video CDN URL with no recognizable file extension —
+    // exactly the case the old mediaContentTypeFromUrl(url) sniffing missed.
+    let submittedFiles = null;
+    global.fetch = makeContentTransferFetch({
+      sourceFiles: [{
+        filename: "clip",
+        __typename: "Video",
+        sources: [{ url: `https://cdn.shopify.com/videos/c/vp/${"a".repeat(32)}/output`, mimeType: "video/mp4", format: "mp4" }],
+      }],
+      fileCreateHandler: (body) => {
+        submittedFiles = body.variables?.files;
+        return jsonResponse({ data: { fileCreate: { files: [{ id: "gid://shopify/Video/new-1", fileStatus: "READY" }], userErrors: [] } } });
+      },
+    });
+    const req = mockActionRequest({ intent: "transfer-content", sourceUrl: SOURCE_SHOP, sourceToken: "src-token" });
+    await action({ request: req });
+
+    expect(submittedFiles[0].contentType).toBe("VIDEO");
   });
 });
 
