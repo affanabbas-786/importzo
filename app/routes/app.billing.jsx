@@ -13,7 +13,7 @@ import { planSelectionUrl, resolveAppHandle } from "../lib/app-pricing.server";
 import {
   PLAN_IDS, PLANS, AGENCY_MIN_STORES, BILLING_INTERVAL, billingPlanKey,
   tierFromSubscriptionName, intervalFromShopifyInterval, yearlySavingsPercent,
-  isComplimentary,
+  isComplimentary, agencyPartnerBillingPlanKey,
 } from "../lib/plans.js";
 import { isTestCharge, isManagedPricingRejection, describeBillingError } from "../lib/billing-mode.server";
 import { trialDaysOverrideFor } from "../lib/billing-trial.server";
@@ -197,7 +197,17 @@ export const action = async ({ request }) => {
 
   const tier = String(formData.get("plan") || "");
   const interval = String(formData.get("interval") || BILLING_INTERVAL.MONTHLY);
-  const planKey = billingPlanKey(tier, interval);
+
+  // Phase 12 — Partner/Agency linking. app.partners.jsx's "Update
+  // subscription" button posts here with an explicit partnerCount so the
+  // Agency charge reflects the shop's live linked-partner count ($10 base +
+  // $7/partner) instead of the flat base price. Only meaningful for Agency —
+  // Pro's price never varies with partner count — and only when present, so
+  // every other select-plan caller (the plan cards below) is unaffected.
+  const partnerCountRaw = formData.get("partnerCount");
+  const planKey = tier === PLAN_IDS.AGENCY && partnerCountRaw !== null
+    ? agencyPartnerBillingPlanKey(Number(partnerCountRaw) || 0, interval)
+    : billingPlanKey(tier, interval);
 
   if (!planKey) {
     return Response.json(

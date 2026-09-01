@@ -3,6 +3,7 @@ import {
   PLANS, PLAN_IDS, PLAN_ORDER, TRIAL_DAYS, BILLING_INTERVAL,
   yearlySavingsPercent, hasYearlyOption,
   tierFromSubscriptionName, intervalFromShopifyInterval,
+  agencyPartnerPrice, agencyPartnerBillingPlanKey, AGENCY_PARTNER_ADDON,
 } from "../../app/lib/plans.js";
 
 // ═══════════════════════════════════════════════════════════════════
@@ -91,6 +92,58 @@ describe("tierFromSubscriptionName", () => {
   // substring doesn't get promoted to a paid tier.
   it("does not match 'pro' buried inside an unrelated word", () => {
     expect(tierFromSubscriptionName("Approved")).toBeNull();
+  });
+});
+
+// Phase 12 — Partner/Agency linking. Same reasoning as the block above:
+// these are the exact numbers a merchant is charged, pinned so a formula
+// tweak that silently re-prices the app fails loudly here first.
+describe("agencyPartnerPrice", () => {
+  it("adds $7/month per linked partner on top of the $10 Agency base", () => {
+    expect(AGENCY_PARTNER_ADDON).toBe(7);
+    expect(agencyPartnerPrice(0, BILLING_INTERVAL.MONTHLY)).toBe(10);
+    expect(agencyPartnerPrice(1, BILLING_INTERVAL.MONTHLY)).toBe(17);
+    expect(agencyPartnerPrice(3, BILLING_INTERVAL.MONTHLY)).toBe(31);
+    expect(agencyPartnerPrice(5, BILLING_INTERVAL.MONTHLY)).toBe(45);
+  });
+
+  it("defaults to monthly when no interval is given", () => {
+    expect(agencyPartnerPrice(2)).toBe(24);
+  });
+
+  it("applies the SAME discount ratio as the base Agency yearly price (96 vs 120 = 20% off)", () => {
+    expect(agencyPartnerPrice(0, BILLING_INTERVAL.YEARLY)).toBe(96); // matches PLANS.agency.priceYearly exactly
+    expect(agencyPartnerPrice(1, BILLING_INTERVAL.YEARLY)).toBe(163); // 17*12*0.8 = 163.2 -> 163
+    expect(agencyPartnerPrice(2, BILLING_INTERVAL.YEARLY)).toBe(230); // 24*12*0.8 = 230.4 -> 230
+    expect(agencyPartnerPrice(3, BILLING_INTERVAL.YEARLY)).toBe(298); // 31*12*0.8 = 297.6 -> 298
+    expect(agencyPartnerPrice(4, BILLING_INTERVAL.YEARLY)).toBe(365); // 38*12*0.8 = 364.8 -> 365
+    expect(agencyPartnerPrice(5, BILLING_INTERVAL.YEARLY)).toBe(432); // 45*12*0.8 = 432.0 -> 432
+  });
+});
+
+describe("agencyPartnerBillingPlanKey", () => {
+  it("reuses the existing base Agency key, unchanged, for zero partners", () => {
+    expect(agencyPartnerBillingPlanKey(0, BILLING_INTERVAL.MONTHLY)).toBe("Importzo Agency Monthly");
+    expect(agencyPartnerBillingPlanKey(0, BILLING_INTERVAL.YEARLY)).toBe("Importzo Agency Yearly");
+  });
+
+  it("generates a distinct, singular/plural-correct key per partner count", () => {
+    expect(agencyPartnerBillingPlanKey(1, BILLING_INTERVAL.MONTHLY)).toBe("Importzo Agency Monthly — 1 Partner");
+    expect(agencyPartnerBillingPlanKey(3, BILLING_INTERVAL.MONTHLY)).toBe("Importzo Agency Monthly — 3 Partners");
+    expect(agencyPartnerBillingPlanKey(5, BILLING_INTERVAL.YEARLY)).toBe("Importzo Agency Yearly — 5 Partners");
+  });
+
+  // The whole point of building these as named-key extensions of the base
+  // Agency key: app.billing.jsx's reconciliation must keep recognising them
+  // as Agency with NO changes, since it matches on a keyword, not an exact
+  // name.
+  it("every generated key still round-trips through tierFromSubscriptionName as agency", () => {
+    for (let count = 0; count <= PLANS[PLAN_IDS.AGENCY].maxPartners; count++) {
+      for (const interval of [BILLING_INTERVAL.MONTHLY, BILLING_INTERVAL.YEARLY]) {
+        const key = agencyPartnerBillingPlanKey(count, interval);
+        expect(tierFromSubscriptionName(key)).toBe(PLAN_IDS.AGENCY);
+      }
+    }
   });
 });
 

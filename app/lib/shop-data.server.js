@@ -15,7 +15,7 @@
 // ═══════════════════════════════════════════════════════════════════
 
 import { clearStagedAssets, deleteThemeZipNow } from "./theme-zip.server.js";
-import { isComplimentary } from "./plans.js";
+import { isComplimentary, isPartnerLinked } from "./plans.js";
 
 // Personal-data fields on ShopPlan. On shop/redact these are erased even when
 // the row itself is retained for a complimentary grant (see deleteShopData) —
@@ -121,6 +121,13 @@ export async function deleteShopData(prisma, shop) {
       // only the non-personal grant state (shop, tier, subscriptionStatus).
       // Every other shop's ShopPlan row is still deleted wholesale below.
       //
+      // Phase 12 — a partner-linked grant (subscriptionStatus=PARTNER_LINKED)
+      // is the same shape for the same reason: no Shopify subscription of
+      // its own, funded entirely by another shop's (see
+      // partner-linking.server.js). partnerLinkedTo itself is a business
+      // linkage between two merchant accounts, not personal data, so it is
+      // left untouched here — same treatment as tier/subscriptionStatus.
+      //
       // A failed grant-check falls through to the normal delete: erasing is
       // the fail-safe outcome for a GDPR path.
       if (model === "shopPlan") {
@@ -130,7 +137,7 @@ export async function deleteShopData(prisma, shop) {
             where: { shop },
             select: { subscriptionStatus: true },
           });
-          if (plan && isComplimentary(plan.subscriptionStatus)) {
+          if (plan && (isComplimentary(plan.subscriptionStatus) || isPartnerLinked(plan.subscriptionStatus))) {
             await prisma.shopPlan.update({ where: { shop }, data: { ...SHOPPLAN_PII_FIELDS } });
             deleted[model] = 0;
             deleted["shopPlan(grant retained, PII erased)"] = 1;

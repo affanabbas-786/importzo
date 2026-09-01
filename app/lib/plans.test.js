@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   PLAN_IDS, PLANS, PLAN_ORDER, SHOPIFY_PLAN_NAME, AGENCY_MIN_STORES, AI_MONTHLY_CALL_CAP,
   isValidPlanId, getPlan, isUnlimited, scheduledSyncAllowed, isBillablePlanId, builtInAiAllowed,
+  maxPartnersFor, isPartnerLinked, PARTNER_LINKED_STATUS,
 } from "./plans.js";
 
 describe("plans.js", () => {
@@ -78,5 +79,23 @@ describe("plans.js", () => {
 
   it("AI_MONTHLY_CALL_CAP matches the product spec (500/month, shared)", () => {
     expect(AI_MONTHLY_CALL_CAP).toBe(500);
+  });
+
+  // Phase 12 — Partner/Agency linking.
+  it("caps partner slots per the product spec: Free 0, Pro 1, Agency 5", () => {
+    expect(maxPartnersFor(PLAN_IDS.FREE)).toBe(0);
+    expect(maxPartnersFor(PLAN_IDS.PRO)).toBe(1);
+    expect(maxPartnersFor(PLAN_IDS.AGENCY)).toBe(5);
+  });
+
+  it("maxPartnersFor falls back to 0 for an unknown tier rather than throwing", () => {
+    expect(maxPartnersFor("bogus")).toBe(0);
+  });
+
+  it("isPartnerLinked recognises only the exact marker string", () => {
+    expect(isPartnerLinked(PARTNER_LINKED_STATUS)).toBe(true);
+    expect(isPartnerLinked("ACTIVE")).toBe(false);
+    expect(isPartnerLinked("COMPLIMENTARY")).toBe(false);
+    expect(isPartnerLinked(null)).toBe(false);
   });
 });

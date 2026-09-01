@@ -320,10 +320,21 @@ model ShopPlan {
   // anything. Resets monthly on the same cadence as recordsUsed.
   aiCallsUsed           Int       @default(0)
   aiUsagePeriodStart    DateTime  @default(now())
+  // Phase 12 — Partner/Agency linking. A payer (A) funds Pro-equivalent
+  // access on other stores (B) it manages through its own subscription; B
+  // never touches Shopify Billing. B's row is authoritative for "who's
+  // paying for me" — A's linked partners are queried live by
+  // partnerLinkedTo rather than stored as a redundant array on A, mirroring
+  // agency-eligibility.server.js's countMerchantStores. See
+  // partner-linking.server.js.
+  partnerLinkedTo       String? // shop domain of the payer (A), if this store is a linked partner (B)
+  pairingCode           String?   @unique // 6-digit code B generates to invite a payer to link it
+  pairingCodeExpiresAt  DateTime?
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
 
   @@index([shopOwnerEmail])
+  @@index([partnerLinkedTo])
 }
 
 // ═══════════════════════════════════════════════════════════════════

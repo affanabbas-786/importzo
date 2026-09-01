@@ -279,6 +279,32 @@ describe("deleteShopData", () => {
     expect(deleted["shopPlan(grant retained, PII erased)"]).toBe(1);
   });
 
+  it("retains a partner-linked ShopPlan row but erases its PII, same as a complimentary grant", async () => {
+    // A partner-linked grant (tier=pro, subscriptionStatus=PARTNER_LINKED)
+    // is funded entirely by another shop's subscription, not this shop's
+    // own — same "no Shopify subscription of its own" shape as a
+    // complimentary grant, and the same reason not to hard-delete it.
+    const prisma = fakePrisma({ jobs: [], shopPlan: { subscriptionStatus: "PARTNER_LINKED" } });
+    const { deleted, errors } = await deleteShopData(prisma, SHOP);
+
+    expect(errors).toEqual([]);
+
+    const planCalls = prisma.__calls().filter((c) => c.model === "shopPlan");
+    expect(planCalls).toHaveLength(1);
+    expect(planCalls[0].op).toBe("update"); // not deleteMany
+    expect(planCalls[0].data.shopOwnerEmail).toBeNull();
+    expect(planCalls[0].data.recordsUsed).toBe(0);
+    expect(planCalls[0].data.aiCallsUsed).toBe(0);
+    // tier / subscriptionStatus / partnerLinkedTo are NOT touched — the
+    // link to the payer must survive redact.
+    expect(planCalls[0].data).not.toHaveProperty("tier");
+    expect(planCalls[0].data).not.toHaveProperty("subscriptionStatus");
+    expect(planCalls[0].data).not.toHaveProperty("partnerLinkedTo");
+
+    expect(deleted.shopPlan).toBe(0);
+    expect(deleted["shopPlan(grant retained, PII erased)"]).toBe(1);
+  });
+
   it("still erases every other model when a complimentary ShopPlan is retained", async () => {
     const prisma = fakePrisma({ jobs: [{ id: "job-1" }], shopPlan: { subscriptionStatus: "COMPLIMENTARY" } });
     await deleteShopData(prisma, SHOP);

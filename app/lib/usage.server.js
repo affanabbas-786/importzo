@@ -49,6 +49,9 @@ function toStatus(row) {
     // establishing it needs a Shopify round trip, and only app.billing.jsx
     // pays that cost. See syncAgencyIneligibilityFlag.
     agencyIneligibleSince: row.agencyIneligibleSince || null,
+    // Phase 12 — the payer's shop domain, if this shop is a linked partner.
+    // See partner-linking.server.js.
+    partnerLinkedTo: row.partnerLinkedTo || null,
   };
 }
 

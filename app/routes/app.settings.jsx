@@ -1,6 +1,6 @@
 import PropTypes from "prop-types";
 import { useEffect, useState } from "react";
-import { useLoaderData, useRouteError, Link } from "react-router";
+import { useFetcher, useLoaderData, useRouteError, Link } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
@@ -19,7 +19,26 @@ export const loader = async ({ request }) => {
   // there so it doesn't fire on every Settings page load). Good enough for
   // a summary card that links out to manage the subscription itself.
   const usage = await getUsageStatus({ prisma, shop: session.shop });
-  return { usage };
+
+  // Phase 12 — Partner/Agency linking, this shop's own partner-side state
+  // (usage.partnerLinkedTo already covers "who's paying for me"; a valid,
+  // unexpired pairing code — generated but not yet redeemed by a payer — is
+  // the one piece not carried on the usage status, since it's a one-time
+  // secret, not general plan state).
+  let activePairingCode = null;
+  try {
+    const row = await prisma.shopPlan.findUnique({
+      where: { shop: session.shop },
+      select: { pairingCode: true, pairingCodeExpiresAt: true },
+    });
+    if (row?.pairingCode && row.pairingCodeExpiresAt && new Date(row.pairingCodeExpiresAt) > new Date()) {
+      activePairingCode = { code: row.pairingCode, expiresAt: row.pairingCodeExpiresAt };
+    }
+  } catch (err) {
+    console.warn(`[app.settings] could not read pairing code for ${session.shop}:`, err?.message);
+  }
+
+  return { usage, activePairingCode };
 };
 
 const { primary: P, secondary: S, font: F } = BRAND;
@@ -89,8 +108,101 @@ Toggle.propTypes = {
   disabled: PropTypes.bool,
 };
 
+// ── Phase 12 — Partner/Agency linking, B's own card ──────────────────────
+// Shows either "Pro features provided by [payer]" + Unlink, or a pairing-
+// code generator when this shop isn't linked to anyone. Read-only about the
+// payer beyond its domain by construction — this shop's session has no
+// access to the payer's own data, only what its own ShopPlan row records.
+function PartnerLinkCard({ partnerLinkedTo, activePairingCode }) {
+  const fetcher = useFetcher();
+  const busy = fetcher.state !== "idle";
+  const [code, setCode] = useState(activePairingCode);
+
+  useEffect(() => {
+    if (fetcher.data?.ok && fetcher.data.pairingCode) {
+      setCode({ code: fetcher.data.pairingCode, expiresAt: fetcher.data.pairingCodeExpiresAt });
+    }
+  }, [fetcher.data]);
+
+  const post = (fields) => {
+    const fd = new FormData();
+    Object.entries(fields).forEach(([k, v]) => fd.append(k, String(v)));
+    fetcher.submit(fd, { method: "post", action: "/api/partner-link" });
+  };
+
+  return (
+    <section className="space-y-4">
+      <div>
+        <h2 className="text-base font-semibold text-gray-900 flex items-center gap-1.5" style={{ fontFamily: F }}>
+          Partner Store
+        </h2>
+        <p className="text-sm text-gray-500 mt-0.5">
+          {partnerLinkedTo
+            ? "Your Pro access is funded by another store's subscription."
+            : "Let another store's Pro or Agency subscription fund this store's access, at no cost to you."}
+        </p>
+      </div>
+
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+        {partnerLinkedTo ? (
+          <div className="flex items-center justify-between gap-4 flex-wrap">
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-gray-900" style={{ fontFamily: F }}>
+                Pro features provided by {partnerLinkedTo}
+              </p>
+              <p className="text-xs text-gray-500 mt-0.5">
+                You can unlink at any time — this store keeps your data, but reverts to the Free plan.
+              </p>
+            </div>
+            <button
+              type="button" disabled={busy}
+              onClick={() => post({ intent: "unlink-self" })}
+              className="text-xs font-semibold px-3 py-1.5 rounded-lg text-red-700 border border-red-200 hover:bg-red-50 disabled:opacity-50 flex-shrink-0"
+            >
+              {busy ? "Unlinking…" : "Unlink"}
+            </button>
+          </div>
+        ) : (
+          <div>
+            <p className="text-xs text-gray-600 leading-relaxed">
+              Generate a one-time code and share it with the store paying for your access — they enter it
+              along with this store&apos;s myshopify domain. The code expires in 15 minutes and can only be used once.
+            </p>
+            {code ? (
+              <div className="mt-3 flex items-center gap-3 flex-wrap">
+                <span className="text-lg font-mono font-bold tracking-widest px-3 py-1.5 rounded-lg bg-gray-50 border border-gray-200" style={{ color: P }}>
+                  {code.code}
+                </span>
+                <span className="text-xs text-gray-500">
+                  Expires {new Date(code.expiresAt).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
+                </span>
+              </div>
+            ) : null}
+            <button
+              type="button" disabled={busy}
+              onClick={() => post({ intent: "generate-code" })}
+              className="mt-3 px-4 py-2 text-xs font-semibold rounded-lg text-white hover:brightness-110 disabled:opacity-50"
+              style={{ background: P, fontFamily: F }}
+            >
+              {busy ? "Generating…" : code ? "Generate new code" : "Generate pairing code"}
+            </button>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+PartnerLinkCard.propTypes = {
+  partnerLinkedTo: PropTypes.string,
+  activePairingCode: PropTypes.shape({
+    code: PropTypes.string,
+    expiresAt: PropTypes.oneOfType([PropTypes.string, PropTypes.instanceOf(Date)]),
+  }),
+};
+
 export default function SettingsPage() {
-  const { usage } = useLoaderData();
+  const { usage, activePairingCode } = useLoaderData();
   const [prefs, setPrefs] = useState(DEFAULT_PREFS);
   const [savedFlash, setSavedFlash] = useState(false);
   const [storageAvailable, setStorageAvailable] = useState(true);
@@ -184,6 +296,8 @@ export default function SettingsPage() {
             </div>
           </Link>
         </section>
+
+        <PartnerLinkCard partnerLinkedTo={usage.partnerLinkedTo} activePairingCode={activePairingCode} />
 
         {/* ── Import & Transfer defaults ── */}
         <section className="space-y-4">

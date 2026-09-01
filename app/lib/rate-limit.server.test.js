@@ -129,6 +129,16 @@ describe("POLICIES", () => {
     expect(POLICIES.restore.maxConcurrent).toBe(1);
     expect(POLICIES.rollback.maxConcurrent).toBe(1);
   });
+
+  // Phase 12 — Partner/Agency linking. Pinned so an accidental edit (e.g.
+  // widening the window or the limit) can't quietly reopen the pairing-code
+  // brute-force surface without a test failing.
+  it("throttles partner-link attempts to 5 per minute — tighter than the general partnerAdmin CRUD policy", () => {
+    expect(POLICIES.partnerLinkAttempt).toBeDefined();
+    expect(POLICIES.partnerLinkAttempt.limit).toBe(5);
+    expect(POLICIES.partnerLinkAttempt.windowMs).toBe(60 * 1000);
+    expect(POLICIES.partnerAdmin).toBeDefined();
+  });
 });
 
 describe("enforcePolicy", () => {

@@ -29,8 +29,9 @@
 
 import { authenticateWebhook } from "../lib/webhook-auth.server";
 import prisma from "../db.server";
-import { PLAN_IDS, tierFromSubscriptionName, isComplimentary } from "../lib/plans.js";
+import { PLAN_IDS, tierFromSubscriptionName, isComplimentary, isPartnerLinked, PARTNER_LINKED_STATUS } from "../lib/plans.js";
 import { getUsageStatus, setShopTier } from "../lib/usage.server";
+import { cascadeRevokePartnerLinks } from "../lib/partner-linking.server";
 
 export const action = async ({ request }) => {
   const { shop, topic, payload } = await authenticateWebhook(request);
@@ -73,11 +74,35 @@ export const action = async ({ request }) => {
       // satisfy the `!current.subscriptionId` test below and let any unrelated
       // inactive-subscription event revoke it. The grant is not backed by the
       // subscription this event describes, so the event says nothing about it.
-      if (isComplimentary(current.subscriptionStatus)) {
-        console.log(`[webhooks/app_subscriptions/update] ${shop}: ignored ${status} — shop holds a complimentary ${current.tier} grant`);
+      // Phase 12 — a partner-linked grant is the same shape (no
+      // subscriptionId of its own) for the same reason: it's funded by a
+      // payer's subscription, not this one.
+      if (isComplimentary(current.subscriptionStatus) || isPartnerLinked(current.subscriptionStatus)) {
+        console.log(`[webhooks/app_subscriptions/update] ${shop}: ignored ${status} — shop holds a ${isComplimentary(current.subscriptionStatus) ? "complimentary" : "partner-linked"} ${current.tier} grant`);
       } else if (!current.subscriptionId || current.subscriptionId === subscriptionId) {
-        await setShopTier({ prisma, shop, tier: PLAN_IDS.FREE, subscriptionId: null, subscriptionStatus: status });
-        console.log(`[webhooks/app_subscriptions/update] ${shop}: tier -> free (subscription "${name}" status=${status})`);
+        // Phase 12 — a shop can hold its OWN paid subscription while ALSO
+        // being partner-linked (the "already-paid-B" case in
+        // partner-linking.server.js's linkPartner: linking never overwrites
+        // an independent subscriber's plan). If that own subscription is
+        // what just lapsed, this shop's Pro access is still funded by its
+        // payer — the floor to fall to is the partner-linked grant, not
+        // Free.
+        if (current.partnerLinkedTo) {
+          await setShopTier({ prisma, shop, tier: PLAN_IDS.PRO, subscriptionId: null, subscriptionStatus: PARTNER_LINKED_STATUS });
+          console.log(`[webhooks/app_subscriptions/update] ${shop}: own subscription "${name}" ${status} — falling back to partner-linked grant from ${current.partnerLinkedTo}`);
+        } else {
+          await setShopTier({ prisma, shop, tier: PLAN_IDS.FREE, subscriptionId: null, subscriptionStatus: status });
+          console.log(`[webhooks/app_subscriptions/update] ${shop}: tier -> free (subscription "${name}" status=${status})`);
+        }
+
+        // This shop may itself be a PAYER funding other stores — its own
+        // subscription lapsing means it can no longer fund them either.
+        try {
+          const { total, reverted } = await cascadeRevokePartnerLinks({ prisma, payerShop: shop });
+          if (total) console.log(`[webhooks/app_subscriptions/update] ${shop}: reverted ${reverted}/${total} linked partner store(s)`);
+        } catch (err) {
+          console.error(`[webhooks/app_subscriptions/update] ${shop}: partner-link cascade failed:`, err?.message);
+        }
       } else {
         console.log(`[webhooks/app_subscriptions/update] ${shop}: ignored stale ${status} for superseded subscription ${subscriptionId}`);
       }

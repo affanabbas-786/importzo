@@ -421,6 +421,46 @@ describe("app.billing action — charge creation", () => {
     );
   });
 
+  // Phase 12 — Partner/Agency linking. app.partners.jsx's "Update
+  // subscription" button posts an explicit partnerCount so the Agency
+  // charge reflects the live linked-partner count instead of the flat base
+  // price.
+  it("resolves the partner-count-aware Agency plan key when partnerCount is posted", async () => {
+    const request = mockActionRequest(
+      { intent: "select-plan", plan: "agency", interval: "monthly", partnerCount: "3" },
+      { url: `https://${SHOP}/app/billing` },
+    );
+    await expect(action({ request })).rejects.toBeInstanceOf(Response);
+
+    expect(currentBilling.request).toHaveBeenCalledWith(
+      expect.objectContaining({ plan: "Importzo Agency Monthly — 3 Partners" }),
+    );
+  });
+
+  it("ignores partnerCount for Pro — its price never varies with partner count", async () => {
+    const request = mockActionRequest(
+      { intent: "select-plan", plan: "pro", interval: "monthly", partnerCount: "1" },
+      { url: `https://${SHOP}/app/billing` },
+    );
+    await expect(action({ request })).rejects.toBeInstanceOf(Response);
+
+    expect(currentBilling.request).toHaveBeenCalledWith(
+      expect.objectContaining({ plan: "Importzo Pro Monthly" }),
+    );
+  });
+
+  it("falls back to the base Agency key when partnerCount is 0", async () => {
+    const request = mockActionRequest(
+      { intent: "select-plan", plan: "agency", interval: "yearly", partnerCount: "0" },
+      { url: `https://${SHOP}/app/billing` },
+    );
+    await expect(action({ request })).rejects.toBeInstanceOf(Response);
+
+    expect(currentBilling.request).toHaveBeenCalledWith(
+      expect.objectContaining({ plan: "Importzo Agency Yearly" }),
+    );
+  });
+
   it("returns the merchant to /app/billing after approval, not to Shopify's plan page", async () => {
     const request = mockActionRequest({ intent: "select-plan", plan: "pro", interval: "monthly" }, { url: `https://${SHOP}/app/billing` });
     await expect(action({ request })).rejects.toBeInstanceOf(Response);

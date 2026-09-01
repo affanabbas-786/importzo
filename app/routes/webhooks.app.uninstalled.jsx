@@ -1,5 +1,6 @@
 import { authenticateWebhook } from "../lib/webhook-auth.server";
 import db from "../db.server";
+import { cascadeRevokePartnerLinks } from "../lib/partner-linking.server";
 
 export const action = async ({ request }) => {
   let shop, topic;
@@ -56,6 +57,17 @@ export const action = async ({ request }) => {
       await db.shopPlan.updateMany({ where: { shop }, data: { uninstalledAt: new Date() } });
     } catch (err) {
       console.warn(`[app/uninstalled] ${shop}: could not mark shopPlan uninstalled:`, err?.message);
+    }
+
+    // Phase 12 — this shop may be a PAYER funding other stores' Pro access
+    // (see partner-linking.server.js). Uninstalling doesn't reliably also
+    // fire app_subscriptions/update, so this cascade has to run from here
+    // too, not just from that webhook.
+    try {
+      const { total, reverted } = await cascadeRevokePartnerLinks({ prisma: db, payerShop: shop });
+      if (total) console.log(`[app/uninstalled] ${shop}: reverted ${reverted}/${total} linked partner store(s)`);
+    } catch (err) {
+      console.warn(`[app/uninstalled] ${shop}: partner-link cascade failed:`, err?.message);
     }
   }
 
