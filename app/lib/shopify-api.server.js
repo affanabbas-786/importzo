@@ -32,6 +32,18 @@ const DEFAULT_MAX_RETRIES = 5;
 // 429 retries in shopifyFetch. Delays are 1s, 2s, 4s.
 const DEFAULT_THROTTLE_RETRIES = 3;
 
+// Every outbound call gets this unless a caller overrides it (or passes
+// timeoutMs: 0 to explicitly go unbounded). Set here — not at call sites —
+// after a transfer request hung forever on 2026-09-01: a single GraphQL
+// call to Shopify stalled with no response and no error, so nginx's
+// upstream connection sat open until the OS's own TCP timeout finally
+// killed it (~504 to the merchant, ~15 minutes after the request started).
+// A bare `fetch()` has no idle-response timeout of its own, and every call
+// site in the transfer/import/export routes calls shopifyGraphql/shopifyFetch
+// without one, so the default has to live in the shared helper — relying on
+// each call site to remember it is exactly how the gap happened.
+const DEFAULT_TIMEOUT_MS = 30000;
+
 // Parallel in-flight GraphQL calls allowed per shop. Shopify's GraphQL
 // limit is a per-shop cost bucket, so the cap belongs per shop rather
 // than per process: two shops transferring at once do not share a bucket
@@ -219,6 +231,7 @@ export function createShopifyApi({
   concurrency = DEFAULT_CONCURRENCY,
   restConcurrency = DEFAULT_REST_CONCURRENCY,
   restHeadroom = REST_HEADROOM,
+  timeoutMs: defaultTimeoutMs = DEFAULT_TIMEOUT_MS,
 } = {}) {
   // One semaphore per shop domain, per bucket — see DEFAULT_CONCURRENCY.
   // "gql" and "rest" are kept apart because Shopify meters them separately.
@@ -243,18 +256,45 @@ export function createShopifyApi({
   // Routing GraphQL here instead of through shopifyFetch keeps the two
   // budgets genuinely independent and avoids the nested acquire entirely.
   async function fetchWithRetry(url, { timeoutMs, ...opts } = {}) {
+    // `timeoutMs: 0` (or any other falsy-but-explicit value) opts out of the
+    // default rather than being treated as "not passed" — only `undefined`
+    // (the caller didn't mention it at all) falls back to the default.
+    const effectiveTimeoutMs = timeoutMs === undefined ? defaultTimeoutMs : timeoutMs;
+
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       let res;
-      if (timeoutMs) {
-        const ctrl = new AbortController();
-        const t = setTimeout(() => ctrl.abort(), timeoutMs);
-        try {
-          res = await fetch(url, { ...opts, signal: ctrl.signal });
-        } finally {
-          clearTimeout(t);
+      try {
+        if (effectiveTimeoutMs) {
+          const ctrl = new AbortController();
+          const t = setTimeout(() => ctrl.abort(), effectiveTimeoutMs);
+          try {
+            res = await fetch(url, { ...opts, signal: ctrl.signal });
+          } finally {
+            clearTimeout(t);
+          }
+        } else {
+          res = await fetch(url, opts);
         }
-      } else {
-        res = await fetch(url, opts);
+      } catch (err) {
+        // A thrown fetch — our own abort on timeout, or a genuine network
+        // failure (DNS, connection reset) — used to propagate straight out
+        // uncaught, skipping the retry loop entirely below. That's what let
+        // one stalled call hang the whole request forever instead of failing
+        // into the same backoff a 429 gets. Same maxRetries/backoff ladder as
+        // 429 handling below, deliberately: it's already tuned to be capped
+        // and spaced out rather than hammering a shop that's genuinely down.
+        const isTimeout = err?.name === "AbortError";
+        if (attempt < maxRetries) {
+          const delay = 1000 * Math.pow(2, attempt);
+          console.warn(
+            `[shopify-api] ${isTimeout ? `timed out after ${effectiveTimeoutMs}ms` : `request failed (${err?.message || err})`} — ${url.split("?")[0]} — attempt ${attempt + 1}/${maxRetries}, retrying in ${delay}ms`,
+          );
+          await sleep(delay);
+          continue;
+        }
+        throw isTimeout
+          ? new Error(`Shopify request timed out after ${effectiveTimeoutMs}ms — ${url.split("?")[0]} — gave up after ${maxRetries} retries`)
+          : err;
       }
 
       if (res.status === 429) {
