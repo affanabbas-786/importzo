@@ -9,7 +9,7 @@ describe("plans.js", () => {
   it("defines exactly the three plans in the product spec, with the specified prices", () => {
     expect(PLANS.free.price).toBe(0);
     expect(PLANS.pro.price).toBe(15);
-    expect(PLANS.agency.price).toBe(25);
+    expect(PLANS.agency.price).toBe(35);
   });
 
   it("defines the specified record limits", () => {
@@ -89,9 +89,9 @@ describe("plans.js", () => {
   });
 
   it("prices Pro and Agency flat — no per-companion add-on helpers exist", async () => {
-    // Flat: $15 covers payer + 1 companion, $25 covers payer + 5.
+    // Flat: $15 covers payer + 1 companion, $35 covers payer + 5.
     expect(PLANS.pro.price).toBe(15);
-    expect(PLANS.agency.price).toBe(25);
+    expect(PLANS.agency.price).toBe(35);
     const mod = await import("./plans.js");
     expect(mod.agencyPartnerPrice).toBeUndefined();
     expect(mod.agencyPartnerBillingPlanKey).toBeUndefined();

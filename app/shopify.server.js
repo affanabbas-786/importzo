@@ -132,7 +132,7 @@ const BASE_BILLING_CONFIG = Object.fromEntries(
 );
 
 // Phase 12 — Partner/Agency linking is flat-priced: Pro ($15) covers the
-// payer + 1 companion, Agency ($25) the payer + 5, and neither price moves
+// payer + 1 companion, Agency ($35) the payer + 5, and neither price moves
 // with companion count. So there are no per-count plan keys — the four
 // base entries above are the whole billing config.
 const BILLING_CONFIG = BASE_BILLING_CONFIG;

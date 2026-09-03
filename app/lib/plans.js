@@ -99,8 +99,8 @@ export const PLANS = Object.freeze({
   [PLAN_IDS.AGENCY]: {
     id: PLAN_IDS.AGENCY,
     label: "Agency",
-    price: 25,
-    priceYearly: 240,
+    price: 35,
+    priceYearly: 336,
     recordLimit: Infinity,
     scheduledSync: true,
     builtInAi: true,
@@ -213,7 +213,7 @@ export function billingPlanKey(tier, interval) {
 //
 // Earlier this phase billed Agency at $10 base + $7 per linked companion,
 // realised as a discrete pre-registered Shopify plan per count. That is
-// gone: Pro ($15) and Agency ($25) are each a single flat AppSubscription
+// gone: Pro ($15) and Agency ($35) are each a single flat AppSubscription
 // whose price does not change with companion count (Pro caps at 1
 // companion, Agency at 5). There is nothing to reconcile between the
 // advertised price and the billed price, so no per-count plan keys and no

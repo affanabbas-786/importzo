@@ -43,10 +43,11 @@ export const REDIRECT_OVERLAY_COPY = Object.freeze({
  * everyone. Here we have the shop's real connected-store count, so each
  * merchant can be pointed at the plan that is genuinely best for them.
  *
- *   3+ connected stores  -> Agency. Identical features to Pro at $10/store
- *                           instead of $15, so for this merchant it is
- *                           strictly the better deal and recommending
- *                           anything else would be costing them money.
+ *   3+ connected stores  -> Agency. Identical features to Pro, one flat
+ *                           price covering the payer + up to 5 companion
+ *                           stores, so for a multi-store merchant it is the
+ *                           better deal and recommending anything else would
+ *                           be costing them money.
  *   fewer than that      -> Pro. Agency is not usable by them in practice;
  *                           featuring a card that carries its own "unlocks at
  *                           3+ stores" warning is pointing a merchant at
@@ -106,7 +107,7 @@ export function planDisplayOrder(eligibility) {
  * explained by the overlay and the section blurb, not crammed into a button.
  *
  * Moving from Agency to Pro is the one direction that is not an upgrade
- * (Agency is the cheaper per-store rate), so it says "Switch to" instead of
+ * (Agency sits above Pro in PLAN_ORDER), so it says "Switch to" instead of
  * telling a merchant they are upgrading to something they are not.
  */
 export function planActionLabel(plan, currentTier) {
