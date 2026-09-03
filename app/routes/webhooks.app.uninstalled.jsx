@@ -46,11 +46,10 @@ export const action = async ({ request }) => {
       console.warn(`[app/uninstalled] ${shop}: could not disable scheduled syncs:`, err?.message);
     }
 
-    // Phase 5: marks this shop's row as no longer installed so it drops out
-    // of Agency eligibility's "stores with Importzo installed" count for
-    // every other shop sharing its owner email (agency-eligibility.server.js
-    // filters on uninstalledAt: null) — without waiting for shop/redact,
-    // which doesn't hard-delete the row for another 48h. updateMany (not
+    // Phase 5: marks this shop's row as no longer installed (uninstalledAt),
+    // which shop-data.server.js's 48h cleanup and partner-linking's
+    // companion checks both key on — without waiting for shop/redact, which
+    // doesn't hard-delete the row for another 48h. updateMany (not
     // update) so a shop that uninstalls before ever creating a ShopPlan row
     // is a silent no-op rather than a thrown "record not found".
     try {

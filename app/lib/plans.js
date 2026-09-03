@@ -49,11 +49,6 @@ export const BILLING_INTERVAL = Object.freeze({
   YEARLY: "yearly",
 });
 
-// Minimum distinct, currently-installed stores (same merchant, matched by
-// shop owner email, counting the current store itself) required to unlock
-// Agency pricing. See agency-eligibility.server.js.
-export const AGENCY_MIN_STORES = 3;
-
 // Monthly cap on Importzo's built-in AI (Groq) calls, shared across every
 // built-in-AI feature combined (SEO cleanup, alt-text, duplicate detection,
 // error diagnosis) — not per feature. Bring-your-own-key usage never counts
@@ -106,10 +101,11 @@ export const PLANS = Object.freeze({
     builtInAi: true,
     shopifyPlanName: SHOPIFY_PLAN_NAME.agency,
     tagline: "Everything in Pro, for up to 6 stores",
-    description: `Unlocks once the same merchant has ${AGENCY_MIN_STORES}+ stores running Importzo. Flat price covers this store plus 5 companion stores.`,
-    requiresEligibility: true,
+    description: "Flat price covers this store plus 5 companion stores.",
     // Flat price covers this store (the payer) plus up to 5 companion
-    // stores. Like Pro, the price never varies within the cap.
+    // stores. Like Pro, the price never varies within the cap. There is NO
+    // store-count gate — any Pro/Agency payer links companions directly by
+    // domain (see partner-linking.server.js).
     maxPartners: 5,
   },
 });

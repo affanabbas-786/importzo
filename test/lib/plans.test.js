@@ -29,9 +29,9 @@ describe("plans — finalized pricing", () => {
     expect(TRIAL_DAYS).toBe(7);
   });
 
-  it("gates Agency on eligibility and nothing else", () => {
-    expect(PLANS[PLAN_IDS.AGENCY].requiresEligibility).toBe(true);
-    expect(PLANS[PLAN_IDS.PRO].requiresEligibility).toBeFalsy();
+  it("gates neither paid plan on a store count — the 3-store model is gone", () => {
+    expect(PLANS[PLAN_IDS.AGENCY].requiresEligibility).toBeUndefined();
+    expect(PLANS[PLAN_IDS.PRO].requiresEligibility).toBeUndefined();
   });
 
   it("lists plans cheapest-first for the pricing grid", () => {

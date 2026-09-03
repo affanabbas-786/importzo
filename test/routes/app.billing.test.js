@@ -47,20 +47,14 @@ vi.mock("../../app/db.server", () => ({
   },
 }));
 
-// The shop's own contact email, as agency-eligibility.server.js fetches it.
-// null by default (no match, not eligible) — tests that need eligibility
-// override this per-test.
-const shopEmail = { value: null };
 // Phase 8 — the app handle Shopify reports for this install, used to build
 // the hosted plan-selection URL. null models a lookup that returns nothing,
 // which must fall back to DEFAULT_APP_HANDLE rather than produce a broken URL.
 const liveAppHandle = { value: "importzo" };
 
-// One mock serves both queries the billing route issues; it dispatches on the
-// query text so a test can move the app-handle lookup independently of the
-// shop-email one.
-// Phase 10 — the shop's dev-store flag (decides test vs real charge) and its
-// lifetime subscription history (decides whether the trial is still owed).
+// The shop's dev-store flag (decides test vs real charge) and its lifetime
+// subscription history (decides whether the trial is still owed). One mock
+// serves every query the billing route issues, dispatched on query text.
 const partnerDevelopment = { value: false };
 const priorSubscriptions = { value: [] };
 
@@ -78,7 +72,7 @@ vi.mock("../../app/lib/shopify-api.server", () => ({
     if (text.includes("currentAppInstallation")) {
       return { currentAppInstallation: { app: { handle: liveAppHandle.value } } };
     }
-    return { shop: { email: shopEmail.value } };
+    return {};
   }),
 }));
 
@@ -136,7 +130,6 @@ import { resetDevStoreCache } from "../../app/lib/billing-mode.server.js";
 describe("app.billing loader — reconciliation", () => {
   beforeEach(() => {
     rows.clear();
-    shopEmail.value = null;
     liveAppHandle.value = "importzo";
     partnerDevelopment.value = false;
     priorSubscriptions.value = [];
@@ -235,15 +228,14 @@ describe("app.billing loader — reconciliation", () => {
     expect(data.usage.tier).toBe("agency");
   });
 
-  it("reports Agency eligibility based on stores sharing the merchant's contact email", async () => {
+  it("does not compute or return any store-count eligibility — the 3-store model is gone", async () => {
     setShopPlan("other-1.myshopify.com", { shopOwnerEmail: "merchant@example.com" });
     setShopPlan("other-2.myshopify.com", { shopOwnerEmail: "merchant@example.com" });
-    shopEmail.value = "merchant@example.com";
 
     const data = await loader({ request: { url: `https://${SHOP}/app/billing` } });
 
-    expect(data.eligibility.eligible).toBe(true);
-    expect(data.eligibility.storeCount).toBe(3); // the two others + this shop itself
+    expect(data.eligibility).toBeUndefined();
+    expect(data.usage.agencyIneligibleSince).toBeUndefined();
   });
 
   // ── Phase 8 — Shopify App Pricing ──────────────────────────────────
@@ -312,58 +304,19 @@ describe("app.billing loader — reconciliation", () => {
     expect(data.planSelectionUrl).toBeUndefined();
   });
 
-  // The Agency eligibility rule can't be enforced on Shopify's hosted page,
-  // so the app records the discrepancy instead of blocking or revoking.
-  it("flags a shop that holds Agency without meeting the store requirement", async () => {
+  it("never flags an Agency shop or touches agencyIneligibleSince — no store gate exists", async () => {
     currentBilling = fakeBilling({
       appSubscriptions: [{ id: "gid://shopify/AppSubscription/2", name: "Importzo Agency", status: "ACTIVE" }],
     });
-
-    const data = await loader({ request: { url: `https://${SHOP}/app/billing` } });
-
-    expect(data.usage.tier).toBe("agency"); // access is NOT revoked
-    expect(data.eligibility.eligible).toBe(false);
-    expect(data.usage.agencyIneligibleSince).toBeInstanceOf(Date);
-    expect(rows.get(SHOP).agencyIneligibleSince).toBeInstanceOf(Date);
-  });
-
-  it("keeps the original flag date on a re-visit, so it answers 'since when'", async () => {
-    const original = new Date("2026-01-01T00:00:00.000Z");
-    currentBilling = fakeBilling({
-      appSubscriptions: [{ id: "gid://shopify/AppSubscription/2", name: "Importzo Agency", status: "ACTIVE" }],
-    });
-    setShopPlan(SHOP, { tier: "agency", agencyIneligibleSince: original });
-
-    const data = await loader({ request: { url: `https://${SHOP}/app/billing` } });
-
-    expect(data.usage.agencyIneligibleSince).toEqual(original);
-  });
-
-  it("clears the flag once the merchant reaches the store threshold", async () => {
     setShopPlan(SHOP, { tier: "agency", agencyIneligibleSince: new Date("2026-01-01T00:00:00.000Z") });
-    setShopPlan("other-1.myshopify.com", { shopOwnerEmail: "merchant@example.com" });
-    setShopPlan("other-2.myshopify.com", { shopOwnerEmail: "merchant@example.com" });
-    shopEmail.value = "merchant@example.com";
-    currentBilling = fakeBilling({
-      appSubscriptions: [{ id: "gid://shopify/AppSubscription/2", name: "Importzo Agency", status: "ACTIVE" }],
-    });
 
     const data = await loader({ request: { url: `https://${SHOP}/app/billing` } });
 
-    expect(data.eligibility.eligible).toBe(true);
-    expect(data.usage.agencyIneligibleSince).toBeNull();
-    expect(rows.get(SHOP).agencyIneligibleSince).toBeNull();
-  });
-
-  it("does not flag an ineligible shop that is merely on Pro", async () => {
-    currentBilling = fakeBilling({
-      appSubscriptions: [{ id: "gid://shopify/AppSubscription/1", name: "Importzo Pro", status: "ACTIVE" }],
-    });
-
-    const data = await loader({ request: { url: `https://${SHOP}/app/billing` } });
-
-    expect(data.eligibility.eligible).toBe(false);
-    expect(data.usage.agencyIneligibleSince).toBeNull();
+    expect(data.usage.tier).toBe("agency");
+    expect(data.eligibility).toBeUndefined();
+    expect(data.usage.agencyIneligibleSince).toBeUndefined();
+    // Stale column left untouched — no migration, but nothing reads/writes it now.
+    expect(rows.get(SHOP).agencyIneligibleSince).toEqual(new Date("2026-01-01T00:00:00.000Z"));
   });
 
   it("passes Shopify's post-approval plan_handle through as a confirmation signal only", async () => {
@@ -437,7 +390,6 @@ describe("app.billing loader — reconciliation", () => {
 describe("app.billing action — charge creation", () => {
   beforeEach(() => {
     rows.clear();
-    shopEmail.value = null;
     liveAppHandle.value = "importzo";
     partnerDevelopment.value = false;
     priorSubscriptions.value = [];
@@ -661,7 +613,6 @@ describe("app.billing action — charge creation", () => {
 describe("app.billing action — cancellation", () => {
   beforeEach(() => {
     rows.clear();
-    shopEmail.value = null;
     partnerDevelopment.value = false;
     priorSubscriptions.value = [];
     redirectMock.mockClear();

@@ -5,7 +5,7 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { getUsageStatus } from "../lib/usage.server";
-import { PLANS, PLAN_IDS, AGENCY_MIN_STORES, yearlySavingsPercent } from "../lib/plans.js";
+import { PLANS, PLAN_IDS, yearlySavingsPercent } from "../lib/plans.js";
 import { BRAND } from "../lib/constants";
 import { SUPPORT_EMAIL, mailtoLink, openLiveChat } from "../lib/support";
 import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
@@ -227,16 +227,6 @@ export default function SettingsPage() {
                 ${PLANS[PLAN_IDS.PRO].price}/month, or ${PLANS[PLAN_IDS.PRO].priceYearly}/year
                 to save {yearlySavingsPercent(PLAN_IDS.PRO)}%.
               </p>
-              {/* Phase 8 — mirrors the Billing page notice for a shop on Agency
-                  pricing that doesn't meet the 3-store requirement. Free to render
-                  here: the flag rides along on the usage status this page already
-                  loads, so no extra Shopify round trip. See app.billing.jsx. */}
-              {usage.agencyIneligibleSince && (
-                <p className="text-xs text-amber-700 mt-1.5 leading-relaxed font-medium">
-                  Your Agency plan needs {AGENCY_MIN_STORES}+ stores to qualify. Nothing has been
-                  turned off — open Billing for the details.
-                </p>
-              )}
               <span className="mt-2 inline-flex items-center gap-1 text-xs font-semibold group-hover:gap-1.5 transition-all" style={{ color: S }}>
                 Go to Billing
                 <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}><path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" /></svg>

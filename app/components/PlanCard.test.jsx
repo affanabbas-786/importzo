@@ -10,16 +10,12 @@ import { BRAND } from "../lib/constants";
 const { secondary: S } = BRAND;
 const UNEMPHASISED_BORDER = "#e5e7eb";
 
-const ELIGIBLE = { eligible: true, storeCount: 3, minStores: 3 };
-const INELIGIBLE = { eligible: false, storeCount: 1, minStores: 3 };
-
 function render(overrides = {}) {
   return renderToStaticMarkup(
     <PlanCard
       plan={PLANS[PLAN_IDS.AGENCY]}
       currentTier={PLAN_IDS.FREE}
       period={BILLING_INTERVAL.MONTHLY}
-      eligibility={ELIGIBLE}
       onSelect={() => {}}
       onCancel={() => {}}
       busy={false}
@@ -229,30 +225,27 @@ describe("PlanCard trial framing", () => {
   });
 });
 
-describe("PlanCard eligibility notice is independent of the chrome", () => {
-  // The whole reason featuring became conditional: chrome follows eligibility,
-  // but the warning inside the card follows plan.requiresEligibility, so an
-  // ineligible merchant still gets told why Agency is out of reach.
-  it("still warns an ineligible merchant on an unfeatured Agency card", () => {
-    const html = render({ featured: false, eligibility: INELIGIBLE });
-
-    expect(html).toMatch(/Unlocks at 3\+ stores/);
-    expect(html).toContain("currently has 1");
-    expect(html).not.toContain("Most Popular");
+describe("PlanCard — no stale 3-store eligibility copy", () => {
+  // The "Agency unlocks at 3+ stores" model was removed: any Pro/Agency payer
+  // links companions directly, no gate. None of that copy may survive.
+  it("never renders an 'Unlocks at 3+ stores' warning on any card", () => {
+    for (const id of [PLAN_IDS.FREE, PLAN_IDS.PRO, PLAN_IDS.AGENCY]) {
+      const html = render({ plan: PLANS[id] });
+      expect(html).not.toMatch(/Unlocks at/i);
+      expect(html).not.toMatch(/\d\+ stores/);
+      expect(html).not.toMatch(/qualify/i);
+      expect(html).not.toMatch(/per store/);
+    }
   });
 
-  it("omits the warning for an eligible merchant", () => {
-    const html = render({ featured: true, eligibility: ELIGIBLE });
-    expect(html).not.toMatch(/Unlocks at 3\+ stores/);
+  it("lists the included companion slots on each paid card", () => {
+    expect(render({ plan: PLANS[PLAN_IDS.PRO] })).toContain("1 companion store included");
+    expect(render({ plan: PLANS[PLAN_IDS.AGENCY] })).toContain("5 companion stores included");
+    expect(render({ plan: PLANS[PLAN_IDS.FREE] })).not.toMatch(/companion store/);
   });
 
-  it("never shows the warning on Pro, which has no store requirement", () => {
-    const html = render({
-      plan: PLANS[PLAN_IDS.PRO],
-      featured: true,
-      eligibility: INELIGIBLE,
-    });
-    expect(html).not.toMatch(/Unlocks at 3\+ stores/);
-    expect(html).toContain("Most Popular");
+  it("Agency card describes the flat companion coverage, not a store requirement", () => {
+    const html = render({ plan: PLANS[PLAN_IDS.AGENCY] });
+    expect(html).toContain("Flat price covers this store plus 5 companion stores.");
   });
 });

@@ -16,9 +16,8 @@
 //
 // B's own ShopPlan row is authoritative for "who's paying for me"
 // (partnerLinkedTo). A's companions are queried live by that field rather
-// than stored as a redundant array on A — mirrors countMerchantStores in
-// agency-eligibility.server.js. A single field also enforces "a companion
-// has at most one payer" by construction.
+// than stored as a redundant array on A. A single field also enforces "a
+// companion has at most one payer" by construction.
 // ═══════════════════════════════════════════════════════════════════
 
 import { PLAN_IDS, maxPartnersFor, isPartnerLinked, PARTNER_LINKED_STATUS } from "./plans.js";

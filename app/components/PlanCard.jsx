@@ -1,5 +1,5 @@
 import PropTypes from "prop-types";
-import { PLAN_IDS, AGENCY_MIN_STORES, BILLING_INTERVAL, TRIAL_DAYS, yearlySavingsPercent } from "../lib/plans.js";
+import { PLAN_IDS, BILLING_INTERVAL, TRIAL_DAYS, yearlySavingsPercent } from "../lib/plans.js";
 import { planCta, planFeatures } from "../lib/billing-ui.js";
 import { BRAND } from "../lib/constants";
 
@@ -20,12 +20,11 @@ const { primary: P, secondary: S, font: F } = BRAND;
  * planCta() in billing-ui.js where it is unit-tested.
  */
 export function PlanCard({
-  plan, currentTier, currentInterval, period, eligibility, trialEligible = false, onSelect, onCancel, busy, featured = false,
+  plan, currentTier, currentInterval, period, trialEligible = false, onSelect, onCancel, busy, featured = false,
 }) {
   const isCurrent = plan.id === currentTier;
   const isFree = plan.id === PLAN_IDS.FREE;
   const yearly = period === BILLING_INTERVAL.YEARLY;
-  const needsEligibility = plan.requiresEligibility && !eligibility.eligible;
   const savings = yearlySavingsPercent(plan.id);
   const cta = planCta({ planId: plan.id, currentTier, interval: period, currentInterval, trialEligible });
   // "Most Popular" is for the plan we're recommending — never on the card the
@@ -54,7 +53,7 @@ export function PlanCard({
       ? `then ${recurringAmount}${recurringUnit} after your ${TRIAL_DAYS}-day free trial`
       : yearly
         ? `billed yearly · $${(plan.priceYearly / 12).toFixed(2)}/mo equivalent`
-        : `per month${plan.requiresEligibility ? " per store" : ""}, billed monthly`;
+        : "per month, billed monthly";
 
   function handleClick() {
     if (cta.kind === "downgrade") return onCancel?.();
@@ -131,13 +130,6 @@ export function PlanCard({
           ))}
         </ul>
 
-        {needsEligibility && (
-          <p className="mt-3 text-[11px] text-amber-700 font-medium leading-relaxed">
-            Unlocks at {AGENCY_MIN_STORES}+ stores — this account currently has {eligibility.storeCount}.
-            You can still choose it; we&apos;ll flag the account and may ask you to move to Pro.
-          </p>
-        )}
-
         <button
           type="button"
           disabled={cta.disabled || busy}
@@ -199,9 +191,9 @@ PlanCard.propTypes = {
     recordLimit: PropTypes.number,
     scheduledSync: PropTypes.bool,
     builtInAi: PropTypes.bool,
+    maxPartners: PropTypes.number,
     tagline: PropTypes.string,
     description: PropTypes.string,
-    requiresEligibility: PropTypes.bool,
   }).isRequired,
   currentTier: PropTypes.string.isRequired,
   // What the shop is billed on today. Null when it is on Free, or when
@@ -210,10 +202,6 @@ PlanCard.propTypes = {
   currentInterval: PropTypes.string,
   // Which period the toggle is showing. Decides the price AND the charge.
   period: PropTypes.string.isRequired,
-  eligibility: PropTypes.shape({
-    eligible: PropTypes.bool,
-    storeCount: PropTypes.number,
-  }).isRequired,
   // Whether this shop's next subscribe still comes with the 7-day trial —
   // from the billing loader, which computes it from the same inputs the
   // charge action uses. Drives the "$0 today" price framing and CTA copy.
@@ -221,8 +209,7 @@ PlanCard.propTypes = {
   onSelect: PropTypes.func.isRequired,
   onCancel: PropTypes.func,
   busy: PropTypes.bool.isRequired,
-  // Purely visual. Decided by isFeaturedPlan(planId, eligibility) in the
-  // route — a function of the plan and the shop's store count, never of the
-  // merchant's current tier. See its doc comment.
+  // Purely visual. Decided by isFeaturedPlan(planId) in the route — Pro,
+  // always.
   featured: PropTypes.bool,
 };

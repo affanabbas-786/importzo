@@ -51,10 +51,11 @@ trial and can be paid monthly or yearly; yearly saves 20%.
 
 - **Free** — $0/month. 1 store, 250 records per month. No credit card required.
 - **Pro** — $15/month or $144/year. Unlimited records, scheduled recurring
-  sync, and built-in AI SEO cleanup.
-- **Agency** — $10/month or $96/year per store. Everything in Pro at a
-  discount; unlocks automatically once the same merchant is running Importzo
-  on 3 or more stores.
+  sync, built-in AI SEO cleanup, and 1 companion store included.
+- **Agency** — $35/month or $336/year. Everything in Pro; one flat price
+  covers this store plus 5 companion stores you manage (linked by domain, no
+  per-store billing). The price never changes with store count — there is no
+  store-count requirement.
 
 ## Links
 

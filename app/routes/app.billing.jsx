@@ -8,10 +8,9 @@ import prisma from "../db.server";
 import { shopifyGraphql } from "../lib/shopify-api.server";
 import { getUsageStatus, setShopTier } from "../lib/usage.server";
 import { UsageMeter } from "../components/UsageMeter";
-import { checkAgencyEligibility, syncAgencyIneligibilityFlag } from "../lib/agency-eligibility.server";
 import { planSelectionUrl, resolveAppHandle, embeddedAppReturnUrl } from "../lib/app-pricing.server";
 import {
-  PLAN_IDS, PLANS, AGENCY_MIN_STORES, BILLING_INTERVAL, TRIAL_DAYS, billingPlanKey,
+  PLAN_IDS, PLANS, BILLING_INTERVAL, TRIAL_DAYS, billingPlanKey,
   tierFromSubscriptionName, intervalFromShopifyInterval, yearlySavingsPercent,
   isComplimentary,
 } from "../lib/plans.js";
@@ -107,17 +106,15 @@ export const loader = async ({ request }) => {
   const token = session.accessToken;
   const version = apiVersion || "2025-10";
 
-  // Every Shopify round trip this page needs, fired CONCURRENTLY rather than
-  // one after another. Sequentially these were ~4 calls back-to-back, and
-  // right after a charge approval — when Shopify's side is busiest — that
-  // stacked into the multi-second blank the merchant sees before the page
-  // paints. None of them depend on each other's result.
-  const [usageResult, eligibility, isTest, trialOverrideRaw] = await Promise.all([
+  // The Shopify round trips this page needs, fired CONCURRENTLY rather than
+  // one after another. Sequentially these stacked into the multi-second blank
+  // the merchant sees right after a charge approval. None depend on each
+  // other's result.
+  const [usageResult, isTest, trialOverrideRaw] = await Promise.all([
     reconcile({ billing, shop }).catch((err) => {
       console.warn(`[app.billing] reconciliation failed for ${shop}:`, err?.message);
       return null;
     }),
-    checkAgencyEligibility({ prisma, shopifyGraphql, shop, token, version }),
     isTestCharge({ shopifyGraphql, shop, token, version }).catch(() => false),
     trialDaysOverrideFor({ shopifyGraphql, shop, token, version }).catch(() => undefined),
   ]);
@@ -141,16 +138,6 @@ export const loader = async ({ request }) => {
     ? false
     : (isTest || grantsTrial(trialOverrideRaw));
 
-  // Phase 8 — Shopify's hosted plan page can't enforce the 3-store Agency
-  // rule, so a shop can end up on Agency without qualifying. Record it (the
-  // page renders a notice below; the flag also makes it reportable without
-  // waiting for the merchant to visit). Never revokes access — see
-  // syncAgencyIneligibilityFlag for why that's the deliberate choice. Local
-  // DB only, no Shopify call, so it stays after the parallel batch.
-  const agencyIneligibleSince = await syncAgencyIneligibilityFlag({
-    prisma, shop, tier: usage.tier, eligible: eligibility.eligible,
-  });
-
   // Shopify appends ?plan_handle=... when it sends the merchant back after
   // they pick a plan. Its only use here is to confirm the round trip
   // happened — the tier itself always comes from reconcile() above, never
@@ -158,8 +145,7 @@ export const loader = async ({ request }) => {
   const justSelectedPlan = new URL(request.url).searchParams.get("plan_handle");
 
   return {
-    usage: { ...usage, agencyIneligibleSince },
-    eligibility,
+    usage,
     justSelectedPlan,
     trialEligible,
   };
@@ -351,67 +337,6 @@ async function cancelPlan({ billing, shop, token, version }) {
 
 const { primary: P, secondary: S, font: F } = BRAND;
 
-
-/**
- * Phase 8 — the notice for a shop holding Agency without meeting the
- * 3-store requirement.
- *
- * Deliberately states all three things a merchant needs to know and none of
- * the ones they don't: nothing has been turned off, this IS being tracked,
- * and here are the two ways out. Silence in either direction — letting it
- * pass unmentioned, or quietly degrading the account — was the thing to
- * avoid.
- */
-function AgencyIneligibleNotice({ eligibility, since }) {
-  const shortfall = Math.max(0, AGENCY_MIN_STORES - eligibility.storeCount);
-  const flaggedOn = since ? new Date(since).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : null;
-
-  return (
-    <div className="rounded-xl border border-amber-300 bg-amber-50 p-5">
-      <div className="flex items-start gap-3">
-        <svg className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
-          <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
-        </svg>
-        <div className="min-w-0">
-          <p className="text-sm font-semibold text-amber-900" style={{ fontFamily: F }}>
-            You&apos;re on Agency pricing, but this account doesn&apos;t qualify yet
-          </p>
-          <p className="mt-1.5 text-xs text-amber-800 leading-relaxed">
-            Agency&apos;s discounted rate is for merchants running Importzo on {AGENCY_MIN_STORES} or more stores.
-            We currently count <strong>{eligibility.storeCount}</strong> {eligibility.storeCount === 1 ? "store" : "stores"} under
-            your store contact email{shortfall > 0 ? ` — ${shortfall} short` : ""}.
-          </p>
-          <p className="mt-2 text-xs text-amber-800 leading-relaxed">
-            <strong>Nothing has been switched off.</strong> Every Importzo feature stays fully available and
-            your imports keep running — Agency and Pro include exactly the same features, so this is a
-            pricing question, not an access one.
-            {flaggedOn ? ` We've noted this on your account since ${flaggedOn}.` : ""} If the store count
-            doesn&apos;t reach {AGENCY_MIN_STORES}, we may ask you to move to Pro pricing; we&apos;ll contact you first and
-            never change your plan without telling you.
-          </p>
-          <p className="mt-2 text-xs text-amber-800 leading-relaxed">
-            To resolve it: install Importzo on {shortfall > 0 ? `${shortfall} more ${shortfall === 1 ? "store" : "stores"}` : "your other stores"} using
-            the same store contact email, or switch to Pro using the plan cards below.
-          </p>
-          <p className="mt-2 text-[11px] text-amber-700">
-            Think this is wrong? Stores are matched by their Shopify contact email — if your stores use
-            different addresses, email support@dazzletech.co and we&apos;ll link them by hand.
-          </p>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-AgencyIneligibleNotice.propTypes = {
-  eligibility: PropTypes.shape({ storeCount: PropTypes.number }).isRequired,
-  // Date, not string: React Router's single-fetch (turbo-stream) preserves
-  // Date instances across the loader boundary, so this arrives as the Date
-  // syncAgencyIneligibilityFlag returned. Accepts both so the prop stays
-  // honest either way — new Date() handles each.
-  since: PropTypes.oneOfType([PropTypes.string, PropTypes.instanceOf(Date)]),
-};
-
 /**
  * Segmented pill: "Pay monthly" | "Pay yearly (save 20%)".
  *
@@ -451,11 +376,10 @@ PeriodToggle.propTypes = {
 };
 
 export default function BillingPage() {
-  const { usage, eligibility, justSelectedPlan, trialEligible } = useLoaderData();
+  const { usage, justSelectedPlan, trialEligible } = useLoaderData();
   const shopify = useAppBridge();
   const fetcher = useFetcher();
   const busy = fetcher.state !== "idle";
-  const showAgencyNotice = usage.tier === PLAN_IDS.AGENCY && !eligibility.eligible;
 
   // Drives RedirectingOverlay. Set true the instant a plan is selected —
   // BEFORE the fetcher submits — and only ever cleared on a failed action.
@@ -663,13 +587,6 @@ export default function BillingPage() {
 
         <UsageMeter usage={usage} showUpgrade />
 
-        {showAgencyNotice && (
-          <AgencyIneligibleNotice
-            eligibility={eligibility}
-            since={usage.agencyIneligibleSince}
-          />
-        )}
-
         <section className="space-y-4">
           <div className="text-center">
             <h2 className="text-lg font-semibold text-gray-900" style={{ fontFamily: F }}>Plans &amp; Pricing</h2>
@@ -689,21 +606,19 @@ export default function BillingPage() {
           </div>
 
           <div className="iz-plan-grid grid grid-cols-1 md:grid-cols-3 gap-4 items-stretch">
-            {/* Order and emphasis both depend on this shop's eligibility:
-                the best-fit plan is featured and sits in the middle. */}
-            {planDisplayOrder(eligibility).map((id) => (
+            {/* Free · Pro · Agency, with Pro featured in the middle. */}
+            {planDisplayOrder().map((id) => (
               <PlanCard
                 key={id}
                 plan={PLANS[id]}
                 currentTier={usage.tier}
                 currentInterval={usage.interval}
                 period={period}
-                eligibility={eligibility}
                 trialEligible={trialEligible}
                 onSelect={(interval) => handleSelectPlan(PLANS[id], interval)}
                 onCancel={handleCancelPlan}
                 busy={busy}
-                featured={isFeaturedPlan(id, eligibility)}
+                featured={isFeaturedPlan(id)}
               />
             ))}
           </div>
