@@ -1,6 +1,6 @@
 import PropTypes from "prop-types";
 import { useState, useCallback, useEffect, Fragment } from "react";
-import { useLoaderData, useNavigation, useRouteError, Link } from "react-router";
+import { useLoaderData, useNavigation, useRouteError, useFetcher, Link } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
@@ -10,6 +10,8 @@ import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
 import { DecorativeBanner, EmptyStateIllustration } from "../components/decor";
 import { COLORS } from "../lib/design-tokens";
 import { PLANS, PLAN_IDS, yearlySavingsPercent } from "../lib/plans.js";
+import { getUsageStatus } from "../lib/usage.server";
+import { shouldShowPartnerLinkNotice } from "../lib/partner-linking.server";
 import { getSavedSourceStore } from "../lib/safe-db";
 import { SetupGuide } from "../components/SetupGuide";
 
@@ -42,8 +44,21 @@ export const loader = async ({ request }) => {
 
   const lastRun = imports[0]?.createdAt ?? null;
 
+  // Phase 12 — if this store was linked as a companion by a payer, show a
+  // persistent banner until it's acknowledged or the store self-unlinks.
+  let partnerNotice = null;
+  try {
+    const usage = await getUsageStatus({ prisma, shop });
+    if (shouldShowPartnerLinkNotice(usage)) {
+      partnerNotice = { payer: usage.partnerLinkedTo };
+    }
+  } catch (err) {
+    console.warn("[importzo] dashboard loader: partner notice check failed:", err?.message || err);
+  }
+
   return {
     imports,
+    partnerNotice,
     setup: {
       // The saved row carries a decrypted token — only the domain goes out.
       sourceShop: saved?.sourceUrl || null,
@@ -307,8 +322,56 @@ function DashboardSkeleton() {
   );
 }
 
+// ── Phase 12 — companion notification banner ──
+// Shown on B's dashboard after a payer links it as a companion. Persists
+// (it's driven by loader state, not a one-time toast) until B dismisses it
+// or unlinks. Both actions post to the shared partner-link API and then
+// revalidate so the banner disappears on the next render.
+function CompanionNoticeBanner({ payer }) {
+  const fetcher = useFetcher();
+  const busy = fetcher.state !== "idle";
+
+  const post = (intent) => {
+    const fd = new FormData();
+    fd.append("intent", intent);
+    fetcher.submit(fd, { method: "post", action: "/api/partner-link" });
+  };
+
+  // Hide optimistically once either action has succeeded.
+  if (fetcher.data?.ok) return null;
+
+  return (
+    <div className="rounded-xl border border-emerald-300 bg-emerald-50 p-4 flex items-start gap-3">
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-semibold text-emerald-900">
+          You&apos;ve been added as a companion by {payer}
+        </p>
+        <p className="text-xs text-emerald-800 mt-1 leading-relaxed">
+          You now have Pro features — unlimited records, scheduled sync, and built-in AI — funded by
+          their subscription at no cost to you. You can end this partnership at any time.
+        </p>
+        <div className="mt-2 flex items-center gap-2 flex-wrap">
+          <button
+            type="button" disabled={busy} onClick={() => post("unlink-self")}
+            className="text-xs font-semibold px-3 py-1.5 rounded-lg text-red-700 border border-red-200 bg-white hover:bg-red-50 disabled:opacity-50"
+          >
+            Remove partnership
+          </button>
+          <button
+            type="button" disabled={busy} onClick={() => post("dismiss-link-notice")}
+            className="text-xs font-semibold px-3 py-1.5 rounded-lg text-emerald-900 border border-emerald-300 hover:bg-emerald-100 disabled:opacity-50"
+          >
+            Dismiss
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+CompanionNoticeBanner.propTypes = { payer: PropTypes.string };
+
 export default function Dashboard() {
-  const { imports, setup } = useLoaderData();
+  const { imports, setup, partnerNotice } = useLoaderData();
   const navigation = useNavigation();
   const [expanded, setExpanded] = useState({});
 
@@ -339,6 +402,8 @@ export default function Dashboard() {
           <img src="/logo.png" alt="Importzo" style={{ height: 40, width: "auto", objectFit: "contain" }} />
           <span style={{ fontSize: 18, fontWeight: 600, color: primary, fontFamily: font }}>Dashboard</span>
         </div>
+
+        {partnerNotice && <CompanionNoticeBanner payer={partnerNotice.payer} />}
 
         {/* Onboarding on a shop that hasn't run anything yet, a "this is
             working" line once it has. See SetupGuide. */}

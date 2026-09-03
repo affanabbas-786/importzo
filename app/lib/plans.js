@@ -91,24 +91,25 @@ export const PLANS = Object.freeze({
     shopifyPlanName: SHOPIFY_PLAN_NAME.pro,
     tagline: "Unlimited records + scheduled sync",
     description: "For growing stores that need unlimited volume and recurring sync.",
-    // 1 partner slot included at no extra charge — Pro's price never varies
-    // with partner count, unlike Agency's.
+    // Flat price covers this store (the payer) plus 1 companion store it can
+    // fund Pro access on — see partner-linking.server.js. The price never
+    // varies with companion count; 1 is simply the cap.
     maxPartners: 1,
   },
   [PLAN_IDS.AGENCY]: {
     id: PLAN_IDS.AGENCY,
     label: "Agency",
-    price: 10,
-    priceYearly: 96,
+    price: 25,
+    priceYearly: 240,
     recordLimit: Infinity,
     scheduledSync: true,
     builtInAi: true,
     shopifyPlanName: SHOPIFY_PLAN_NAME.agency,
-    tagline: "Everything in Pro, discounted per store",
-    description: `Unlocks once the same merchant has ${AGENCY_MIN_STORES}+ stores running Importzo.`,
+    tagline: "Everything in Pro, for up to 6 stores",
+    description: `Unlocks once the same merchant has ${AGENCY_MIN_STORES}+ stores running Importzo. Flat price covers this store plus 5 companion stores.`,
     requiresEligibility: true,
-    // Up to 5 partner slots, each adding AGENCY_PARTNER_PRICE/month — see
-    // agencyPartnerPrice below.
+    // Flat price covers this store (the payer) plus up to 5 companion
+    // stores. Like Pro, the price never varies within the cap.
     maxPartners: 5,
   },
 });
@@ -208,54 +209,17 @@ export function billingPlanKey(tier, interval) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Phase 12 — Agency per-partner pricing.
+// Phase 12 — Partner/Agency linking is FLAT-PRICED.
 //
-// Shopify's Billing API has no mutation that silently changes an existing
-// recurring subscription's price — any change requires a fresh
-// appSubscriptionCreate the merchant approves on Shopify's own screen (see
-// app.partners.jsx). Because the partner count is capped at 5
-// (PLANS.agency.maxPartners), every possible price is one of a small,
-// FIXED set of points, so — exactly like the base Pro/Agency prices above —
-// each is pre-registered as its own named plan in shopify.server.js's
-// BILLING_CONFIG rather than requesting an ad-hoc dynamic amount. A count
-// this app never reaches (6+) is deliberately NOT generated here; the cap
-// itself is enforced in partner-linking.server.js before any price is ever
-// computed for billing purposes.
+// Earlier this phase billed Agency at $10 base + $7 per linked companion,
+// realised as a discrete pre-registered Shopify plan per count. That is
+// gone: Pro ($15) and Agency ($25) are each a single flat AppSubscription
+// whose price does not change with companion count (Pro caps at 1
+// companion, Agency at 5). There is nothing to reconcile between the
+// advertised price and the billed price, so no per-count plan keys and no
+// price-divergence banner. billingPlanKey(tier, interval) is the only key
+// resolver — the same one the base Pro/Agency subscribe flow uses.
 // ═══════════════════════════════════════════════════════════════════
-
-// USD/month added to the Agency base price per linked partner store.
-export const AGENCY_PARTNER_ADDON = 7;
-
-/**
- * Agency's price at a given linked-partner count. Monthly is the base price
- * plus the flat per-partner add-on; yearly reuses the SAME discount ratio as
- * the base Agency yearly price (derived from it, not a second hardcoded
- * percentage) so the two can never quietly drift apart.
- */
-export function agencyPartnerPrice(partnerCount, interval = BILLING_INTERVAL.MONTHLY) {
-  const base = getPlan(PLAN_IDS.AGENCY);
-  const count = Number(partnerCount) || 0;
-  const monthly = base.price + AGENCY_PARTNER_ADDON * count;
-  if (interval !== BILLING_INTERVAL.YEARLY) return monthly;
-  const discountRatio = base.priceYearly / (base.price * 12);
-  return Math.round(monthly * 12 * discountRatio);
-}
-
-/**
- * The BILLING_CONFIG key for Agency at a given partner count.
- *
- * Zero partners reuses today's existing base Agency key/price unchanged —
- * only counts 1+ generate a new discrete key. Every generated name still
- * contains "Agency" (it's built from the base key), so tierFromSubscriptionName
- * below keeps recognising these subscriptions as Agency with no changes.
- */
-export function agencyPartnerBillingPlanKey(partnerCount, interval) {
-  const base = BILLING_PLAN_KEY[PLAN_IDS.AGENCY]?.[interval];
-  if (!base) return null;
-  const count = Number(partnerCount) || 0;
-  if (count === 0) return base;
-  return `${base} — ${count} Partner${count === 1 ? "" : "s"}`;
-}
 
 /** The price a given tier+interval actually charges, for confirmation copy. */
 export function priceFor(tier, interval) {

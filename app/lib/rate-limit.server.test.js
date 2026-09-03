@@ -130,14 +130,12 @@ describe("POLICIES", () => {
     expect(POLICIES.rollback.maxConcurrent).toBe(1);
   });
 
-  // Phase 12 — Partner/Agency linking. Pinned so an accidental edit (e.g.
-  // widening the window or the limit) can't quietly reopen the pairing-code
-  // brute-force surface without a test failing.
-  it("throttles partner-link attempts to 5 per minute — tighter than the general partnerAdmin CRUD policy", () => {
-    expect(POLICIES.partnerLinkAttempt).toBeDefined();
-    expect(POLICIES.partnerLinkAttempt.limit).toBe(5);
-    expect(POLICIES.partnerLinkAttempt.windowMs).toBe(60 * 1000);
+  // Phase 12 — Partner/Agency linking. Linking is direct by domain (no
+  // pairing code), so there is no brute-force surface and no bespoke tight
+  // policy — just the general partnerAdmin CRUD cap.
+  it("covers partner linking under the general partnerAdmin CRUD policy only", () => {
     expect(POLICIES.partnerAdmin).toBeDefined();
+    expect(POLICIES.partnerLinkAttempt).toBeUndefined();
   });
 });
 

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
-  generatePairingCode, regeneratePairingCode, partnerCount, listLinkedPartners,
-  linkPartner, unlinkPartner, cascadeRevokePartnerLinks,
+  partnerCount, listLinkedPartners, linkPartner, unlinkPartner,
+  dismissPartnerLinkNotice, shouldShowPartnerLinkNotice, cascadeRevokePartnerLinks,
 } from "./partner-linking.server.js";
 
 // Minimal in-memory fake covering exactly what this module touches:
@@ -42,47 +42,9 @@ function fakePrisma(rows = {}) {
   return { prisma, store };
 }
 
-const FIFTEEN_MIN = 15 * 60 * 1000;
-
-describe("generatePairingCode", () => {
-  it("produces a 6-digit numeric code", () => {
-    for (let i = 0; i < 20; i++) {
-      const code = generatePairingCode();
-      expect(code).toMatch(/^\d{6}$/);
-    }
-  });
-});
-
-describe("regeneratePairingCode", () => {
-  it("sets a code with a 15-minute expiry", async () => {
-    const { prisma } = fakePrisma({ "b.myshopify.com": {} });
-    const now = new Date("2026-09-01T12:00:00.000Z");
-    const { code, expiresAt } = await regeneratePairingCode({ prisma, shop: "b.myshopify.com", now });
-    expect(code).toMatch(/^\d{6}$/);
-    expect(expiresAt.getTime()).toBe(now.getTime() + FIFTEEN_MIN);
-  });
-
-  it("overwrites — and so immediately invalidates — a previous code", async () => {
-    const { prisma, store } = fakePrisma({ "b.myshopify.com": { pairingCode: "111111", pairingCodeExpiresAt: new Date(Date.now() + FIFTEEN_MIN) } });
-    await regeneratePairingCode({ prisma, shop: "b.myshopify.com" });
-    expect(store.get("b.myshopify.com").pairingCode).not.toBe("111111");
-  });
-
-  it("retries on a unique-constraint collision rather than surfacing it", async () => {
-    const { prisma } = fakePrisma({ "b.myshopify.com": {} });
-    const collision = Object.assign(new Error("Unique constraint failed"), { code: "P2002" });
-    let attempts = 0;
-    prisma.shopPlan.update = vi.fn(async (args) => {
-      attempts += 1;
-      if (attempts < 3) throw collision;
-      const next = { ...(await prisma.shopPlan.findUnique({ where: args.where })), ...args.data };
-      return next;
-    });
-    const { code } = await regeneratePairingCode({ prisma, shop: "b.myshopify.com" });
-    expect(code).toMatch(/^\d{6}$/);
-    expect(attempts).toBe(3);
-  });
-});
+// An installed companion store, ready to be linked (has a ShopPlan row, not
+// soft-uninstalled). Linking is now direct by domain — no pairing code.
+const installed = (extra = {}) => ({ tier: "free", uninstalledAt: null, ...extra });
 
 describe("partnerCount / listLinkedPartners", () => {
   it("counts and lists only rows linked to this payer", async () => {
@@ -97,7 +59,7 @@ describe("partnerCount / listLinkedPartners", () => {
     expect(list.map((p) => p.shop)).toEqual(["b1.myshopify.com", "b2.myshopify.com"]);
   });
 
-  it("flags a partner that also holds its own independently active subscription", async () => {
+  it("flags a companion that also holds its own independently active subscription", async () => {
     const { prisma } = fakePrisma({
       "b.myshopify.com": { partnerLinkedTo: "a.myshopify.com", tier: "pro", subscriptionId: "gid://x", subscriptionStatus: "ACTIVE" },
     });
@@ -108,110 +70,103 @@ describe("partnerCount / listLinkedPartners", () => {
 
 describe("linkPartner", () => {
   const now = new Date("2026-09-01T12:00:00.000Z");
-  const validCode = () => ({ pairingCode: "424242", pairingCodeExpiresAt: new Date(now.getTime() + 60_000) });
 
   it("rejects a Free-tier payer outright", async () => {
-    const { prisma } = fakePrisma({ "b.myshopify.com": validCode() });
-    const result = await linkPartner({ prisma, payerShop: "a.myshopify.com", payerTier: "free", partnerDomain: "b.myshopify.com", pairingCode: "424242", now });
+    const { prisma } = fakePrisma({ "b.myshopify.com": installed() });
+    const result = await linkPartner({ prisma, payerShop: "a.myshopify.com", payerTier: "free", partnerDomain: "b.myshopify.com", now });
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/upgrade to pro or agency/i);
   });
 
-  it("enforces the Pro cap of 1 partner", async () => {
+  it("rejects a companion that hasn't installed Importzo (no ShopPlan row)", async () => {
+    const { prisma } = fakePrisma({});
+    const result = await linkPartner({ prisma, payerShop: "a.myshopify.com", payerTier: "pro", partnerDomain: "b.myshopify.com", now });
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/no store with importzo installed/i);
+  });
+
+  it("rejects a companion that has soft-uninstalled", async () => {
+    const { prisma } = fakePrisma({ "b.myshopify.com": installed({ uninstalledAt: new Date("2026-08-30") }) });
+    const result = await linkPartner({ prisma, payerShop: "a.myshopify.com", payerTier: "pro", partnerDomain: "b.myshopify.com", now });
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/no store with importzo installed/i);
+  });
+
+  it("enforces the Pro cap of 1 companion", async () => {
     const { prisma } = fakePrisma({
       "already-linked.myshopify.com": { partnerLinkedTo: "a.myshopify.com" },
-      "b.myshopify.com": validCode(),
+      "b.myshopify.com": installed(),
     });
-    const result = await linkPartner({ prisma, payerShop: "a.myshopify.com", payerTier: "pro", partnerDomain: "b.myshopify.com", pairingCode: "424242", now });
+    const result = await linkPartner({ prisma, payerShop: "a.myshopify.com", payerTier: "pro", partnerDomain: "b.myshopify.com", now });
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/limit/i);
   });
 
-  it("enforces the Agency cap of 5 partners", async () => {
+  it("enforces the Agency cap of 5 companions", async () => {
     const linkedAlready = Object.fromEntries(
       Array.from({ length: 5 }, (_, i) => [`p${i}.myshopify.com`, { partnerLinkedTo: "a.myshopify.com" }]),
     );
-    const { prisma } = fakePrisma({ ...linkedAlready, "b.myshopify.com": validCode() });
-    const result = await linkPartner({ prisma, payerShop: "a.myshopify.com", payerTier: "agency", partnerDomain: "b.myshopify.com", pairingCode: "424242", now });
+    const { prisma } = fakePrisma({ ...linkedAlready, "b.myshopify.com": installed() });
+    const result = await linkPartner({ prisma, payerShop: "a.myshopify.com", payerTier: "agency", partnerDomain: "b.myshopify.com", now });
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/limit/i);
   });
 
-  it("allows the 6th distinct partner slot to be denied but the 5th to succeed (boundary)", async () => {
+  it("allows the 5th companion slot to succeed (boundary)", async () => {
     const linkedAlready = Object.fromEntries(
       Array.from({ length: 4 }, (_, i) => [`p${i}.myshopify.com`, { partnerLinkedTo: "a.myshopify.com" }]),
     );
-    const { prisma } = fakePrisma({ ...linkedAlready, "b.myshopify.com": validCode() });
-    const result = await linkPartner({ prisma, payerShop: "a.myshopify.com", payerTier: "agency", partnerDomain: "b.myshopify.com", pairingCode: "424242", now });
+    const { prisma } = fakePrisma({ ...linkedAlready, "b.myshopify.com": installed() });
+    const result = await linkPartner({ prisma, payerShop: "a.myshopify.com", payerTier: "agency", partnerDomain: "b.myshopify.com", now });
     expect(result.ok).toBe(true);
   });
 
-  it("rejects an expired pairing code", async () => {
-    const { prisma } = fakePrisma({ "b.myshopify.com": { pairingCode: "424242", pairingCodeExpiresAt: new Date(now.getTime() - 1000) } });
-    const result = await linkPartner({ prisma, payerShop: "a.myshopify.com", payerTier: "pro", partnerDomain: "b.myshopify.com", pairingCode: "424242", now });
+  it("rejects a companion already linked to a different payer", async () => {
+    const { prisma } = fakePrisma({ "b.myshopify.com": installed({ partnerLinkedTo: "someone-else.myshopify.com" }) });
+    const result = await linkPartner({ prisma, payerShop: "a.myshopify.com", payerTier: "pro", partnerDomain: "b.myshopify.com", now });
     expect(result.ok).toBe(false);
-    expect(result.error).toMatch(/invalid or expired/i);
+    expect(result.error).toMatch(/already linked to another/i);
   });
 
-  it("rejects a mismatched pairing code without revealing which check failed", async () => {
-    const { prisma } = fakePrisma({ "b.myshopify.com": validCode() });
-    const result = await linkPartner({ prisma, payerShop: "a.myshopify.com", payerTier: "pro", partnerDomain: "b.myshopify.com", pairingCode: "000000", now });
+  it("reports a companion already linked to THIS payer as a no-op error, not a duplicate link", async () => {
+    const { prisma } = fakePrisma({ "b.myshopify.com": installed({ partnerLinkedTo: "a.myshopify.com" }) });
+    const result = await linkPartner({ prisma, payerShop: "a.myshopify.com", payerTier: "pro", partnerDomain: "b.myshopify.com", now });
     expect(result.ok).toBe(false);
-    expect(result.error).toMatch(/invalid or expired/i);
+    expect(result.error).toMatch(/already one of your companions/i);
   });
 
-  it("rejects a partner already linked to a different payer", async () => {
-    const { prisma } = fakePrisma({ "b.myshopify.com": { ...validCode(), partnerLinkedTo: "someone-else.myshopify.com" } });
-    const result = await linkPartner({ prisma, payerShop: "a.myshopify.com", payerTier: "pro", partnerDomain: "b.myshopify.com", pairingCode: "424242", now });
-    expect(result.ok).toBe(false);
-    expect(result.error).toMatch(/already linked/i);
-  });
-
-  it("single-use: a code cannot be redeemed twice, even by a different would-be payer", async () => {
-    const { prisma } = fakePrisma({ "b.myshopify.com": validCode() });
-    const first = await linkPartner({ prisma, payerShop: "a.myshopify.com", payerTier: "pro", partnerDomain: "b.myshopify.com", pairingCode: "424242", now });
-    expect(first.ok).toBe(true);
-
-    // Same store, same code — the first link already cleared the code, so
-    // a replay reads as an invalid/expired code (the code check runs before
-    // the already-linked check), not a distinguishable "already used" error.
-    const second = await linkPartner({ prisma, payerShop: "c.myshopify.com", payerTier: "pro", partnerDomain: "b.myshopify.com", pairingCode: "424242", now });
-    expect(second.ok).toBe(false);
-    expect(second.error).toMatch(/invalid or expired/i);
-  });
-
-  it("on success: sets the partner to Pro / PARTNER_LINKED, clears the code, and normalizes a bare domain", async () => {
-    const { prisma, store } = fakePrisma({ "b.myshopify.com": validCode() });
-    const result = await linkPartner({ prisma, payerShop: "a.myshopify.com", payerTier: "pro", partnerDomain: "b", pairingCode: "424242", now });
+  it("on success: sets the companion to Pro / PARTNER_LINKED, arms the notice, and normalizes a bare domain", async () => {
+    const { prisma, store } = fakePrisma({ "b.myshopify.com": installed({ partnerLinkNoticeDismissedAt: new Date("2020-01-01") }) });
+    const result = await linkPartner({ prisma, payerShop: "a.myshopify.com", payerTier: "pro", partnerDomain: "b", now });
     expect(result.ok).toBe(true);
     const row = store.get("b.myshopify.com");
     expect(row.partnerLinkedTo).toBe("a.myshopify.com");
     expect(row.tier).toBe("pro");
     expect(row.subscriptionStatus).toBe("PARTNER_LINKED");
     expect(row.subscriptionId).toBeNull();
-    expect(row.pairingCode).toBeNull();
-    expect(row.pairingCodeExpiresAt).toBeNull();
+    // Notice re-armed so B's dashboard banner shows for this link.
+    expect(row.partnerLinkNoticeDismissedAt).toBeNull();
   });
 
-  it("warns instead of writing when the partner already holds its own active subscription", async () => {
+  it("warns instead of writing when the companion already holds its own active subscription", async () => {
     const { prisma, store } = fakePrisma({
-      "b.myshopify.com": { ...validCode(), subscriptionId: "gid://own-sub", subscriptionStatus: "ACTIVE", tier: "pro" },
+      "b.myshopify.com": installed({ subscriptionId: "gid://own-sub", subscriptionStatus: "ACTIVE", tier: "pro" }),
     });
-    const result = await linkPartner({ prisma, payerShop: "a.myshopify.com", payerTier: "agency", partnerDomain: "b.myshopify.com", pairingCode: "424242", now });
+    const result = await linkPartner({ prisma, payerShop: "a.myshopify.com", payerTier: "agency", partnerDomain: "b.myshopify.com", now });
     expect(result.ok).toBe(false);
     expect(result.warning).toBe(true);
-    expect(result.error).toMatch(/already has an active pro subscription/i);
+    expect(result.error).toMatch(/already has its own active pro subscription/i);
     // Nothing written.
     expect(store.get("b.myshopify.com").partnerLinkedTo).toBeUndefined();
   });
 
-  it("confirmOverwrite links the slot without touching the partner's own tier/subscription", async () => {
+  it("confirmOverwrite links the slot without touching the companion's own tier/subscription", async () => {
     const { prisma, store } = fakePrisma({
-      "b.myshopify.com": { ...validCode(), subscriptionId: "gid://own-sub", subscriptionStatus: "ACTIVE", tier: "pro" },
+      "b.myshopify.com": installed({ subscriptionId: "gid://own-sub", subscriptionStatus: "ACTIVE", tier: "pro" }),
     });
     const result = await linkPartner({
       prisma, payerShop: "a.myshopify.com", payerTier: "agency", partnerDomain: "b.myshopify.com",
-      pairingCode: "424242", confirmOverwrite: true, now,
+      confirmOverwrite: true, now,
     });
     expect(result.ok).toBe(true);
     const row = store.get("b.myshopify.com");
@@ -221,18 +176,18 @@ describe("linkPartner", () => {
   });
 
   it("rejects a store linking itself", async () => {
-    const { prisma } = fakePrisma({ "a.myshopify.com": validCode() });
-    const result = await linkPartner({ prisma, payerShop: "a.myshopify.com", payerTier: "agency", partnerDomain: "a.myshopify.com", pairingCode: "424242", now });
+    const { prisma } = fakePrisma({ "a.myshopify.com": installed() });
+    const result = await linkPartner({ prisma, payerShop: "a.myshopify.com", payerTier: "agency", partnerDomain: "a.myshopify.com", now });
     expect(result.ok).toBe(false);
   });
 
   it("two sequential attempts against a 1-slot Pro payer: second is rejected once the cap is reached", async () => {
     const { prisma } = fakePrisma({
-      "b1.myshopify.com": validCode(),
-      "b2.myshopify.com": { pairingCode: "999999", pairingCodeExpiresAt: new Date(now.getTime() + 60_000) },
+      "b1.myshopify.com": installed(),
+      "b2.myshopify.com": installed(),
     });
-    const first = await linkPartner({ prisma, payerShop: "a.myshopify.com", payerTier: "pro", partnerDomain: "b1.myshopify.com", pairingCode: "424242", now });
-    const second = await linkPartner({ prisma, payerShop: "a.myshopify.com", payerTier: "pro", partnerDomain: "b2.myshopify.com", pairingCode: "999999", now });
+    const first = await linkPartner({ prisma, payerShop: "a.myshopify.com", payerTier: "pro", partnerDomain: "b1.myshopify.com", now });
+    const second = await linkPartner({ prisma, payerShop: "a.myshopify.com", payerTier: "pro", partnerDomain: "b2.myshopify.com", now });
     expect(first.ok).toBe(true);
     expect(second.ok).toBe(false);
     expect(second.error).toMatch(/limit/i);
@@ -240,9 +195,9 @@ describe("linkPartner", () => {
 });
 
 describe("unlinkPartner", () => {
-  it("reverts a plain partner-linked shop to Free", async () => {
+  it("reverts a plain companion shop to Free and clears the notice flag", async () => {
     const { prisma, store } = fakePrisma({
-      "b.myshopify.com": { partnerLinkedTo: "a.myshopify.com", tier: "pro", subscriptionStatus: "PARTNER_LINKED", subscriptionId: null },
+      "b.myshopify.com": { partnerLinkedTo: "a.myshopify.com", tier: "pro", subscriptionStatus: "PARTNER_LINKED", subscriptionId: null, partnerLinkNoticeDismissedAt: new Date() },
     });
     const result = await unlinkPartner({ prisma, partnerShop: "b.myshopify.com" });
     expect(result).toEqual({ ok: true, reverted: true });
@@ -251,9 +206,10 @@ describe("unlinkPartner", () => {
     expect(row.tier).toBe("free");
     expect(row.subscriptionStatus).toBeNull();
     expect(row.subscriptionId).toBeNull();
+    expect(row.partnerLinkNoticeDismissedAt).toBeNull();
   });
 
-  it("leaves an independently-paying partner's own plan untouched, only clearing the link", async () => {
+  it("leaves an independently-paying companion's own plan untouched, only clearing the link", async () => {
     const { prisma, store } = fakePrisma({
       "b.myshopify.com": { partnerLinkedTo: "a.myshopify.com", tier: "pro", subscriptionStatus: "ACTIVE", subscriptionId: "gid://own-sub" },
     });
@@ -273,8 +229,36 @@ describe("unlinkPartner", () => {
   });
 });
 
+describe("dismissPartnerLinkNotice / shouldShowPartnerLinkNotice", () => {
+  it("shows the banner for a fresh companion link and hides it after dismissal", async () => {
+    const { prisma, store } = fakePrisma({
+      "b.myshopify.com": { partnerLinkedTo: "a.myshopify.com", subscriptionStatus: "PARTNER_LINKED", partnerLinkNoticeDismissedAt: null },
+    });
+    expect(shouldShowPartnerLinkNotice(store.get("b.myshopify.com"))).toBe(true);
+
+    const now = new Date("2026-09-03T00:00:00.000Z");
+    const result = await dismissPartnerLinkNotice({ prisma, shop: "b.myshopify.com", now });
+    expect(result).toEqual({ ok: true, dismissed: true });
+    expect(store.get("b.myshopify.com").partnerLinkNoticeDismissedAt).toEqual(now);
+    expect(shouldShowPartnerLinkNotice(store.get("b.myshopify.com"))).toBe(false);
+  });
+
+  it("never shows for a store that isn't a companion, or one paying independently", () => {
+    expect(shouldShowPartnerLinkNotice({ partnerLinkedTo: null })).toBe(false);
+    expect(shouldShowPartnerLinkNotice({
+      partnerLinkedTo: "a.myshopify.com", subscriptionStatus: "ACTIVE", partnerLinkNoticeDismissedAt: null,
+    })).toBe(false);
+  });
+
+  it("dismiss is a no-op for a store that isn't linked", async () => {
+    const { prisma } = fakePrisma({ "b.myshopify.com": { tier: "free" } });
+    const result = await dismissPartnerLinkNotice({ prisma, shop: "b.myshopify.com" });
+    expect(result).toEqual({ ok: true, dismissed: false });
+  });
+});
+
 describe("cascadeRevokePartnerLinks", () => {
-  it("reverts every partner linked to the payer", async () => {
+  it("reverts every companion linked to the payer", async () => {
     const { prisma, store } = fakePrisma({
       "b1.myshopify.com": { partnerLinkedTo: "a.myshopify.com", tier: "pro", subscriptionStatus: "PARTNER_LINKED" },
       "b2.myshopify.com": { partnerLinkedTo: "a.myshopify.com", tier: "pro", subscriptionStatus: "PARTNER_LINKED" },

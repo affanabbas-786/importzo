@@ -7,7 +7,6 @@ import {
 } from "@shopify/shopify-app-react-router/server";
 import {
   PLANS, PLAN_IDS, BILLING_PLAN_KEY, BILLING_INTERVAL, TRIAL_DAYS,
-  agencyPartnerPrice, agencyPartnerBillingPlanKey,
 } from "./lib/plans.js";
 import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prisma";
 import prisma from "./db.server";
@@ -132,36 +131,11 @@ const BASE_BILLING_CONFIG = Object.fromEntries(
   ),
 );
 
-// Phase 12 — Partner/Agency linking. Agency's price varies with linked-
-// partner count ($10 base + $7/partner), and Shopify has no mutation to
-// silently change an existing recurring subscription's price — any change
-// needs a fresh appSubscriptionCreate the merchant approves (see
-// app.partners.jsx). The partner count is capped at PLANS.agency.maxPartners
-// (5), so every possible price is one of a small FIXED set of points —
-// pre-registering each as its own named plan here, the same way the base
-// prices above already work, rather than requesting an ad-hoc dynamic
-// amount at request time. Count 0 reuses the base "Importzo Agency
-// Monthly/Yearly" key above unchanged (agencyPartnerBillingPlanKey returns
-// the base key for count 0), so this only ADDS counts 1 through 5.
-const AGENCY_PARTNER_BILLING_CONFIG = Object.fromEntries(
-  Array.from({ length: PLANS[PLAN_IDS.AGENCY].maxPartners }, (_, i) => i + 1).flatMap((partnerCount) =>
-    [BILLING_INTERVAL.MONTHLY, BILLING_INTERVAL.YEARLY].map((interval) => [
-      agencyPartnerBillingPlanKey(partnerCount, interval),
-      {
-        lineItems: [
-          {
-            amount: agencyPartnerPrice(partnerCount, interval),
-            currencyCode: "USD",
-            interval: interval === BILLING_INTERVAL.YEARLY ? BillingInterval.Annual : BillingInterval.Every30Days,
-          },
-        ],
-        trialDays: TRIAL_DAYS,
-      },
-    ]),
-  ),
-);
-
-const BILLING_CONFIG = { ...BASE_BILLING_CONFIG, ...AGENCY_PARTNER_BILLING_CONFIG };
+// Phase 12 — Partner/Agency linking is flat-priced: Pro ($15) covers the
+// payer + 1 companion, Agency ($25) the payer + 5, and neither price moves
+// with companion count. So there are no per-count plan keys — the four
+// base entries above are the whole billing config.
+const BILLING_CONFIG = BASE_BILLING_CONFIG;
 
 // ═══════════════════════════════════════════════════════════════════
 // API secret rotation — dual webhook verification

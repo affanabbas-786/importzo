@@ -8,7 +8,7 @@ function setShopPlan(shop, data) {
   db.plans.set(shop, {
     id: `plan-${shop}`, shop, tier: "free", recordsUsed: 0, usagePeriodStart: new Date(),
     subscriptionId: null, subscriptionStatus: null, shopOwnerEmail: null, uninstalledAt: null,
-    partnerLinkedTo: null, pairingCode: null, pairingCodeExpiresAt: null,
+    partnerLinkedTo: null, partnerLinkNoticeDismissedAt: null,
     createdAt: new Date(), updatedAt: new Date(), ...data,
   });
 }
@@ -84,36 +84,26 @@ describe("api.partner-link", () => {
     });
   });
 
-  describe("generate-code", () => {
-    it("sets a 6-digit code on the authenticated shop's own row", async () => {
-      const body = await (await action({ request: mockActionRequest({ intent: "generate-code" }) })).json();
-      expect(body.ok).toBe(true);
-      expect(body.pairingCode).toMatch(/^\d{6}$/);
-      expect(db.plans.get(SHOP).pairingCode).toBe(body.pairingCode);
-    });
-  });
-
   describe("link-partner", () => {
+    // Companion just needs Importzo installed (a ShopPlan row, not
+    // soft-uninstalled) — linking is direct by domain, no pairing code.
     function seedPartner(overrides = {}) {
-      setShopPlan("partner.myshopify.com", {
-        pairingCode: "424242", pairingCodeExpiresAt: new Date(Date.now() + 60_000), ...overrides,
-      });
+      setShopPlan("partner.myshopify.com", { tier: "free", uninstalledAt: null, ...overrides });
     }
 
-    it("links a valid partner and reports it back", async () => {
+    it("links a companion by domain and reports it back", async () => {
       seedPartner();
       const body = await (await action({
-        request: mockActionRequest({ intent: "link-partner", partnerDomain: "partner.myshopify.com", pairingCode: "424242" }),
+        request: mockActionRequest({ intent: "link-partner", partnerDomain: "partner.myshopify.com" }),
       })).json();
 
       expect(body.ok).toBe(true);
       expect(db.plans.get("partner.myshopify.com")).toMatchObject({ partnerLinkedTo: SHOP, tier: "pro", subscriptionStatus: "PARTNER_LINKED" });
     });
 
-    it("400s on an invalid pairing code", async () => {
-      seedPartner();
+    it("400s when no store with Importzo is found at that domain", async () => {
       const response = await action({
-        request: mockActionRequest({ intent: "link-partner", partnerDomain: "partner.myshopify.com", pairingCode: "000000" }),
+        request: mockActionRequest({ intent: "link-partner", partnerDomain: "nobody.myshopify.com" }),
       });
       expect(response.status).toBe(400);
       expect((await response.json()).ok).toBe(false);
@@ -123,26 +113,26 @@ describe("api.partner-link", () => {
       setShopPlan(SHOP, { tier: "free" });
       seedPartner();
       const response = await action({
-        request: mockActionRequest({ intent: "link-partner", partnerDomain: "partner.myshopify.com", pairingCode: "424242" }),
+        request: mockActionRequest({ intent: "link-partner", partnerDomain: "partner.myshopify.com" }),
       });
       expect(response.status).toBe(400);
       expect(db.plans.get("partner.myshopify.com").partnerLinkedTo).toBeNull();
     });
 
-    it("400s at the Pro cap of 1 partner", async () => {
+    it("400s at the Pro cap of 1 companion", async () => {
       setShopPlan(SHOP, { tier: "pro" });
       setShopPlan("already.myshopify.com", { partnerLinkedTo: SHOP });
       seedPartner();
       const response = await action({
-        request: mockActionRequest({ intent: "link-partner", partnerDomain: "partner.myshopify.com", pairingCode: "424242" }),
+        request: mockActionRequest({ intent: "link-partner", partnerDomain: "partner.myshopify.com" }),
       });
       expect(response.status).toBe(400);
     });
 
-    it("returns a warning (not a hard failure) when the partner already has its own active subscription", async () => {
+    it("returns a warning (not a hard failure) when the companion already has its own active subscription", async () => {
       seedPartner({ subscriptionId: "gid://own-sub", subscriptionStatus: "ACTIVE", tier: "pro" });
       const response = await action({
-        request: mockActionRequest({ intent: "link-partner", partnerDomain: "partner.myshopify.com", pairingCode: "424242" }),
+        request: mockActionRequest({ intent: "link-partner", partnerDomain: "partner.myshopify.com" }),
       });
       const body = await response.json();
       expect(response.status).toBe(400);
@@ -150,64 +140,30 @@ describe("api.partner-link", () => {
       expect(db.plans.get("partner.myshopify.com").partnerLinkedTo).toBeNull(); // nothing written yet
     });
 
-    it("proceeds and links (without touching the partner's own subscription) once confirmOverwrite is set", async () => {
+    it("proceeds and links (without touching the companion's own subscription) once confirmOverwrite is set", async () => {
       seedPartner({ subscriptionId: "gid://own-sub", subscriptionStatus: "ACTIVE", tier: "pro" });
       const body = await (await action({
-        request: mockActionRequest({ intent: "link-partner", partnerDomain: "partner.myshopify.com", pairingCode: "424242", confirmOverwrite: "true" }),
+        request: mockActionRequest({ intent: "link-partner", partnerDomain: "partner.myshopify.com", confirmOverwrite: "true" }),
       })).json();
       expect(body.ok).toBe(true);
       const row = db.plans.get("partner.myshopify.com");
       expect(row.partnerLinkedTo).toBe(SHOP);
       expect(row.subscriptionId).toBe("gid://own-sub"); // untouched
     });
+  });
 
-    // Brute-force guard on the pairing code: 5 attempts/minute per
-    // authenticated shop, regardless of outcome — see rate-limit.server.js's
-    // partnerLinkAttempt policy.
-    describe("attempt throttle", () => {
-      function attempt(code = "000000") {
-        return action({
-          request: mockActionRequest({ intent: "link-partner", partnerDomain: "partner.myshopify.com", pairingCode: code }),
-        });
-      }
+  describe("dismiss-link-notice", () => {
+    it("acknowledges the companion banner on the authenticated shop", async () => {
+      setShopPlan(SHOP, { partnerLinkedTo: "payer.myshopify.com", tier: "pro", subscriptionStatus: "PARTNER_LINKED" });
+      const body = await (await action({ request: mockActionRequest({ intent: "dismiss-link-notice" }) })).json();
+      expect(body.ok).toBe(true);
+      expect(body.dismissed).toBe(true);
+      expect(db.plans.get(SHOP).partnerLinkNoticeDismissedAt).toBeInstanceOf(Date);
+    });
 
-      it("allows 5 attempts in a minute, then 429s the 6th", async () => {
-        seedPartner();
-        for (let i = 0; i < 5; i++) {
-          const response = await attempt(); // wrong code every time — never succeeds, never consumes it
-          expect(response.status).toBe(400);
-        }
-        const sixth = await attempt();
-        expect(sixth.status).toBe(429);
-        const body = await sixth.json();
-        expect(body.ok).toBe(false);
-        expect(body.retryAfterSeconds).toBeGreaterThan(0);
-      });
-
-      it("throttles a successful attempt exactly the same as a failed one (counts every attempt)", async () => {
-        // 4 failures against "partner", then a genuine 5th attempt against a
-        // second, correctly-coded store — both count toward the SAME
-        // per-payer bucket, so the successful one is still the 5th, and a
-        // 6th (of either kind) is blocked.
-        seedPartner();
-        setShopPlan("partner2.myshopify.com", { pairingCode: "111111", pairingCodeExpiresAt: new Date(Date.now() + 60_000) });
-        for (let i = 0; i < 4; i++) await attempt();
-        const fifth = await action({
-          request: mockActionRequest({ intent: "link-partner", partnerDomain: "partner2.myshopify.com", pairingCode: "111111" }),
-        });
-        expect(fifth.status).toBe(200);
-        expect((await fifth.json()).ok).toBe(true);
-
-        const sixth = await attempt();
-        expect(sixth.status).toBe(429);
-      });
-
-      it("does not throttle generate-code / remove-partner / unlink-self under the same tight cap", async () => {
-        seedPartner();
-        for (let i = 0; i < 5; i++) await attempt(); // exhaust the link-partner-specific bucket
-        const generate = await action({ request: mockActionRequest({ intent: "generate-code" }) });
-        expect(generate.status).toBe(200); // partnerAdmin's much looser cap, unaffected
-      });
+    it("is a harmless no-op for a shop that isn't a companion", async () => {
+      const body = await (await action({ request: mockActionRequest({ intent: "dismiss-link-notice" }) })).json();
+      expect(body).toMatchObject({ ok: true, dismissed: false });
     });
   });
 

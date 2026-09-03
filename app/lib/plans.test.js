@@ -9,7 +9,7 @@ describe("plans.js", () => {
   it("defines exactly the three plans in the product spec, with the specified prices", () => {
     expect(PLANS.free.price).toBe(0);
     expect(PLANS.pro.price).toBe(15);
-    expect(PLANS.agency.price).toBe(10);
+    expect(PLANS.agency.price).toBe(25);
   });
 
   it("defines the specified record limits", () => {
@@ -81,11 +81,21 @@ describe("plans.js", () => {
     expect(AI_MONTHLY_CALL_CAP).toBe(500);
   });
 
-  // Phase 12 — Partner/Agency linking.
-  it("caps partner slots per the product spec: Free 0, Pro 1, Agency 5", () => {
+  // Phase 12 — Partner/Agency linking, flat-priced.
+  it("caps companion slots per the product spec: Free 0, Pro 1, Agency 5", () => {
     expect(maxPartnersFor(PLAN_IDS.FREE)).toBe(0);
     expect(maxPartnersFor(PLAN_IDS.PRO)).toBe(1);
     expect(maxPartnersFor(PLAN_IDS.AGENCY)).toBe(5);
+  });
+
+  it("prices Pro and Agency flat — no per-companion add-on helpers exist", async () => {
+    // Flat: $15 covers payer + 1 companion, $25 covers payer + 5.
+    expect(PLANS.pro.price).toBe(15);
+    expect(PLANS.agency.price).toBe(25);
+    const mod = await import("./plans.js");
+    expect(mod.agencyPartnerPrice).toBeUndefined();
+    expect(mod.agencyPartnerBillingPlanKey).toBeUndefined();
+    expect(mod.AGENCY_PARTNER_ADDON).toBeUndefined();
   });
 
   it("maxPartnersFor falls back to 0 for an unknown tier rather than throwing", () => {

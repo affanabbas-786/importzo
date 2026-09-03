@@ -109,19 +109,10 @@ export const POLICIES = Object.freeze({
   themeJob: { limit: 10, windowMs: 60 * 60 * 1000, maxConcurrent: 1 },
   // Cheap CRUD — saved field-mapping templates (Phase 4).
   mappingTemplate: { limit: 120, windowMs: 60 * 60 * 1000, maxConcurrent: 10 },
-  // Cheap CRUD — partner/agency linking (Phase 12): generate/regenerate a
-  // pairing code, link/unlink a partner store.
+  // Cheap CRUD — partner/agency linking (Phase 12): link/unlink a companion
+  // store, dismiss the companion banner. Linking is direct by domain with no
+  // pairing code, so there's no guessing target needing a tighter policy.
   partnerAdmin: { limit: 120, windowMs: 60 * 60 * 1000, maxConcurrent: 10 },
-  // Separate, much tighter policy for the link-partner attempt itself —
-  // the one operation here that's a guessing target (a 6-digit pairing
-  // code). Applied IN ADDITION to partnerAdmin above, only on that intent.
-  // Counts every attempt (not only failed ones): a legitimate merchant
-  // never submits 5 link attempts inside one minute, so this is no tighter
-  // than a failed-attempts-only counter in practice, and it's strictly
-  // tighter against an attacker (who's failing almost every guess anyway)
-  // without adding a second, bespoke success/failure-tracking mechanism
-  // alongside the existing fixed-window limiter.
-  partnerLinkAttempt: { limit: 5, windowMs: 60 * 1000, maxConcurrent: 5 },
   // AI SEO suggestions (Phase 4.4) — calls a third-party LLM on the
   // merchant's own key. Capped mainly to stop a runaway client-side loop
   // from silently burning through their API budget, not to protect our

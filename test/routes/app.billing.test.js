@@ -421,11 +421,9 @@ describe("app.billing action — charge creation", () => {
     );
   });
 
-  // Phase 12 — Partner/Agency linking. app.partners.jsx's "Update
-  // subscription" button posts an explicit partnerCount so the Agency
-  // charge reflects the live linked-partner count instead of the flat base
-  // price.
-  it("resolves the partner-count-aware Agency plan key when partnerCount is posted", async () => {
+  // Phase 12 — Partner/Agency linking is flat-priced: one Agency plan key
+  // regardless of companion count, and any posted partnerCount is ignored.
+  it("always resolves the flat Agency plan key, ignoring any posted partnerCount", async () => {
     const request = mockActionRequest(
       { intent: "select-plan", plan: "agency", interval: "monthly", partnerCount: "3" },
       { url: `https://${SHOP}/app/billing` },
@@ -433,11 +431,11 @@ describe("app.billing action — charge creation", () => {
     await expect(action({ request })).rejects.toBeInstanceOf(Response);
 
     expect(currentBilling.request).toHaveBeenCalledWith(
-      expect.objectContaining({ plan: "Importzo Agency Monthly — 3 Partners" }),
+      expect.objectContaining({ plan: "Importzo Agency Monthly" }),
     );
   });
 
-  it("ignores partnerCount for Pro — its price never varies with partner count", async () => {
+  it("resolves the flat Pro plan key", async () => {
     const request = mockActionRequest(
       { intent: "select-plan", plan: "pro", interval: "monthly", partnerCount: "1" },
       { url: `https://${SHOP}/app/billing` },
@@ -446,18 +444,6 @@ describe("app.billing action — charge creation", () => {
 
     expect(currentBilling.request).toHaveBeenCalledWith(
       expect.objectContaining({ plan: "Importzo Pro Monthly" }),
-    );
-  });
-
-  it("falls back to the base Agency key when partnerCount is 0", async () => {
-    const request = mockActionRequest(
-      { intent: "select-plan", plan: "agency", interval: "yearly", partnerCount: "0" },
-      { url: `https://${SHOP}/app/billing` },
-    );
-    await expect(action({ request })).rejects.toBeInstanceOf(Response);
-
-    expect(currentBilling.request).toHaveBeenCalledWith(
-      expect.objectContaining({ plan: "Importzo Agency Yearly" }),
     );
   });
 
