@@ -456,6 +456,26 @@ describe("app.billing action — charge creation", () => {
     expect(args.returnUrl).not.toMatch(/pricing_plans/);
   });
 
+  // App Store review fix: the returnUrl must be an EMBEDDED admin URL so the
+  // merchant lands back inside Shopify after approving the charge — a bare
+  // app-origin URL gave them a blank page (auth failed outside the iframe).
+  it("returns the merchant to the EMBEDDED admin billing URL, not the app's bare origin", async () => {
+    const prev = process.env.SHOPIFY_API_KEY; // eslint-disable-line no-undef
+    process.env.SHOPIFY_API_KEY = "70b047c7b1057f7a8ca94c044f6568ae"; // eslint-disable-line no-undef
+    try {
+      const request = mockActionRequest({ intent: "select-plan", plan: "pro", interval: "monthly" }, { url: `https://${SHOP}/app/billing` });
+      await expect(action({ request })).rejects.toBeInstanceOf(Response);
+
+      const [[args]] = currentBilling.request.mock.calls;
+      expect(args.returnUrl).toBe(
+        "https://admin.shopify.com/store/dest-shop/apps/70b047c7b1057f7a8ca94c044f6568ae/app/billing",
+      );
+    } finally {
+      if (prev === undefined) delete process.env.SHOPIFY_API_KEY; // eslint-disable-line no-undef
+      else process.env.SHOPIFY_API_KEY = prev; // eslint-disable-line no-undef
+    }
+  });
+
   it("never sends the merchant to the hosted plan page on the happy path", async () => {
     const request = mockActionRequest({ intent: "select-plan", plan: "agency", interval: "yearly" }, { url: `https://${SHOP}/app/billing` });
     await expect(action({ request })).rejects.toBeInstanceOf(Response);
@@ -522,6 +542,21 @@ describe("app.billing action — charge creation", () => {
     await expect(action({ request })).rejects.toBeInstanceOf(Response);
 
     expect(currentBilling.request).toHaveBeenCalledWith(expect.objectContaining({ trialDays: 0 }));
+  });
+
+  // App Store review fix: on a development store the charge is a TEST charge —
+  // no money moves — so the cancel-and-resubscribe abuse the suppression
+  // guards against isn't possible, and a reviewer testing repeatedly must see
+  // the advertised trial every time. The guard is skipped for test charges.
+  it("does NOT suppress the trial on a development store, even with a prior approved subscription", async () => {
+    partnerDevelopment.value = true;
+    priorSubscriptions.value = [{ id: "gid://shopify/AppSubscription/9", name: "Importzo Pro Monthly", status: "CANCELLED" }];
+    const request = mockActionRequest({ intent: "select-plan", plan: "pro", interval: "monthly" }, { url: `https://${SHOP}/app/billing` });
+    await expect(action({ request })).rejects.toBeInstanceOf(Response);
+
+    expect(currentBilling.request).toHaveBeenCalledWith(expect.objectContaining({ isTest: true }));
+    const [[args]] = currentBilling.request.mock.calls;
+    expect(args.trialDays).toBeUndefined(); // undefined => SDK keeps the plan's configured 7 days
   });
 
   it("still grants the trial when the only prior subscriptions were never approved", async () => {

@@ -1,5 +1,5 @@
 import PropTypes from "prop-types";
-import { PLAN_IDS, AGENCY_MIN_STORES, BILLING_INTERVAL, yearlySavingsPercent } from "../lib/plans.js";
+import { PLAN_IDS, AGENCY_MIN_STORES, BILLING_INTERVAL, TRIAL_DAYS, yearlySavingsPercent } from "../lib/plans.js";
 import { planCta, planFeatures } from "../lib/billing-ui.js";
 import { BRAND } from "../lib/constants";
 
@@ -85,6 +85,17 @@ export function PlanCard({
         <p className="mt-0.5 text-xs text-gray-500">{priceCaption}</p>
         {!isFree && yearly && savings > 0 && (
           <p className="mt-0.5 text-xs font-semibold" style={{ color: S }}>You save {savings}%</p>
+        )}
+        {/* Trial disclosure — required on the plan page and stated up front,
+            next to the price, not buried in a footnote. Shopify's approval
+            screen shows it too (appSubscriptionCreate is sent with
+            trialDays), but a reviewer looking at THIS page pre-subscribe
+            must see it here. */}
+        {!isFree && (
+          <p className="mt-1.5 inline-flex items-center gap-1 text-xs font-semibold rounded-md px-2 py-0.5"
+            style={{ background: "rgba(46,99,22,0.1)", color: S }}>
+            {TRIAL_DAYS}-day free trial
+          </p>
         )}
 
         {/* Fixed height so a longer description on one card cannot push its

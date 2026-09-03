@@ -9,9 +9,9 @@ import { shopifyGraphql } from "../lib/shopify-api.server";
 import { getUsageStatus, setShopTier } from "../lib/usage.server";
 import { UsageMeter } from "../components/UsageMeter";
 import { checkAgencyEligibility, syncAgencyIneligibilityFlag } from "../lib/agency-eligibility.server";
-import { planSelectionUrl, resolveAppHandle } from "../lib/app-pricing.server";
+import { planSelectionUrl, resolveAppHandle, embeddedAppReturnUrl } from "../lib/app-pricing.server";
 import {
-  PLAN_IDS, PLANS, AGENCY_MIN_STORES, BILLING_INTERVAL, billingPlanKey,
+  PLAN_IDS, PLANS, AGENCY_MIN_STORES, BILLING_INTERVAL, TRIAL_DAYS, billingPlanKey,
   tierFromSubscriptionName, intervalFromShopifyInterval, yearlySavingsPercent,
   isComplimentary,
 } from "../lib/plans.js";
@@ -210,11 +210,30 @@ export const action = async ({ request }) => {
     );
   }
 
+  const apiKey = process.env.SHOPIFY_API_KEY || ""; // eslint-disable-line no-undef
   const appUrl = process.env.SHOPIFY_APP_URL || ""; // eslint-disable-line no-undef
   const isTest = await isTestCharge({ shopifyGraphql, shop, token, version });
-  const trialDays = await trialDaysOverrideFor({ shopifyGraphql, shop, token, version });
 
-  console.log(`[app.billing] requesting charge for ${shop}: plan="${planKey}" isTest=${isTest} trialDays=${trialDays ?? "default"}`);
+  // The trial-suppression guard exists to stop cancel-and-resubscribe from
+  // farming unlimited FREE PAID access (see billing-trial.server.js). On a
+  // TEST charge no money is ever collected either way, so that abuse isn't
+  // possible — and an App Store reviewer testing repeatedly on a development
+  // store must see the advertised 7-day trial on every attempt, not have it
+  // silently suppressed on their second try. So: only consult the guard for
+  // real charges.
+  const trialDays = isTest
+    ? undefined
+    : await trialDaysOverrideFor({ shopifyGraphql, shop, token, version });
+
+  // Embedded admin URL, NOT the app's bare origin — otherwise Shopify returns
+  // the merchant to the app outside the iframe after approval and they get a
+  // blank page. See embeddedAppReturnUrl. Falls back to the origin only if
+  // the client id is somehow unset (the app is already broken in that case).
+  const returnUrl = apiKey
+    ? embeddedAppReturnUrl({ shop, apiKey, path: "/app/billing" })
+    : `${appUrl}/app/billing`;
+
+  console.log(`[app.billing] requesting charge for ${shop}: plan="${planKey}" isTest=${isTest} trialDays=${trialDays ?? "default"} returnUrl=${returnUrl}`);
 
   try {
     // Always throws. On success it throws a Response that carries the
@@ -223,7 +242,7 @@ export const action = async ({ request }) => {
     return await billing.request({
       plan: planKey,
       isTest,
-      returnUrl: `${appUrl}/app/billing`,
+      returnUrl,
       // undefined leaves the plan's own 7 days in place; 0 suppresses it for
       // a shop that has already had one. See billing-trial.server.js.
       ...(trialDays === undefined ? {} : { trialDays }),
@@ -511,7 +530,7 @@ export default function BillingPage() {
   }, [justSelectedPlan, usage.tier, usage.label, shopify]);
 
   function handleSelectPlan(plan, interval) {
-    beginPlanSelection({
+    const { started, reason } = beginPlanSelection({
       plan,
       interval,
       currentTier: usage.tier,
@@ -519,6 +538,17 @@ export default function BillingPage() {
       showOverlay: () => setOverlayOpen(true),
       submit: (fields) => fetcher.submit({ intent: "select-plan", ...fields }, { method: "POST" }),
     });
+
+    // A click that reaches here but starts nothing means the button's own
+    // enabled/disabled state (from planCta) and beginPlanSelection's guard
+    // have diverged — the plan-switch bug that failed App Store review was
+    // exactly this, silent. "free-plan" / "already-on-plan" are expected
+    // no-ops (the button is disabled in those states); anything else is a
+    // real inconsistency worth surfacing rather than swallowing.
+    if (!started && reason !== "free-plan" && reason !== "already-on-plan") {
+      console.warn(`[app.billing] plan selection did not start for ${plan?.id}/${interval}: ${reason}`);
+      shopify.toast.show("Couldn't start that plan change — please reload and try again.", { isError: true });
+    }
   }
 
   // Cancelling is the one action here with no Shopify approval screen behind
@@ -627,8 +657,9 @@ export default function BillingPage() {
           <div className="text-center">
             <h2 className="text-lg font-semibold text-gray-900" style={{ fontFamily: F }}>Plans &amp; Pricing</h2>
             <p className="text-sm text-gray-500 mt-1 max-w-xl mx-auto">
-              Pick your plan and billing period here. Shopify shows one approval screen for that exact
-              charge and brings you straight back — downgrading happens without leaving the app.
+              Every paid plan starts with a {TRIAL_DAYS}-day free trial — you&apos;re not charged until it ends,
+              and you can cancel any time before then at no cost. Shopify shows one approval screen for the
+              exact charge and brings you straight back; downgrading happens without leaving the app.
             </p>
           </div>
 

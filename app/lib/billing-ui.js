@@ -135,10 +135,20 @@ export function isUpgradeFrom(fromId, toId) {
  * to CANCEL a subscription, which is a different action on a different part
  * of Shopify's page. Neither is the paid upgrade flow, so neither gets the
  * paid upgrade button. See freeCardLink for what they get instead.
+ *
+ * BOTH "select" (a genuine tier change) and "switch" (same tier, other
+ * billing period) are real, billable AppSubscription changes that go through
+ * the same approval flow — so both count. The bug this line once had:
+ * checking only for "select" meant a merchant on Pro monthly who toggled to
+ * yearly got an enabled "Switch to yearly" button whose click did nothing,
+ * because beginPlanSelection asked this function first and it said no. (App
+ * Store review rejection, "monthly/yearly toggle unresponsive on an active
+ * subscription".)
  */
 export function offersPlanSelection({ planId, currentTier, interval, currentInterval }) {
   if (planId === PLAN_IDS.FREE) return false;
-  return planCta({ planId, currentTier, interval, currentInterval }).kind === "select";
+  const kind = planCta({ planId, currentTier, interval, currentInterval }).kind;
+  return kind === "select" || kind === "switch";
 }
 
 /**

@@ -84,6 +84,28 @@ describe("offersPlanSelection", () => {
   it("does not offer selection for the plan the merchant is already on", () => {
     expect(offersPlanSelection({ planId: PLAN_IDS.PRO, currentTier: PLAN_IDS.PRO })).toBe(false);
   });
+
+  it("does not offer selection for the same tier AND same period", () => {
+    expect(offersPlanSelection({
+      planId: PLAN_IDS.PRO, currentTier: PLAN_IDS.PRO,
+      interval: "monthly", currentInterval: "monthly",
+    })).toBe(false);
+  });
+
+  // The App Store review regression: a merchant on Pro monthly toggling to
+  // yearly is a real, billable subscription change and MUST be offered — the
+  // "Switch to yearly" button was rendering enabled but doing nothing because
+  // this returned false for a "switch".
+  it("offers selection for the same tier with a DIFFERENT billing period (interval switch)", () => {
+    expect(offersPlanSelection({
+      planId: PLAN_IDS.PRO, currentTier: PLAN_IDS.PRO,
+      interval: "yearly", currentInterval: "monthly",
+    })).toBe(true);
+    expect(offersPlanSelection({
+      planId: PLAN_IDS.AGENCY, currentTier: PLAN_IDS.AGENCY,
+      interval: "monthly", currentInterval: "yearly",
+    })).toBe(true);
+  });
 });
 
 describe("freeCardLink", () => {
@@ -131,6 +153,23 @@ describe("beginPlanSelection", () => {
     expect(result).toEqual({ started: false, reason: "already-on-plan" });
     expect(showOverlay).not.toHaveBeenCalled();
     expect(submit).not.toHaveBeenCalled();
+  });
+
+  it("starts an interval switch on the plan the merchant already holds, submitting the new period", () => {
+    const showOverlay = vi.fn();
+    const submit = vi.fn();
+    const result = beginPlanSelection({
+      plan: PLANS.pro,
+      interval: "yearly",
+      currentTier: PLAN_IDS.PRO,
+      currentInterval: "monthly",
+      showOverlay,
+      submit,
+    });
+
+    expect(result).toEqual({ started: true, reason: null });
+    expect(showOverlay).toHaveBeenCalledTimes(1);
+    expect(submit).toHaveBeenCalledWith({ plan: PLAN_IDS.PRO, interval: "yearly" });
   });
 
   it("shows the overlay BEFORE submitting for a real paid-plan selection", () => {
