@@ -16,7 +16,7 @@ import {
   isComplimentary,
 } from "../lib/plans.js";
 import { isTestCharge, isManagedPricingRejection, describeBillingError } from "../lib/billing-mode.server";
-import { trialDaysOverrideFor } from "../lib/billing-trial.server";
+import { resolveTrialDays, grantsTrial } from "../lib/billing-trial.server";
 import {
   REDIRECT_OVERLAY_COPY, CANCEL_CONFIRM_COPY, ALL_PLANS_INCLUDE, PERIOD_TOGGLE_OPTIONS,
   beginPlanSelection, shouldDismissOverlay,
@@ -120,6 +120,23 @@ export const loader = async ({ request }) => {
     prisma, shopifyGraphql, shop, token: session.accessToken, version,
   });
 
+  // Whether this shop's NEXT subscribe would come with the 7-day trial —
+  // computed from the exact same inputs the charge action uses (see
+  // resolveTrialDays), so the "$0 today, then $X/mo after your trial" framing
+  // on the cards can never promise a trial the charge won't grant. Both
+  // isTestCharge and trialDaysOverrideFor already fail safe internally, so a
+  // Shopify hiccup here degrades to "trial eligible" — the same direction the
+  // action fails.
+  let trialEligible = true;
+  try {
+    const isTest = await isTestCharge({ shopifyGraphql, shop, token: session.accessToken, version });
+    trialEligible = grantsTrial(await resolveTrialDays({
+      shopifyGraphql, shop, token: session.accessToken, version, isTest,
+    }));
+  } catch (err) {
+    console.warn(`[app.billing] trial-eligibility check failed for ${shop} — assuming eligible:`, err?.message);
+  }
+
   // Phase 8 — Shopify's hosted plan page can't enforce the 3-store Agency
   // rule, so a shop can end up on Agency without qualifying. Record it (the
   // page renders a notice below; the flag also makes it reportable without
@@ -139,6 +156,7 @@ export const loader = async ({ request }) => {
     usage: { ...usage, agencyIneligibleSince },
     eligibility,
     justSelectedPlan,
+    trialEligible,
   };
 };
 
@@ -214,16 +232,10 @@ export const action = async ({ request }) => {
   const appUrl = process.env.SHOPIFY_APP_URL || ""; // eslint-disable-line no-undef
   const isTest = await isTestCharge({ shopifyGraphql, shop, token, version });
 
-  // The trial-suppression guard exists to stop cancel-and-resubscribe from
-  // farming unlimited FREE PAID access (see billing-trial.server.js). On a
-  // TEST charge no money is ever collected either way, so that abuse isn't
-  // possible — and an App Store reviewer testing repeatedly on a development
-  // store must see the advertised 7-day trial on every attempt, not have it
-  // silently suppressed on their second try. So: only consult the guard for
-  // real charges.
-  const trialDays = isTest
-    ? undefined
-    : await trialDaysOverrideFor({ shopifyGraphql, shop, token, version });
+  // Same decision the Billing page's loader shows the merchant — see
+  // resolveTrialDays. undefined -> keep the plan's configured 7 days;
+  // 0 -> suppress (this shop has already had a real trial).
+  const trialDays = await resolveTrialDays({ shopifyGraphql, shop, token, version, isTest });
 
   // Embedded admin URL, NOT the app's bare origin — otherwise Shopify returns
   // the merchant to the app outside the iframe after approval and they get a
@@ -434,7 +446,7 @@ PeriodToggle.propTypes = {
 };
 
 export default function BillingPage() {
-  const { usage, eligibility, justSelectedPlan } = useLoaderData();
+  const { usage, eligibility, justSelectedPlan, trialEligible } = useLoaderData();
   const shopify = useAppBridge();
   const fetcher = useFetcher();
   const busy = fetcher.state !== "idle";
@@ -657,9 +669,11 @@ export default function BillingPage() {
           <div className="text-center">
             <h2 className="text-lg font-semibold text-gray-900" style={{ fontFamily: F }}>Plans &amp; Pricing</h2>
             <p className="text-sm text-gray-500 mt-1 max-w-xl mx-auto">
-              Every paid plan starts with a {TRIAL_DAYS}-day free trial — you&apos;re not charged until it ends,
-              and you can cancel any time before then at no cost. Shopify shows one approval screen for the
-              exact charge and brings you straight back; downgrading happens without leaving the app.
+              {trialEligible
+                ? `Every paid plan starts with a ${TRIAL_DAYS}-day free trial — $0 today, nothing charged until it ends, and you can cancel any time before then at no cost. `
+                : ""}
+              Shopify shows one approval screen for the exact charge and brings you straight back;
+              downgrading happens without leaving the app.
             </p>
           </div>
 
@@ -680,6 +694,7 @@ export default function BillingPage() {
                 currentInterval={usage.interval}
                 period={period}
                 eligibility={eligibility}
+                trialEligible={trialEligible}
                 onSelect={(interval) => handleSelectPlan(PLANS[id], interval)}
                 onCancel={handleCancelPlan}
                 busy={busy}

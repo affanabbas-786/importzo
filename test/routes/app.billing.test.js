@@ -137,6 +137,8 @@ describe("app.billing loader — reconciliation", () => {
     rows.clear();
     shopEmail.value = null;
     liveAppHandle.value = "importzo";
+    partnerDevelopment.value = false;
+    priorSubscriptions.value = [];
     delete process.env.SHOPIFY_APP_HANDLE; // eslint-disable-line no-undef
     resetAppHandleCache();
     redirectMock.mockClear();
@@ -381,6 +383,33 @@ describe("app.billing loader — reconciliation", () => {
     const data = await loader({ request: { url: `https://${SHOP}/app/billing?plan_handle=agency-yearly` } });
 
     expect(data.usage.tier).toBe("free");
+  });
+
+  // The Billing page shows "$0 today … after your 7-day trial" only when the
+  // shop would actually get that trial on its next subscribe — computed from
+  // the same inputs the charge action uses, so the page can't promise a
+  // trial the charge won't grant.
+  describe("trialEligible", () => {
+    it("is true for a shop that has never had an approved subscription", async () => {
+      priorSubscriptions.value = [];
+      partnerDevelopment.value = false;
+      const data = await loader({ request: { url: `https://${SHOP}/app/billing` } });
+      expect(data.trialEligible).toBe(true);
+    });
+
+    it("is false once the shop has had an approved subscription (trial already spent)", async () => {
+      priorSubscriptions.value = [{ id: "gid://shopify/AppSubscription/9", name: "Importzo Pro Monthly", status: "CANCELLED" }];
+      partnerDevelopment.value = false;
+      const data = await loader({ request: { url: `https://${SHOP}/app/billing` } });
+      expect(data.trialEligible).toBe(false);
+    });
+
+    it("stays true on a development store even with a prior approved subscription", async () => {
+      priorSubscriptions.value = [{ id: "gid://shopify/AppSubscription/9", name: "Importzo Pro Monthly", status: "CANCELLED" }];
+      partnerDevelopment.value = true;
+      const data = await loader({ request: { url: `https://${SHOP}/app/billing` } });
+      expect(data.trialEligible).toBe(true);
+    });
   });
 });
 

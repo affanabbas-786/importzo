@@ -20,27 +20,41 @@ const { primary: P, secondary: S, font: F } = BRAND;
  * planCta() in billing-ui.js where it is unit-tested.
  */
 export function PlanCard({
-  plan, currentTier, currentInterval, period, eligibility, onSelect, onCancel, busy, featured = false,
+  plan, currentTier, currentInterval, period, eligibility, trialEligible = false, onSelect, onCancel, busy, featured = false,
 }) {
   const isCurrent = plan.id === currentTier;
   const isFree = plan.id === PLAN_IDS.FREE;
   const yearly = period === BILLING_INTERVAL.YEARLY;
   const needsEligibility = plan.requiresEligibility && !eligibility.eligible;
   const savings = yearlySavingsPercent(plan.id);
-  const cta = planCta({ planId: plan.id, currentTier, interval: period, currentInterval });
+  const cta = planCta({ planId: plan.id, currentTier, interval: period, currentInterval, trialEligible });
   // "Most Popular" is for the plan we're recommending — never on the card the
   // merchant is already paying for, where it would be recommending a purchase
   // they have already made.
   const showsPopular = featured && !isCurrent;
 
+  // The trial framing only makes sense on the card whose button actually
+  // STARTS a trial: a paid plan the merchant isn't on yet, and only when this
+  // shop is still trial-eligible. A period switch on the current plan, or a
+  // shop that has spent its trial, sees the plain recurring price.
+  const showsTrialPricing = !isFree && trialEligible && cta.kind === "select";
+
   // Free has no yearly variant, so it reads "Free" in both modes rather than
   // showing $0/yr — a price that is technically true and reads as a mistake.
-  const headlinePrice = isFree ? "Free" : yearly ? `$${plan.priceYearly}` : `$${plan.price}`;
+  const recurringAmount = yearly ? `$${plan.priceYearly}` : `$${plan.price}`;
+  const recurringUnit = yearly ? "/yr" : "/mo";
+  const headlinePrice = isFree
+    ? "Free"
+    : showsTrialPricing
+      ? "$0 today"
+      : recurringAmount;
   const priceCaption = isFree
     ? "Always free"
-    : yearly
-      ? `billed yearly · $${(plan.priceYearly / 12).toFixed(2)}/mo equivalent`
-      : `per month${plan.requiresEligibility ? " per store" : ""}, billed monthly`;
+    : showsTrialPricing
+      ? `then ${recurringAmount}${recurringUnit} after your ${TRIAL_DAYS}-day free trial`
+      : yearly
+        ? `billed yearly · $${(plan.priceYearly / 12).toFixed(2)}/mo equivalent`
+        : `per month${plan.requiresEligibility ? " per store" : ""}, billed monthly`;
 
   function handleClick() {
     if (cta.kind === "downgrade") return onCancel?.();
@@ -87,11 +101,11 @@ export function PlanCard({
           <p className="mt-0.5 text-xs font-semibold" style={{ color: S }}>You save {savings}%</p>
         )}
         {/* Trial disclosure — required on the plan page and stated up front,
-            next to the price, not buried in a footnote. Shopify's approval
-            screen shows it too (appSubscriptionCreate is sent with
-            trialDays), but a reviewer looking at THIS page pre-subscribe
-            must see it here. */}
-        {!isFree && (
+            next to the price. When the price itself already reads "$0 today …
+            after your 7-day trial" that says it; this pill is for the cards
+            that don't (a period switch, or a shop past its trial) so the
+            offer is never hidden. */}
+        {!isFree && !showsTrialPricing && (
           <p className="mt-1.5 inline-flex items-center gap-1 text-xs font-semibold rounded-md px-2 py-0.5"
             style={{ background: "rgba(46,99,22,0.1)", color: S }}>
             {TRIAL_DAYS}-day free trial
@@ -133,6 +147,16 @@ export function PlanCard({
         >
           {busy && !cta.disabled ? "Working…" : cta.label}
         </button>
+
+        {/* Directly answers the App Store review flag (trial terms not
+            surfaced) and cuts purchase hesitation — right under the button
+            the merchant is about to press, only where a trial is actually
+            what that press starts. */}
+        {showsTrialPricing && (
+          <p className="mt-2 text-[11px] text-gray-500 text-center leading-relaxed">
+            No charge for {TRIAL_DAYS} days. Cancel anytime before the trial ends.
+          </p>
+        )}
       </div>
     </div>
   );
@@ -190,6 +214,10 @@ PlanCard.propTypes = {
     eligible: PropTypes.bool,
     storeCount: PropTypes.number,
   }).isRequired,
+  // Whether this shop's next subscribe still comes with the 7-day trial —
+  // from the billing loader, which computes it from the same inputs the
+  // charge action uses. Drives the "$0 today" price framing and CTA copy.
+  trialEligible: PropTypes.bool,
   onSelect: PropTypes.func.isRequired,
   onCancel: PropTypes.func,
   busy: PropTypes.bool.isRequired,

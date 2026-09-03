@@ -7,6 +7,7 @@ import {
   planActionLabel,
   isUpgradeFrom,
   offersPlanSelection,
+  planCta,
   freeCardLink,
   beginPlanSelection,
   shouldDismissOverlay,
@@ -105,6 +106,30 @@ describe("offersPlanSelection", () => {
       planId: PLAN_IDS.AGENCY, currentTier: PLAN_IDS.AGENCY,
       interval: "monthly", currentInterval: "yearly",
     })).toBe(true);
+  });
+});
+
+describe("planCta trial-aware labelling", () => {
+  it("labels a trial-eligible upgrade 'Start 7-day free trial', not 'Upgrade to X'", () => {
+    const cta = planCta({ planId: PLAN_IDS.PRO, currentTier: PLAN_IDS.FREE, trialEligible: true });
+    expect(cta).toEqual({ kind: "select", label: "Start 7-day free trial", disabled: false });
+  });
+
+  it("keeps 'Upgrade to X' when the shop is no longer trial-eligible", () => {
+    const cta = planCta({ planId: PLAN_IDS.PRO, currentTier: PLAN_IDS.FREE, trialEligible: false });
+    expect(cta).toEqual({ kind: "select", label: "Upgrade to Pro", disabled: false });
+  });
+
+  it("does not let trialEligible change a period switch or the current-plan state", () => {
+    expect(planCta({
+      planId: PLAN_IDS.PRO, currentTier: PLAN_IDS.PRO,
+      interval: "yearly", currentInterval: "monthly", trialEligible: true,
+    })).toMatchObject({ kind: "switch", label: "Switch to yearly" });
+
+    expect(planCta({
+      planId: PLAN_IDS.PRO, currentTier: PLAN_IDS.PRO,
+      interval: "monthly", currentInterval: "monthly", trialEligible: true,
+    })).toMatchObject({ kind: "current", disabled: true });
   });
 });
 

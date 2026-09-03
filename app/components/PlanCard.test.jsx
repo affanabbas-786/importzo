@@ -181,6 +181,54 @@ describe("PlanCard call-to-action state", () => {
   });
 });
 
+// App Store review: the trial terms have to be the PRIMARY price framing on
+// this page, not a subtitle. "$0 today" is what the reviewer's screencast
+// showed as missing.
+describe("PlanCard trial framing", () => {
+  it("leads with $0 today and states the recurring price and trial length below, for a trial-eligible upgrade", () => {
+    const html = render({ plan: PLANS[PLAN_IDS.PRO], currentTier: PLAN_IDS.FREE, trialEligible: true });
+
+    expect(html).toContain("$0 today");
+    expect(html).toMatch(/then \$15\/mo after your 7-day free trial/);
+    expect(html).toContain("Start 7-day free trial");
+    expect(html).toMatch(/No charge for 7 days\. Cancel anytime before the trial ends\./);
+  });
+
+  it("uses the yearly recurring amount in the sub-price when the toggle is yearly", () => {
+    const html = render({
+      plan: PLANS[PLAN_IDS.PRO], currentTier: PLAN_IDS.FREE,
+      period: BILLING_INTERVAL.YEARLY, trialEligible: true,
+    });
+    expect(html).toContain("$0 today");
+    expect(html).toMatch(/then \$144\/yr after your 7-day free trial/);
+  });
+
+  it("does NOT show $0-today framing for a period switch on the plan the merchant already holds", () => {
+    const html = render({
+      plan: PLANS[PLAN_IDS.PRO], currentTier: PLAN_IDS.PRO,
+      currentInterval: BILLING_INTERVAL.MONTHLY, period: BILLING_INTERVAL.YEARLY,
+      trialEligible: true,
+    });
+    expect(html).not.toContain("$0 today");
+    expect(html).toContain("Switch to yearly");
+    expect(html).not.toMatch(/No charge for 7 days/);
+  });
+
+  it("does NOT show $0-today framing when the shop is no longer trial-eligible", () => {
+    const html = render({ plan: PLANS[PLAN_IDS.PRO], currentTier: PLAN_IDS.FREE, trialEligible: false });
+    expect(html).not.toContain("$0 today");
+    expect(html).toContain("Upgrade to Pro");
+    // The plain trial pill still discloses the offer.
+    expect(html).toContain("7-day free trial");
+  });
+
+  it("never applies trial framing to the Free card", () => {
+    const html = render({ plan: PLANS[PLAN_IDS.FREE], currentTier: PLAN_IDS.PRO, trialEligible: true });
+    expect(html).not.toContain("$0 today");
+    expect(html).not.toMatch(/No charge for 7 days/);
+  });
+});
+
 describe("PlanCard eligibility notice is independent of the chrome", () => {
   // The whole reason featuring became conditional: chrome follows eligibility,
   // but the warning inside the card follows plan.requiresEligibility, so an

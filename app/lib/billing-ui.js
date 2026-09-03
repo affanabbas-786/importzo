@@ -14,7 +14,7 @@
 // in service of that gap.
 // ═══════════════════════════════════════════════════════════════════
 
-import { PLAN_IDS, PLANS, PLAN_ORDER, BILLING_INTERVAL, isBillablePlanId } from "./plans.js";
+import { PLAN_IDS, PLANS, PLAN_ORDER, BILLING_INTERVAL, TRIAL_DAYS, isBillablePlanId } from "./plans.js";
 
 /**
  * Copy for the overlay shown while the browser is on its way to Shopify.
@@ -172,8 +172,13 @@ export function offersPlanSelection({ planId, currentTier, interval, currentInte
  *   downgrade — the Free card, for a shop on a paid plan.
  *   included  — the Free card, for a shop already on Free. Disabled.
  *   select    — anything else: a genuine upgrade or tier change.
+ *
+ * `trialEligible` only changes the "select" label — from "Upgrade to X" to
+ * "Start free trial" — since that is the one action that actually begins a
+ * trial. A period switch on a plan the merchant already holds is past the
+ * trial, so it keeps "Switch to …".
  */
-export function planCta({ planId, currentTier, interval, currentInterval }) {
+export function planCta({ planId, currentTier, interval, currentInterval, trialEligible = false }) {
   if (planId === PLAN_IDS.FREE) {
     return currentTier === PLAN_IDS.FREE
       ? { kind: "included", label: "Included", disabled: true }
@@ -192,7 +197,11 @@ export function planCta({ planId, currentTier, interval, currentInterval }) {
     };
   }
 
-  return { kind: "select", label: `Upgrade to ${PLANS[planId]?.label || planId}`, disabled: false };
+  return {
+    kind: "select",
+    label: trialEligible ? `Start ${TRIAL_DAYS}-day free trial` : `Upgrade to ${PLANS[planId]?.label || planId}`,
+    disabled: false,
+  };
 }
 
 /**
