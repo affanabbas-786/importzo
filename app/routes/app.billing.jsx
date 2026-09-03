@@ -16,7 +16,7 @@ import {
   isComplimentary,
 } from "../lib/plans.js";
 import { isTestCharge, isManagedPricingRejection, describeBillingError } from "../lib/billing-mode.server";
-import { resolveTrialDays, grantsTrial } from "../lib/billing-trial.server";
+import { resolveTrialDays, grantsTrial, trialDaysOverrideFor } from "../lib/billing-trial.server";
 import {
   REDIRECT_OVERLAY_COPY, CANCEL_CONFIRM_COPY, ALL_PLANS_INCLUDE, PERIOD_TOGGLE_OPTIONS,
   beginPlanSelection, shouldDismissOverlay,
@@ -104,44 +104,49 @@ function intervalOf(subscription) {
 export const loader = async ({ request }) => {
   const { session, billing } = await authenticate.admin(request);
   const shop = session.shop;
+  const token = session.accessToken;
   const version = apiVersion || "2025-10";
 
-  let usage;
-  try {
-    usage = await reconcile({ billing, shop });
-  } catch (err) {
-    // Reconciliation failing (Shopify API hiccup) must not break the page —
-    // it just falls back to whatever ShopPlan already has on file.
-    console.warn(`[app.billing] reconciliation failed for ${shop}:`, err?.message);
-    usage = { ...(await getUsageStatus({ prisma, shop })), interval: null, subscriptionName: null };
-  }
+  // Every Shopify round trip this page needs, fired CONCURRENTLY rather than
+  // one after another. Sequentially these were ~4 calls back-to-back, and
+  // right after a charge approval — when Shopify's side is busiest — that
+  // stacked into the multi-second blank the merchant sees before the page
+  // paints. None of them depend on each other's result.
+  const [usageResult, eligibility, isTest, trialOverrideRaw] = await Promise.all([
+    reconcile({ billing, shop }).catch((err) => {
+      console.warn(`[app.billing] reconciliation failed for ${shop}:`, err?.message);
+      return null;
+    }),
+    checkAgencyEligibility({ prisma, shopifyGraphql, shop, token, version }),
+    isTestCharge({ shopifyGraphql, shop, token, version }).catch(() => false),
+    trialDaysOverrideFor({ shopifyGraphql, shop, token, version }).catch(() => undefined),
+  ]);
 
-  const eligibility = await checkAgencyEligibility({
-    prisma, shopifyGraphql, shop, token: session.accessToken, version,
-  });
+  // reconcile failing (Shopify hiccup) falls back to the local ShopPlan row
+  // rather than breaking the page.
+  const usage = usageResult
+    || { ...(await getUsageStatus({ prisma, shop })), interval: null, subscriptionName: null };
 
-  // Whether this shop's NEXT subscribe would come with the 7-day trial —
-  // computed from the exact same inputs the charge action uses (see
-  // resolveTrialDays), so the "$0 today, then $X/mo after your trial" framing
-  // on the cards can never promise a trial the charge won't grant. Both
-  // isTestCharge and trialDaysOverrideFor already fail safe internally, so a
-  // Shopify hiccup here degrades to "trial eligible" — the same direction the
-  // action fails.
-  let trialEligible = true;
-  try {
-    const isTest = await isTestCharge({ shopifyGraphql, shop, token: session.accessToken, version });
-    trialEligible = grantsTrial(await resolveTrialDays({
-      shopifyGraphql, shop, token: session.accessToken, version, isTest,
-    }));
-  } catch (err) {
-    console.warn(`[app.billing] trial-eligibility check failed for ${shop} — assuming eligible:`, err?.message);
-  }
+  // Whether this shop's NEXT subscribe comes with the 7-day trial — the same
+  // decision the charge action makes, so the "$0 today, then $X/mo after your
+  // trial" framing can never promise a trial the charge won't grant.
+  //   • a shop with a live Shopify subscription has definitionally already
+  //     had an approved one → no further trial, decided with no extra call;
+  //   • a test charge always grants it (no money, so no abuse to guard, and
+  //     a reviewer testing repeatedly must see it every time);
+  //   • otherwise it comes down to the subscription history (undefined ->
+  //     grant, 0 -> already spent). Both sources fail safe toward "eligible",
+  //     matching how the action fails.
+  const trialEligible = usage.subscriptionId
+    ? false
+    : (isTest || grantsTrial(trialOverrideRaw));
 
   // Phase 8 — Shopify's hosted plan page can't enforce the 3-store Agency
   // rule, so a shop can end up on Agency without qualifying. Record it (the
   // page renders a notice below; the flag also makes it reportable without
   // waiting for the merchant to visit). Never revokes access — see
-  // syncAgencyIneligibilityFlag for why that's the deliberate choice.
+  // syncAgencyIneligibilityFlag for why that's the deliberate choice. Local
+  // DB only, no Shopify call, so it stays after the parallel batch.
   const agencyIneligibleSince = await syncAgencyIneligibilityFlag({
     prisma, shop, tier: usage.tier, eligible: eligibility.eligible,
   });

@@ -131,6 +131,7 @@ function withInterval(subscription, interval) {
 
 import { loader, action } from "../../app/routes/app.billing.jsx";
 import { resetAppHandleCache } from "../../app/lib/app-pricing.server.js";
+import { resetDevStoreCache } from "../../app/lib/billing-mode.server.js";
 
 describe("app.billing loader — reconciliation", () => {
   beforeEach(() => {
@@ -141,6 +142,7 @@ describe("app.billing loader — reconciliation", () => {
     priorSubscriptions.value = [];
     delete process.env.SHOPIFY_APP_HANDLE; // eslint-disable-line no-undef
     resetAppHandleCache();
+    resetDevStoreCache();
     redirectMock.mockClear();
     currentBilling = fakeBilling();
   });
@@ -410,6 +412,18 @@ describe("app.billing loader — reconciliation", () => {
       const data = await loader({ request: { url: `https://${SHOP}/app/billing` } });
       expect(data.trialEligible).toBe(true);
     });
+
+    it("is false for a shop with a live Shopify subscription (decided without the history query)", async () => {
+      // billing.check reports an active sub -> reconcile writes subscriptionId.
+      currentBilling = fakeBilling({
+        appSubscriptions: [{ id: "gid://shopify/AppSubscription/5", name: "Importzo Pro", status: "ACTIVE" }],
+      });
+      // Even if the history query WOULD say "eligible", the live sub wins.
+      priorSubscriptions.value = [];
+      const data = await loader({ request: { url: `https://${SHOP}/app/billing` } });
+      expect(data.usage.subscriptionId).toBe("gid://shopify/AppSubscription/5");
+      expect(data.trialEligible).toBe(false);
+    });
   });
 });
 
@@ -429,6 +443,7 @@ describe("app.billing action — charge creation", () => {
     priorSubscriptions.value = [];
     delete process.env.SHOPIFY_APP_HANDLE; // eslint-disable-line no-undef
     resetAppHandleCache();
+    resetDevStoreCache();
     redirectMock.mockClear();
     currentBilling = fakeBilling();
   });

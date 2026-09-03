@@ -41,21 +41,36 @@ const SHOP_PLAN_QUERY = `#graphql
  * a dev store is declined rather than mischarged; a test charge against a real
  * store is silent free service. Only one of those two errors is recoverable.
  */
+// Whether a shop is a development store never changes for the life of that
+// store, so the first authoritative answer is cached for the process. This
+// also removes a visible-flicker source on the Billing page: without it, a
+// transient failure of the query below returned `false` (a real store), the
+// page rendered its no-trial pricing, and the next load — query succeeding —
+// flipped it back to the trial framing. See app.billing.jsx's trialEligible.
+const devStoreCache = new Map(); // shop -> boolean
+
+/** Test seam: drop the memoised dev-store answers so each test starts fresh. */
+export function resetDevStoreCache() {
+  devStoreCache.clear();
+}
+
 export async function isTestCharge({ shopifyGraphql, shop, token, version }) {
+  if (devStoreCache.has(shop)) return devStoreCache.get(shop);
   try {
     const data = await shopifyGraphql(shop, token, SHOP_PLAN_QUERY, {}, version);
     const plan = data?.shop?.plan;
     if (typeof plan?.partnerDevelopment !== "boolean") {
       console.warn(`[billing-mode] no partnerDevelopment flag for ${shop} — treating as a REAL charge`);
-      return false;
+      return false; // not cached — an unreadable answer must be retried, not pinned
     }
     if (plan.partnerDevelopment) {
       console.log(`[billing-mode] ${shop} is a development store — creating a TEST charge`);
     }
+    devStoreCache.set(shop, plan.partnerDevelopment);
     return plan.partnerDevelopment;
   } catch (err) {
     console.warn(`[billing-mode] could not read shop plan for ${shop} — treating as a REAL charge:`, err?.message);
-    return false;
+    return false; // not cached — retry on the next call
   }
 }
 
