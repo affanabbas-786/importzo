@@ -17,7 +17,7 @@ describe("plans — finalized pricing", () => {
   it("matches the pricing live in the Shopify App Pricing dashboard", () => {
     expect(PLANS[PLAN_IDS.FREE]).toMatchObject({ price: 0, priceYearly: 0, recordLimit: 250 });
     expect(PLANS[PLAN_IDS.PRO]).toMatchObject({ price: 15, priceYearly: 144 });
-    expect(PLANS[PLAN_IDS.AGENCY]).toMatchObject({ price: 10, priceYearly: 96 });
+    expect(PLANS[PLAN_IDS.AGENCY]).toMatchObject({ price: 35, priceYearly: 336 });
   });
 
   it("gives both paid tiers unlimited records", () => {
@@ -29,9 +29,9 @@ describe("plans — finalized pricing", () => {
     expect(TRIAL_DAYS).toBe(7);
   });
 
-  it("gates Agency on eligibility and nothing else", () => {
-    expect(PLANS[PLAN_IDS.AGENCY].requiresEligibility).toBe(true);
-    expect(PLANS[PLAN_IDS.PRO].requiresEligibility).toBeFalsy();
+  it("gates neither paid plan on a store count — the 3-store model is gone", () => {
+    expect(PLANS[PLAN_IDS.AGENCY].requiresEligibility).toBeUndefined();
+    expect(PLANS[PLAN_IDS.PRO].requiresEligibility).toBeUndefined();
   });
 
   it("lists plans cheapest-first for the pricing grid", () => {
@@ -45,7 +45,7 @@ describe("yearlySavingsPercent", () => {
   // surface that quotes it moves together.
   it("computes the advertised 20% saving for both paid plans", () => {
     expect(yearlySavingsPercent(PLAN_IDS.PRO)).toBe(20);    // 144 vs 15*12=180
-    expect(yearlySavingsPercent(PLAN_IDS.AGENCY)).toBe(20); // 96  vs 10*12=120
+    expect(yearlySavingsPercent(PLAN_IDS.AGENCY)).toBe(20); // 336 vs 35*12=420
   });
 
   it("returns 0 for Free, which has no yearly option to discount", () => {
@@ -91,6 +91,25 @@ describe("tierFromSubscriptionName", () => {
   // substring doesn't get promoted to a paid tier.
   it("does not match 'pro' buried inside an unrelated word", () => {
     expect(tierFromSubscriptionName("Approved")).toBeNull();
+  });
+});
+
+// Phase 12 — Partner/Agency linking is FLAT-PRICED. Pro ($15) covers the
+// payer + 1 companion, Agency ($35) covers the payer + 5, and neither
+// price moves with companion count — so the per-count price/key helpers
+// this phase once had are gone.
+describe("flat companion pricing", () => {
+  it("no longer exports per-companion price or plan-key helpers", async () => {
+    const mod = await import("../../app/lib/plans.js");
+    expect(mod.agencyPartnerPrice).toBeUndefined();
+    expect(mod.agencyPartnerBillingPlanKey).toBeUndefined();
+    expect(mod.AGENCY_PARTNER_ADDON).toBeUndefined();
+  });
+
+  it("Agency's flat price is what it charges regardless of companion count", () => {
+    expect(PLANS[PLAN_IDS.AGENCY].price).toBe(35);
+    expect(PLANS[PLAN_IDS.AGENCY].priceYearly).toBe(336);
+    expect(PLANS[PLAN_IDS.AGENCY].maxPartners).toBe(5);
   });
 });
 

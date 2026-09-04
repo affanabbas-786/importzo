@@ -208,16 +208,32 @@ export const action = async ({ request }) => {
         }
       }`;
 
+    let skippedNoSource = 0;
     for (let i = 0; i < refs.length; i += 25) {
-      const batch = refs.slice(i, i + 25).map((ref) => {
-        const originalSource = ref.original.startsWith("http") ? ref.original : candidateFileUrls(sourceShop, ref.filename)[0];
-        return {
-          contentType: mediaContentTypeFromUrl(ref.filename),
+      const batch = [];
+      for (const ref of refs.slice(i, i + 25)) {
+        const contentType = mediaContentTypeFromUrl(ref.filename);
+        const hasRealUrl = ref.original.startsWith("http");
+        // A bare `shopify://shop_images/...` reference (no real URL found in
+        // the theme code) falls back to a GUESSED Files-CDN path for
+        // images/generic files, which is usually right — but not for video:
+        // Shopify serves video from a different host/pattern than the Files
+        // CDN, so the guess is unreliable there and fileCreate rejects it
+        // ("Invalid video url"). Skip rather than submit a guess likely to
+        // fail; warn so it's not silently dropped.
+        if (!hasRealUrl && contentType === "VIDEO") {
+          skippedNoSource++;
+          continue;
+        }
+        const originalSource = hasRealUrl ? ref.original : candidateFileUrls(sourceShop, ref.filename)[0];
+        batch.push({
+          contentType,
           originalSource,
           filename: ref.filename,
           alt: ref.filename.replace(/[-_]+/g, " ").replace(/\.[^.]+$/, "").slice(0, 500),
-        };
-      });
+        });
+      }
+      if (!batch.length) continue;
       try {
         const data = await shopifyGraphql(targetShop, targetToken, mutation, { files: batch });
         const errors = data?.fileCreate?.userErrors || [];
@@ -228,6 +244,11 @@ export const action = async ({ request }) => {
         warnings.push(`Theme file media batch failed: ${err.message}`);
       }
       if (i + 25 < refs.length) await new Promise((r) => setTimeout(r, 1000));
+    }
+    if (skippedNoSource > 0) {
+      warnings.push(
+        `${skippedNoSource} video reference${skippedNoSource === 1 ? "" : "s"} in theme code had no direct file URL available and could not be copied automatically — re-upload manually via Shopify admin.`,
+      );
     }
     return { total: refs.length, uploaded, warnings };
   }
@@ -529,6 +550,20 @@ export const action = async ({ request }) => {
     return String(value || "").toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 255);
   }
 
+  // The path portion of an absolute OR relative URL, trailing slash removed —
+  // for comparing a menu item's `url` (which Shopify may report either way)
+  // against a policy's reported `url` regardless of which form each happens
+  // to be in.
+  function urlPathname(value = "") {
+    const raw = String(value || "").trim();
+    if (!raw) return "";
+    try {
+      return new URL(raw, "https://placeholder.invalid").pathname.replace(/\/+$/, "") || "/";
+    } catch {
+      return raw.replace(/\/+$/, "") || "/";
+    }
+  }
+
   async function copyGraphqlMetafields({ sourceShop, sourceToken, sourceOwnerGid, targetOwnerGid }) {
     const warnings = [];
     let copied = 0;
@@ -616,15 +651,48 @@ export const action = async ({ request }) => {
     return createFilesOnTargetFromThemeRefs(sourceShop, targetShop, targetToken, refs).then((res) => ({ ...res, label }));
   }
 
-  function fileNodeToOriginalSource(node = {}) {
-    if (node.url) return node.url;
-    if (node.image?.url) return node.image.url;
-    if (Array.isArray(node.sources)) {
-      const src = node.sources.find((s) => s?.url && /^https?:\/\//i.test(s.url));
-      if (src) return src.url;
+  /**
+   * The single best re-fetchable file URL out of a Video/Model3d node's
+   * `sources[]` — NOT just the first https URL. Shopify's `sources` commonly
+   * mixes an actual downloadable file (format "mp4") with an adaptive-
+   * streaming manifest (format "m3u8", an .m3u8 playlist referencing many
+   * segment files, not one fetchable video). fileCreate's originalSource
+   * needs a single real file; handing it a manifest URL is exactly what
+   * produces Shopify's "Invalid video url" userError. Falls back to a URL
+   * that at least LOOKS like a real file by extension, and only returns
+   * null (never guesses) when nothing reliable is available — the caller
+   * skips and warns rather than submitting a source likely to fail.
+   */
+  function bestFileSourceUrl(sources = []) {
+    const valid = (sources || []).filter((s) => s?.url && /^https?:\/\//i.test(s.url));
+    const byFormat = valid.find((s) => String(s.format || "").toLowerCase() === "mp4");
+    if (byFormat) return byFormat.url;
+    const byExtension = valid.find((s) => /\.(mp4|mov|m4v|webm|glb|usdz)(\?|$)/i.test(s.url));
+    if (byExtension) return byExtension.url;
+    return null;
+  }
+
+  /**
+   * Resolves both the source URL AND the content type from the file node's
+   * OWN GraphQL type (__typename) — not re-derived by sniffing the URL
+   * string afterward. Shopify's video/3D CDN URLs frequently carry no
+   * recognizable file extension (hash-based paths), so guessing contentType
+   * from the URL is unreliable in exactly the cases that matter most; the
+   * type this app already queried for is authoritative and free.
+   */
+  function fileNodeToOriginalSourceAndType(node = {}) {
+    switch (node.__typename) {
+      case "MediaImage":
+        return { originalSource: node.image?.url || "", contentType: "IMAGE" };
+      case "GenericFile":
+        return { originalSource: node.url || "", contentType: "FILE" };
+      case "Video":
+        return { originalSource: bestFileSourceUrl(node.sources) || "", contentType: "VIDEO" };
+      case "Model3d":
+        return { originalSource: bestFileSourceUrl(node.sources) || "", contentType: "MODEL_3D" };
+      default:
+        return { originalSource: "", contentType: "FILE" };
     }
-    if (node.preview?.image?.url) return node.preview.image.url;
-    return "";
   }
 
   async function fetchSourceFilesForCopy(sourceShop, sourceToken) {
@@ -634,6 +702,7 @@ export const action = async ({ request }) => {
           edges {
             cursor
             node {
+              __typename
               id
               alt
               fileStatus
@@ -647,32 +716,42 @@ export const action = async ({ request }) => {
         }
       }`;
     const files = [];
+    let skippedNoSource = 0;
     let after = null;
     let hasNextPage = true;
     while (hasNextPage) {
       const data = await shopifyGraphql(sourceShop, sourceToken, query, { after });
       const edges = data?.files?.edges || [];
       for (const edge of edges) {
-        const originalSource = fileNodeToOriginalSource(edge.node || {});
-        if (!originalSource) continue;
+        const { originalSource, contentType } = fileNodeToOriginalSourceAndType(edge.node || {});
+        if (!originalSource) { skippedNoSource++; continue; }
         const filename = filenameFromUrlOrRef(originalSource);
         files.push({
           originalSource,
           filename,
           alt: edge.node?.alt || filename || "Imported file",
-          contentType: mediaContentTypeFromUrl(originalSource),
+          contentType,
         });
         after = edge.cursor;
       }
       hasNextPage = !!data?.files?.pageInfo?.hasNextPage;
     }
-    return files;
+    return { files, skippedNoSource };
   }
 
   async function copyStoreFiles(sourceShop, sourceToken, dryRun = false) {
     const out = { type: "files", title: "Shopify Files", status: "success", total: 0, copied: 0, skipped: 0, warnings: [] };
     try {
-      const files = await fetchSourceFilesForCopy(sourceShop, sourceToken);
+      const { files, skippedNoSource } = await fetchSourceFilesForCopy(sourceShop, sourceToken);
+      if (skippedNoSource > 0) {
+        // No reliable single-file source (e.g. a video with only an HLS
+        // manifest, no mp4 rendition) — skipped rather than submitted with a
+        // guessed/unreliable URL. Surfaced as a clear warning up front
+        // instead of a confusing post-transfer fileCreate error.
+        out.warnings.push(
+          `${skippedNoSource} file${skippedNoSource === 1 ? "" : "s"} (likely video) had no direct, single-file source available and could not be copied automatically — re-upload manually via Shopify admin.`,
+        );
+      }
       const unique = new Map();
       for (const f of files) {
         const key = f.originalSource || f.filename;
@@ -686,7 +765,7 @@ export const action = async ({ request }) => {
       // that are already on the destination. fetchSourceFilesForCopy is
       // shop-agnostic, so it doubles as a "list existing target files" call.
       try {
-        const targetFiles = await fetchSourceFilesForCopy(targetShop, targetToken);
+        const { files: targetFiles } = await fetchSourceFilesForCopy(targetShop, targetToken);
         const existingFilenames = new Set(targetFiles.map((f) => f.filename).filter(Boolean));
         const beforeDedupe = items.length;
         items = items.filter((f) => !existingFilenames.has(f.filename));
@@ -1161,7 +1240,69 @@ export const action = async ({ request }) => {
     } catch { return []; }
   }
 
-  async function upsertMenus(sourceShop, sourceToken, dryRun = false) {
+  // True for a menu item (or any of its descendants) of the given `type`.
+  function menuTreeHasType(items = [], type) {
+    return (items || []).some((it) => it?.type === type || menuTreeHasType(it?.items, type));
+  }
+
+  /**
+   * Resolves menu-item links this app can actually determine the destination
+   * resource for, rewriting or flagging them instead of forwarding the
+   * source URL/type verbatim (the prior behaviour, which is exactly how a
+   * link with no matching destination resource stays broken with no
+   * indication why). Runs strictly after pages/blogs/policies have already
+   * been created (see transferContentAndMedia, which builds
+   * policyUrlToPageHandle during that already-sequential pipeline before
+   * ever calling upsertMenus) — there is no separate ordering to get wrong
+   * here, resolution simply consumes what the earlier steps produced.
+   *
+   *   SHOP_POLICY -> rewritten to PAGE, pointing at the policy-page created
+   *   above. Shopify policies are read-only via API, so nothing with
+   *   resourceType SHOP_POLICY ever exists on the destination to link to —
+   *   forwarded as-is, every such link is unresolvable by construction.
+   *
+   *   COLLECTION -> left as-is (rewriting to nothing better exists), but
+   *   flagged when the destination doesn't have a matching collection yet —
+   *   the cross-module case where content is transferred without also
+   *   running products/collections. A flagged link isn't silently broken;
+   *   the merchant is told exactly what to run to fix it.
+   */
+  function resolveMenuItemLinks(items = [], { policyUrlToPageHandle, targetCollectionHandles }, notes) {
+    return (items || []).map((item) => {
+      let next = { ...item };
+      if (item.type === "SHOP_POLICY") {
+        const newHandle = policyUrlToPageHandle.get(urlPathname(item.url));
+        if (newHandle) {
+          next = { ...next, type: "PAGE", url: `/pages/${newHandle}` };
+        } else {
+          notes.add(`Policy link "${item.title || item.url}" could not be resolved to a page — the source policy had no content to copy`);
+        }
+      } else if (item.type === "COLLECTION" && targetCollectionHandles) {
+        const handle = urlPathname(item.url).split("/").filter(Boolean).pop();
+        if (handle && !targetCollectionHandles.has(handle)) {
+          notes.add(`Collection link "${item.title || item.url}" may not resolve — its collection doesn't exist on the destination yet. Run a Products/Collections transfer for this store together with Content.`);
+        }
+      }
+      if (Array.isArray(item.items) && item.items.length) {
+        next.items = resolveMenuItemLinks(item.items, { policyUrlToPageHandle, targetCollectionHandles }, notes);
+      }
+      return next;
+    });
+  }
+
+  async function fetchTargetCollectionHandles() {
+    try {
+      const data = await shopifyGraphql(targetShop, targetToken, `#graphql
+        query TargetCollectionHandles($after: String) {
+          collections(first: 250, after: $after) { edges { cursor node { handle } } pageInfo { hasNextPage } }
+        }`, { after: null });
+      return new Set((data?.collections?.edges || []).map((e) => e.node?.handle).filter(Boolean));
+    } catch {
+      return null; // unknown — resolveMenuItemLinks skips the check rather than false-flagging every collection link
+    }
+  }
+
+  async function upsertMenus(sourceShop, sourceToken, dryRun = false, { policyUrlToPageHandle = new Map() } = {}) {
     const result = { type: "menus", title: "Navigation menus", status: dryRun ? "dry-run" : "success", total: 0, copied: 0, warnings: [], results: [] };
     let sourceMenus = [];
     try {
@@ -1175,6 +1316,11 @@ export const action = async ({ request }) => {
     if (dryRun) return result;
 
     const targetMenus = await fetchTargetMenus();
+    // Only paid for when a source menu actually links to a collection —
+    // the common case (no collection links) does zero extra API work.
+    const targetCollectionHandles = sourceMenus.some((m) => menuTreeHasType(m.items, "COLLECTION"))
+      ? await fetchTargetCollectionHandles()
+      : null;
     const createMutation = `#graphql
       mutation CreateMenu($title: String!, $handle: String!, $items: [MenuItemCreateInput!]!) {
         menuCreate(title: $title, handle: $handle, items: $items) { menu { id handle } userErrors { field message code } }
@@ -1189,10 +1335,13 @@ export const action = async ({ request }) => {
       try {
         const skipped = [];
         const filteredSource = filterMenuItems(menu.items || [], skipped);
-        let items = filteredSource.map(menuItemForTarget).slice(0, 100);
+        const resolutionNotes = new Set();
+        const resolvedSource = resolveMenuItemLinks(filteredSource, { policyUrlToPageHandle, targetCollectionHandles }, resolutionNotes);
+        let items = resolvedSource.map(menuItemForTarget).slice(0, 100);
         if (skipped.length) {
           mr.warnings.push(`Skipped ${skipped.length} unsupported link${skipped.length === 1 ? "" : "s"} (customer account pages cannot be transferred)`);
         }
+        if (resolutionNotes.size) mr.warnings.push(...resolutionNotes);
 
         const runMutation = async () => {
           const existing = targetMenus.find((m) => m.handle === menu.handle);
@@ -1260,6 +1409,11 @@ export const action = async ({ request }) => {
   async function transferContentAndMedia(sourceShop, sourceToken, dryRun = false) {
     const results = [];
     const errors = [];
+    // Populated by the policy-copy step below (source policy url -> new
+    // destination page handle), sequenced strictly before menus so
+    // upsertMenus can rewrite SHOP_POLICY menu links against it. See
+    // upsertMenus for how this + pages/blogs/collections resolution works.
+    const policyUrlToPageHandle = new Map();
 
     const fileResult = await copyStoreFiles(sourceShop, sourceToken, dryRun);
     results.push(fileResult);
@@ -1338,22 +1492,31 @@ export const action = async ({ request }) => {
       const policies = policiesData?.shop?.shopPolicies || [];
       for (const policy of policies.filter((p) => p?.body)) {
         const policyHandle = (policy.type || policy.title || "imported").toString().toLowerCase().replace(/_/g, "-");
+        const newHandle = normalizeHandle(`policy-${policyHandle}`);
         const page = {
           id: null,
           title: `Policy - ${policy.title || policy.type || "Imported"}`,
-          handle: normalizeHandle(`policy-${policyHandle}`),
+          handle: newHandle,
           body_html: policy.body || "",
           published_at: new Date().toISOString(),
         };
         const pr = await upsertPageFromSource(sourceShop, sourceToken, page, dryRun, "policy-page");
         if (!dryRun) pr.warnings = [...(pr.warnings || []), "Shopify policies are read-only through API, so this policy was copied as a normal page."];
         results.push(pr);
+        // A menu item linking to this policy has type SHOP_POLICY, which has
+        // no real destination resource to resolve against (only the page
+        // substitute above exists) — recorded here, keyed by the policy's
+        // OWN reported url, so upsertMenus below can rewrite such items to
+        // point at the new page instead of forwarding an unresolvable link.
+        if (!dryRun && pr.status !== "error" && policy.url) {
+          policyUrlToPageHandle.set(urlPathname(policy.url), newHandle);
+        }
       }
     } catch (err) {
       errors.push(`Policies skipped: ${err.message}`);
     }
 
-    const menuResult = await upsertMenus(sourceShop, sourceToken, dryRun);
+    const menuResult = await upsertMenus(sourceShop, sourceToken, dryRun, { policyUrlToPageHandle });
     results.push(menuResult);
 
     for (const e of errors) results.push({ type: "content", title: e, status: "warning", warnings: [e] });
@@ -4021,7 +4184,11 @@ export default function StoreTransferPage() {
                               <p className="text-xs text-gray-600 mt-0.5">Saved as <strong>unpublished</strong> — preview it before publishing.</p>
                             </div>
                             <div className="flex flex-col gap-1.5 flex-shrink-0">
-                            <a href={`https://${currentShop}/admin/themes/${transferResults.themes.newThemeId}`} target="_blank" rel="noopener noreferrer"
+                            {/* The visual customizer (drag-drop sections/blocks) — not
+                                /admin/themes/{id}/edit, which is the raw Liquid code
+                                editor and the wrong destination for a non-technical
+                                merchant reviewing a freshly transferred theme. */}
+                            <a href={`https://${currentShop}/admin/themes/${transferResults.themes.newThemeId}/editor`} target="_blank" rel="noopener noreferrer"
                               className="px-3 py-1.5 text-xs font-semibold rounded-lg text-white whitespace-nowrap text-center" style={{ background: S }}>
                               Open Theme ↗
                             </a>
@@ -4031,8 +4198,20 @@ export default function StoreTransferPage() {
                                 Preview ↗
                               </a>
                             )}
+                            {/* Publishing (setting role: MAIN) changes the merchant's
+                                live storefront — deliberately not a one-click Admin API
+                                action here. Linking to the theme library keeps that
+                                decision an explicit, deliberate click on Shopify's own
+                                UI rather than something this app can trigger. */}
+                            <a href={`https://${currentShop}/admin/themes`} target="_blank" rel="noopener noreferrer"
+                              className="px-3 py-1.5 text-xs font-semibold rounded-lg whitespace-nowrap text-center border" style={{ color: S, borderColor: "rgba(46,99,22,0.3)" }}>
+                              Publish ↗
+                            </a>
                           </div>
                           </div>
+                          <p className="text-[11px] text-gray-500 -mt-1">
+                            &quot;Publish&quot; opens your theme library — find &quot;{transferResults.themes.newThemeName || transferResults.themes.themeName}&quot; there and click Publish when you&apos;re ready to make it live.
+                          </p>
                           <p className="text-[11px] text-gray-500">
                             Asset copy: {stats.success} succeeded
                             {stats.errors > 0 ? `, ${stats.errors} failed` : ""}

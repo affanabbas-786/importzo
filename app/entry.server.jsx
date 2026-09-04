@@ -14,6 +14,19 @@ export default async function handleRequest(
   reactRouterContext,
 ) {
   addDocumentResponseHeaders(request, responseHeaders);
+
+  // Embedded (and auth) HTML must never be cached. It carries hashed asset
+  // references and per-session App Bridge state, so a browser (or Shopify's
+  // iframe layer) holding an old copy after a deploy tries to hydrate against
+  // JS chunks that no longer exist — the chunk 404s, hydration fails, and the
+  // merchant sees a stale render until a manual reload fixes it. That is the
+  // "flash of old pricing, then it corrected itself" seen in review. The
+  // marketing pages ("/", "/privacy") are deliberately left cacheable.
+  const { pathname } = new URL(request.url);
+  if (pathname.startsWith("/app") || pathname.startsWith("/auth")) {
+    responseHeaders.set("Cache-Control", "no-store, must-revalidate");
+  }
+
   const userAgent = request.headers.get("user-agent");
   const callbackName = isbot(userAgent ?? "") ? "onAllReady" : "onShellReady";
 

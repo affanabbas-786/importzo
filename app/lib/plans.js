@@ -49,11 +49,6 @@ export const BILLING_INTERVAL = Object.freeze({
   YEARLY: "yearly",
 });
 
-// Minimum distinct, currently-installed stores (same merchant, matched by
-// shop owner email, counting the current store itself) required to unlock
-// Agency pricing. See agency-eligibility.server.js.
-export const AGENCY_MIN_STORES = 3;
-
 // Monthly cap on Importzo's built-in AI (Groq) calls, shared across every
 // built-in-AI feature combined (SEO cleanup, alt-text, duplicate detection,
 // error diagnosis) — not per feature. Bring-your-own-key usage never counts
@@ -76,6 +71,9 @@ export const PLANS = Object.freeze({
     shopifyPlanName: null,
     tagline: "1 store, 250 records/month",
     description: "For trying Importzo out on a single store.",
+    // Phase 12 — a Free store cannot fund partner stores. Only a genuinely
+    // paid tier (Pro/Agency) can be a payer — see partner-linking.server.js.
+    maxPartners: 0,
   },
   [PLAN_IDS.PRO]: {
     id: PLAN_IDS.PRO,
@@ -88,21 +86,34 @@ export const PLANS = Object.freeze({
     shopifyPlanName: SHOPIFY_PLAN_NAME.pro,
     tagline: "Unlimited records + scheduled sync",
     description: "For growing stores that need unlimited volume and recurring sync.",
+    // Flat price covers this store (the payer) plus 1 companion store it can
+    // fund Pro access on — see partner-linking.server.js. The price never
+    // varies with companion count; 1 is simply the cap.
+    maxPartners: 1,
   },
   [PLAN_IDS.AGENCY]: {
     id: PLAN_IDS.AGENCY,
     label: "Agency",
-    price: 10,
-    priceYearly: 96,
+    price: 35,
+    priceYearly: 336,
     recordLimit: Infinity,
     scheduledSync: true,
     builtInAi: true,
     shopifyPlanName: SHOPIFY_PLAN_NAME.agency,
-    tagline: "Everything in Pro, discounted per store",
-    description: `Unlocks once the same merchant has ${AGENCY_MIN_STORES}+ stores running Importzo.`,
-    requiresEligibility: true,
+    tagline: "Everything in Pro, for up to 6 stores",
+    description: "Flat price covers this store plus 5 companion stores.",
+    // Flat price covers this store (the payer) plus up to 5 companion
+    // stores. Like Pro, the price never varies within the cap. There is NO
+    // store-count gate — any Pro/Agency payer links companions directly by
+    // domain (see partner-linking.server.js).
+    maxPartners: 5,
   },
 });
+
+/** Max linked-partner slots this tier's price includes room for. */
+export function maxPartnersFor(tier) {
+  return getPlan(tier).maxPartners || 0;
+}
 
 export const PLAN_ORDER = [PLAN_IDS.FREE, PLAN_IDS.PRO, PLAN_IDS.AGENCY];
 
@@ -193,6 +204,19 @@ export function billingPlanKey(tier, interval) {
   return BILLING_PLAN_KEY[tier]?.[interval] || null;
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// Phase 12 — Partner/Agency linking is FLAT-PRICED.
+//
+// Earlier this phase billed Agency at $10 base + $7 per linked companion,
+// realised as a discrete pre-registered Shopify plan per count. That is
+// gone: Pro ($15) and Agency ($35) are each a single flat AppSubscription
+// whose price does not change with companion count (Pro caps at 1
+// companion, Agency at 5). There is nothing to reconcile between the
+// advertised price and the billed price, so no per-count plan keys and no
+// price-divergence banner. billingPlanKey(tier, interval) is the only key
+// resolver — the same one the base Pro/Agency subscribe flow uses.
+// ═══════════════════════════════════════════════════════════════════
+
 /** The price a given tier+interval actually charges, for confirmation copy. */
 export function priceFor(tier, interval) {
   const plan = getPlan(tier);
@@ -273,4 +297,22 @@ export const COMPLIMENTARY_STATUS = "COMPLIMENTARY";
  */
 export function isComplimentary(subscriptionStatus) {
   return subscriptionStatus === COMPLIMENTARY_STATUS;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Phase 12 — Partner-linked grants — Pro access funded by another shop's
+// (the payer's) Shopify subscription instead of this shop's own.
+//
+// Structurally the same shape as COMPLIMENTARY_STATUS above: no Shopify
+// AppSubscription exists for this shop (subscriptionId stays NULL), so the
+// same "no active subscription is not evidence of a lapsed charge" problem
+// applies, and it's solved the same way — a marker in subscriptionStatus
+// that every reconciliation path checks before inferring a downgrade. See
+// partner-linking.server.js for how the grant is created/revoked.
+// ═══════════════════════════════════════════════════════════════════
+export const PARTNER_LINKED_STATUS = "PARTNER_LINKED";
+
+/** Whether this shop's Pro access is funded by a payer's subscription. */
+export function isPartnerLinked(subscriptionStatus) {
+  return subscriptionStatus === PARTNER_LINKED_STATUS;
 }

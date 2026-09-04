@@ -10,16 +10,12 @@ import { BRAND } from "../lib/constants";
 const { secondary: S } = BRAND;
 const UNEMPHASISED_BORDER = "#e5e7eb";
 
-const ELIGIBLE = { eligible: true, storeCount: 3, minStores: 3 };
-const INELIGIBLE = { eligible: false, storeCount: 1, minStores: 3 };
-
 function render(overrides = {}) {
   return renderToStaticMarkup(
     <PlanCard
       plan={PLANS[PLAN_IDS.AGENCY]}
       currentTier={PLAN_IDS.FREE}
       period={BILLING_INTERVAL.MONTHLY}
-      eligibility={ELIGIBLE}
       onSelect={() => {}}
       onCancel={() => {}}
       busy={false}
@@ -181,30 +177,75 @@ describe("PlanCard call-to-action state", () => {
   });
 });
 
-describe("PlanCard eligibility notice is independent of the chrome", () => {
-  // The whole reason featuring became conditional: chrome follows eligibility,
-  // but the warning inside the card follows plan.requiresEligibility, so an
-  // ineligible merchant still gets told why Agency is out of reach.
-  it("still warns an ineligible merchant on an unfeatured Agency card", () => {
-    const html = render({ featured: false, eligibility: INELIGIBLE });
+// App Store review: the trial terms have to be the PRIMARY price framing on
+// this page, not a subtitle. "$0 today" is what the reviewer's screencast
+// showed as missing.
+describe("PlanCard trial framing", () => {
+  it("leads with $0 today and states the recurring price and trial length below, for a trial-eligible upgrade", () => {
+    const html = render({ plan: PLANS[PLAN_IDS.PRO], currentTier: PLAN_IDS.FREE, trialEligible: true });
 
-    expect(html).toMatch(/Unlocks at 3\+ stores/);
-    expect(html).toContain("currently has 1");
-    expect(html).not.toContain("Most Popular");
+    expect(html).toContain("$0 today");
+    expect(html).toMatch(/then \$15\/mo after your 7-day free trial/);
+    expect(html).toContain("Start 7-day free trial");
+    expect(html).toMatch(/No charge for 7 days\. Cancel anytime before the trial ends\./);
   });
 
-  it("omits the warning for an eligible merchant", () => {
-    const html = render({ featured: true, eligibility: ELIGIBLE });
-    expect(html).not.toMatch(/Unlocks at 3\+ stores/);
-  });
-
-  it("never shows the warning on Pro, which has no store requirement", () => {
+  it("uses the yearly recurring amount in the sub-price when the toggle is yearly", () => {
     const html = render({
-      plan: PLANS[PLAN_IDS.PRO],
-      featured: true,
-      eligibility: INELIGIBLE,
+      plan: PLANS[PLAN_IDS.PRO], currentTier: PLAN_IDS.FREE,
+      period: BILLING_INTERVAL.YEARLY, trialEligible: true,
     });
-    expect(html).not.toMatch(/Unlocks at 3\+ stores/);
-    expect(html).toContain("Most Popular");
+    expect(html).toContain("$0 today");
+    expect(html).toMatch(/then \$144\/yr after your 7-day free trial/);
+  });
+
+  it("does NOT show $0-today framing for a period switch on the plan the merchant already holds", () => {
+    const html = render({
+      plan: PLANS[PLAN_IDS.PRO], currentTier: PLAN_IDS.PRO,
+      currentInterval: BILLING_INTERVAL.MONTHLY, period: BILLING_INTERVAL.YEARLY,
+      trialEligible: true,
+    });
+    expect(html).not.toContain("$0 today");
+    expect(html).toContain("Switch to yearly");
+    expect(html).not.toMatch(/No charge for 7 days/);
+  });
+
+  it("does NOT show $0-today framing when the shop is no longer trial-eligible", () => {
+    const html = render({ plan: PLANS[PLAN_IDS.PRO], currentTier: PLAN_IDS.FREE, trialEligible: false });
+    expect(html).not.toContain("$0 today");
+    expect(html).toContain("Upgrade to Pro");
+    // The plain trial pill still discloses the offer.
+    expect(html).toContain("7-day free trial");
+  });
+
+  it("never applies trial framing to the Free card", () => {
+    const html = render({ plan: PLANS[PLAN_IDS.FREE], currentTier: PLAN_IDS.PRO, trialEligible: true });
+    expect(html).not.toContain("$0 today");
+    expect(html).not.toMatch(/No charge for 7 days/);
+  });
+});
+
+describe("PlanCard — no stale 3-store eligibility copy", () => {
+  // The "Agency unlocks at 3+ stores" model was removed: any Pro/Agency payer
+  // links companions directly, no gate. None of that copy may survive.
+  it("never renders an 'Unlocks at 3+ stores' warning on any card", () => {
+    for (const id of [PLAN_IDS.FREE, PLAN_IDS.PRO, PLAN_IDS.AGENCY]) {
+      const html = render({ plan: PLANS[id] });
+      expect(html).not.toMatch(/Unlocks at/i);
+      expect(html).not.toMatch(/\d\+ stores/);
+      expect(html).not.toMatch(/qualify/i);
+      expect(html).not.toMatch(/per store/);
+    }
+  });
+
+  it("lists the included companion slots on each paid card", () => {
+    expect(render({ plan: PLANS[PLAN_IDS.PRO] })).toContain("1 companion store included");
+    expect(render({ plan: PLANS[PLAN_IDS.AGENCY] })).toContain("5 companion stores included");
+    expect(render({ plan: PLANS[PLAN_IDS.FREE] })).not.toMatch(/companion store/);
+  });
+
+  it("Agency card describes the flat companion coverage, not a store requirement", () => {
+    const html = render({ plan: PLANS[PLAN_IDS.AGENCY] });
+    expect(html).toContain("Flat price covers this store plus 5 companion stores.");
   });
 });

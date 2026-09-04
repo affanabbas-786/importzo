@@ -70,6 +70,32 @@ export function decideTrialOverride(nodes) {
 }
 
 /**
+ * The single trial decision for a shop, shared by the Billing page (deciding
+ * what trial terms to SHOW) and the charge action (deciding what to REQUEST),
+ * so the two can never disagree — a page promising "$0 today, 7-day trial"
+ * next to a charge that grants no trial is exactly the kind of mismatch the
+ * App Store review flagged.
+ *
+ * Returns the value to pass as billing.request's `trialDays` override:
+ *   undefined -> grant the plan's configured trial (7 days)
+ *   0         -> suppress it
+ *
+ * On a TEST charge the trial is always granted: no money moves, so the
+ * cancel-and-resubscribe abuse trialDaysOverrideFor guards against is not
+ * possible, and a reviewer testing repeatedly on a development store must see
+ * the advertised trial every time.
+ */
+export async function resolveTrialDays({ shopifyGraphql, shop, token, version, isTest }) {
+  if (isTest) return undefined;
+  return trialDaysOverrideFor({ shopifyGraphql, shop, token, version });
+}
+
+/** Whether `resolveTrialDays`'s result means "this shop gets a trial on its next subscribe". */
+export function grantsTrial(trialDaysOverride) {
+  return trialDaysOverride === undefined;
+}
+
+/**
  * The trialDays value to pass to billing.request():
  *   undefined -> send nothing, so the SDK uses the plan's own trialDays (7).
  *   0         -> explicitly override the plan; no trial on this subscription.

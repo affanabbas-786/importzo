@@ -7,6 +7,7 @@ import {
   planActionLabel,
   isUpgradeFrom,
   offersPlanSelection,
+  planCta,
   freeCardLink,
   beginPlanSelection,
   shouldDismissOverlay,
@@ -17,11 +18,6 @@ import {
   planDisplayOrder,
   PLAN_DISPLAY_ORDER,
 } from "./billing-ui.js";
-
-// The two shapes checkAgencyEligibility returns, as the billing loader passes
-// them straight through to these helpers.
-const ELIGIBLE = { eligible: true, storeCount: 3, minStores: 3 };
-const INELIGIBLE = { eligible: false, storeCount: 1, minStores: 3 };
 
 describe("REDIRECT_OVERLAY_COPY", () => {
   it("names Shopify's approval page and states plainly that no charge is created yet", () => {
@@ -84,6 +80,52 @@ describe("offersPlanSelection", () => {
   it("does not offer selection for the plan the merchant is already on", () => {
     expect(offersPlanSelection({ planId: PLAN_IDS.PRO, currentTier: PLAN_IDS.PRO })).toBe(false);
   });
+
+  it("does not offer selection for the same tier AND same period", () => {
+    expect(offersPlanSelection({
+      planId: PLAN_IDS.PRO, currentTier: PLAN_IDS.PRO,
+      interval: "monthly", currentInterval: "monthly",
+    })).toBe(false);
+  });
+
+  // The App Store review regression: a merchant on Pro monthly toggling to
+  // yearly is a real, billable subscription change and MUST be offered — the
+  // "Switch to yearly" button was rendering enabled but doing nothing because
+  // this returned false for a "switch".
+  it("offers selection for the same tier with a DIFFERENT billing period (interval switch)", () => {
+    expect(offersPlanSelection({
+      planId: PLAN_IDS.PRO, currentTier: PLAN_IDS.PRO,
+      interval: "yearly", currentInterval: "monthly",
+    })).toBe(true);
+    expect(offersPlanSelection({
+      planId: PLAN_IDS.AGENCY, currentTier: PLAN_IDS.AGENCY,
+      interval: "monthly", currentInterval: "yearly",
+    })).toBe(true);
+  });
+});
+
+describe("planCta trial-aware labelling", () => {
+  it("labels a trial-eligible upgrade 'Start 7-day free trial', not 'Upgrade to X'", () => {
+    const cta = planCta({ planId: PLAN_IDS.PRO, currentTier: PLAN_IDS.FREE, trialEligible: true });
+    expect(cta).toEqual({ kind: "select", label: "Start 7-day free trial", disabled: false });
+  });
+
+  it("keeps 'Upgrade to X' when the shop is no longer trial-eligible", () => {
+    const cta = planCta({ planId: PLAN_IDS.PRO, currentTier: PLAN_IDS.FREE, trialEligible: false });
+    expect(cta).toEqual({ kind: "select", label: "Upgrade to Pro", disabled: false });
+  });
+
+  it("does not let trialEligible change a period switch or the current-plan state", () => {
+    expect(planCta({
+      planId: PLAN_IDS.PRO, currentTier: PLAN_IDS.PRO,
+      interval: "yearly", currentInterval: "monthly", trialEligible: true,
+    })).toMatchObject({ kind: "switch", label: "Switch to yearly" });
+
+    expect(planCta({
+      planId: PLAN_IDS.PRO, currentTier: PLAN_IDS.PRO,
+      interval: "monthly", currentInterval: "monthly", trialEligible: true,
+    })).toMatchObject({ kind: "current", disabled: true });
+  });
 });
 
 describe("freeCardLink", () => {
@@ -131,6 +173,23 @@ describe("beginPlanSelection", () => {
     expect(result).toEqual({ started: false, reason: "already-on-plan" });
     expect(showOverlay).not.toHaveBeenCalled();
     expect(submit).not.toHaveBeenCalled();
+  });
+
+  it("starts an interval switch on the plan the merchant already holds, submitting the new period", () => {
+    const showOverlay = vi.fn();
+    const submit = vi.fn();
+    const result = beginPlanSelection({
+      plan: PLANS.pro,
+      interval: "yearly",
+      currentTier: PLAN_IDS.PRO,
+      currentInterval: "monthly",
+      showOverlay,
+      submit,
+    });
+
+    expect(result).toEqual({ started: true, reason: null });
+    expect(showOverlay).toHaveBeenCalledTimes(1);
+    expect(submit).toHaveBeenCalledWith({ plan: PLAN_IDS.PRO, interval: "yearly" });
   });
 
   it("shows the overlay BEFORE submitting for a real paid-plan selection", () => {
@@ -243,107 +302,53 @@ describe("planConfirmationToast", () => {
 });
 
 describe("featuredPlanId", () => {
-  it("features Agency once the shop actually has the 3+ stores it needs", () => {
-    expect(featuredPlanId(ELIGIBLE)).toBe(PLAN_IDS.AGENCY);
-  });
-
-  // The point of making this conditional: Agency's own card carries an
-  // "unlocks at 3+ stores" warning, so highlighting it for a one-store
-  // merchant recommends a plan they cannot use.
-  it("features Pro for a shop that does not qualify for Agency", () => {
-    expect(featuredPlanId(INELIGIBLE)).toBe(PLAN_IDS.PRO);
+  // The "3+ connected stores -> feature Agency" model is gone. Pro is
+  // featured, always — a multi-store merchant picks Agency off the card copy.
+  it("always features Pro, taking no arguments", () => {
+    expect(featuredPlanId()).toBe(PLAN_IDS.PRO);
   });
 
   it("never features Free", () => {
-    expect(featuredPlanId(ELIGIBLE)).not.toBe(PLAN_IDS.FREE);
-    expect(featuredPlanId(INELIGIBLE)).not.toBe(PLAN_IDS.FREE);
-  });
-
-  // The loader builds eligibility from a live Shopify call that is allowed to
-  // fail soft, so this must not throw the whole billing page.
-  it("falls back to Pro when eligibility is missing or malformed", () => {
-    expect(featuredPlanId(undefined)).toBe(PLAN_IDS.PRO);
-    expect(featuredPlanId(null)).toBe(PLAN_IDS.PRO);
-    expect(featuredPlanId({})).toBe(PLAN_IDS.PRO);
+    expect(featuredPlanId()).not.toBe(PLAN_IDS.FREE);
   });
 });
 
 describe("isFeaturedPlan", () => {
-  it("marks exactly one card per shop — Agency when eligible", () => {
-    const featured = PLAN_ORDER.filter((id) => isFeaturedPlan(id, ELIGIBLE));
-    expect(featured).toEqual([PLAN_IDS.AGENCY]);
-  });
-
-  it("marks exactly one card per shop — Pro when ineligible", () => {
-    const featured = PLAN_ORDER.filter((id) => isFeaturedPlan(id, INELIGIBLE));
+  it("marks exactly one card — Pro", () => {
+    const featured = PLAN_ORDER.filter((id) => isFeaturedPlan(id));
     expect(featured).toEqual([PLAN_IDS.PRO]);
   });
 
-  it("does not feature Agency for an ineligible shop", () => {
-    expect(isFeaturedPlan(PLAN_IDS.AGENCY, INELIGIBLE)).toBe(false);
-    expect(isFeaturedPlan(PLAN_IDS.PRO, INELIGIBLE)).toBe(true);
-  });
-
-  it("ignores the merchant's current tier — the badge marks best fit, not status", () => {
-    // Same eligibility, so the same card is featured no matter what they're on.
-    for (const tier of [PLAN_IDS.FREE, PLAN_IDS.PRO, PLAN_IDS.AGENCY]) {
-      expect(isFeaturedPlan(PLAN_IDS.AGENCY, { ...ELIGIBLE, tier })).toBe(true);
-    }
-  });
-
-  it("is false for an unrecognised plan id rather than throwing", () => {
-    expect(isFeaturedPlan("bogus", ELIGIBLE)).toBe(false);
-    expect(isFeaturedPlan(undefined, ELIGIBLE)).toBe(false);
+  it("is false for Free, Agency, and an unrecognised id", () => {
+    expect(isFeaturedPlan(PLAN_IDS.FREE)).toBe(false);
+    expect(isFeaturedPlan(PLAN_IDS.AGENCY)).toBe(false);
+    expect(isFeaturedPlan("bogus")).toBe(false);
+    expect(isFeaturedPlan(undefined)).toBe(false);
   });
 });
 
 describe("PLAN_DISPLAY_ORDER / planDisplayOrder", () => {
-  it("puts Agency in the middle when it is the featured plan", () => {
-    expect(planDisplayOrder(ELIGIBLE)).toEqual([PLAN_IDS.FREE, PLAN_IDS.AGENCY, PLAN_IDS.PRO]);
+  it("is Free · Pro · Agency, with Pro (the featured plan) in the middle", () => {
+    expect(planDisplayOrder()).toEqual([PLAN_IDS.FREE, PLAN_IDS.PRO, PLAN_IDS.AGENCY]);
+    expect(planDisplayOrder()[1]).toBe(featuredPlanId());
+    expect(planDisplayOrder()[0]).toBe(PLAN_IDS.FREE);
   });
 
-  it("puts Pro in the middle when it is the featured plan", () => {
-    expect(planDisplayOrder(INELIGIBLE)).toEqual([PLAN_IDS.FREE, PLAN_IDS.PRO, PLAN_IDS.AGENCY]);
+  it("renders every plan exactly once", () => {
+    const order = planDisplayOrder();
+    expect(order).toHaveLength(PLAN_ORDER.length);
+    expect([...order].sort()).toEqual([...PLAN_ORDER].sort());
   });
 
-  // The rule the layout rests on, asserted directly rather than via the two
-  // literal arrays above: whichever plan is featured is the one in slot 1.
-  it("always places the featured plan in the middle slot", () => {
-    for (const eligibility of [ELIGIBLE, INELIGIBLE]) {
-      const order = planDisplayOrder(eligibility);
-      expect(order[1]).toBe(featuredPlanId(eligibility));
-    }
-  });
-
-  it("always opens the row at $0 with Free leftmost", () => {
-    for (const eligibility of [ELIGIBLE, INELIGIBLE]) {
-      expect(planDisplayOrder(eligibility)[0]).toBe(PLAN_IDS.FREE);
-    }
-  });
-
-  it("renders every plan exactly once, whichever order is used", () => {
-    for (const eligibility of [ELIGIBLE, INELIGIBLE]) {
-      const order = planDisplayOrder(eligibility);
-      expect(order).toHaveLength(PLAN_ORDER.length);
-      expect([...order].sort()).toEqual([...PLAN_ORDER].sort());
-    }
-  });
-
-  // These are two different orderings of the same ids and isUpgradeFrom()
-  // reads positions out of PLAN_ORDER; a display change must never reach it.
-  it("leaves PLAN_ORDER, the pricing ladder, untouched", () => {
+  // Display order and PLAN_ORDER (the pricing ladder isUpgradeFrom reads) are
+  // kept separate on purpose — they happen to match today but must not alias.
+  it("is a distinct constant from PLAN_ORDER", () => {
     expect(PLAN_ORDER).toEqual([PLAN_IDS.FREE, PLAN_IDS.PRO, PLAN_IDS.AGENCY]);
-    expect(planDisplayOrder(ELIGIBLE)).not.toEqual(PLAN_ORDER);
+    expect(PLAN_DISPLAY_ORDER).not.toBe(PLAN_ORDER);
   });
 
-  it("is frozen, so a caller cannot reorder the shared arrays in place", () => {
+  it("is frozen, so a caller cannot reorder it in place", () => {
     expect(Object.isFrozen(PLAN_DISPLAY_ORDER)).toBe(true);
-    expect(Object.isFrozen(PLAN_DISPLAY_ORDER[PLAN_IDS.AGENCY])).toBe(true);
-    expect(Object.isFrozen(PLAN_DISPLAY_ORDER[PLAN_IDS.PRO])).toBe(true);
-  });
-
-  it("falls back to a usable order when eligibility is missing", () => {
-    expect(planDisplayOrder(undefined)).toEqual([PLAN_IDS.FREE, PLAN_IDS.PRO, PLAN_IDS.AGENCY]);
   });
 });
 

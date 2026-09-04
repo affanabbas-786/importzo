@@ -1,11 +1,11 @@
 import PropTypes from "prop-types";
 import { useEffect, useState } from "react";
-import { useLoaderData, useRouteError, Link } from "react-router";
+import { useFetcher, useLoaderData, useRouteError, Link } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { getUsageStatus } from "../lib/usage.server";
-import { PLANS, PLAN_IDS, AGENCY_MIN_STORES, yearlySavingsPercent } from "../lib/plans.js";
+import { PLANS, PLAN_IDS, yearlySavingsPercent } from "../lib/plans.js";
 import { BRAND } from "../lib/constants";
 import { SUPPORT_EMAIL, mailtoLink, openLiveChat } from "../lib/support";
 import { FriendlyErrorBoundary } from "../components/FriendlyErrorBoundary";
@@ -19,6 +19,11 @@ export const loader = async ({ request }) => {
   // there so it doesn't fire on every Settings page load). Good enough for
   // a summary card that links out to manage the subscription itself.
   const usage = await getUsageStatus({ prisma, shop: session.shop });
+
+  // Phase 12 — Partner/Agency linking. usage.partnerLinkedTo already carries
+  // "who's paying for me"; linking is initiated entirely by the payer (it
+  // just needs this store's myshopify domain), so there's nothing for this
+  // store to generate or configure here.
   return { usage };
 };
 
@@ -87,6 +92,61 @@ Toggle.propTypes = {
   checked: PropTypes.bool,
   onChange: PropTypes.func,
   disabled: PropTypes.bool,
+};
+
+// ── Phase 12 — Partner/Agency linking, the companion's own card ──────────
+// Linking is done entirely by the payer (they enter this store's myshopify
+// domain — there's no code to generate). So this card only has something to
+// show once this store IS a companion: who's funding it, and an Unlink
+// button. When not linked it renders nothing.
+function PartnerLinkCard({ partnerLinkedTo }) {
+  const fetcher = useFetcher();
+  const busy = fetcher.state !== "idle";
+
+  const post = (fields) => {
+    const fd = new FormData();
+    Object.entries(fields).forEach(([k, v]) => fd.append(k, String(v)));
+    fetcher.submit(fd, { method: "post", action: "/api/partner-link" });
+  };
+
+  if (!partnerLinkedTo) return null;
+
+  return (
+    <section className="space-y-4">
+      <div>
+        <h2 className="text-base font-semibold text-gray-900 flex items-center gap-1.5" style={{ fontFamily: F }}>
+          Companion Store
+        </h2>
+        <p className="text-sm text-gray-500 mt-0.5">
+          Your Pro access is funded by another store&apos;s subscription.
+        </p>
+      </div>
+
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+        <div className="flex items-center justify-between gap-4 flex-wrap">
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-gray-900" style={{ fontFamily: F }}>
+              Pro features provided by {partnerLinkedTo}
+            </p>
+            <p className="text-xs text-gray-500 mt-0.5">
+              You can unlink at any time — this store keeps your data, but reverts to the Free plan.
+            </p>
+          </div>
+          <button
+            type="button" disabled={busy}
+            onClick={() => post({ intent: "unlink-self" })}
+            className="text-xs font-semibold px-3 py-1.5 rounded-lg text-red-700 border border-red-200 hover:bg-red-50 disabled:opacity-50 flex-shrink-0"
+          >
+            {busy ? "Unlinking…" : "Unlink"}
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+PartnerLinkCard.propTypes = {
+  partnerLinkedTo: PropTypes.string,
 };
 
 export default function SettingsPage() {
@@ -167,16 +227,6 @@ export default function SettingsPage() {
                 ${PLANS[PLAN_IDS.PRO].price}/month, or ${PLANS[PLAN_IDS.PRO].priceYearly}/year
                 to save {yearlySavingsPercent(PLAN_IDS.PRO)}%.
               </p>
-              {/* Phase 8 — mirrors the Billing page notice for a shop on Agency
-                  pricing that doesn't meet the 3-store requirement. Free to render
-                  here: the flag rides along on the usage status this page already
-                  loads, so no extra Shopify round trip. See app.billing.jsx. */}
-              {usage.agencyIneligibleSince && (
-                <p className="text-xs text-amber-700 mt-1.5 leading-relaxed font-medium">
-                  Your Agency plan needs {AGENCY_MIN_STORES}+ stores to qualify. Nothing has been
-                  turned off — open Billing for the details.
-                </p>
-              )}
               <span className="mt-2 inline-flex items-center gap-1 text-xs font-semibold group-hover:gap-1.5 transition-all" style={{ color: S }}>
                 Go to Billing
                 <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}><path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" /></svg>
@@ -184,6 +234,8 @@ export default function SettingsPage() {
             </div>
           </Link>
         </section>
+
+        <PartnerLinkCard partnerLinkedTo={usage.partnerLinkedTo} />
 
         {/* ── Import & Transfer defaults ── */}
         <section className="space-y-4">

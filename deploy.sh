@@ -181,6 +181,70 @@ if [ "$code" != "200" ]; then
 fi
 echo "    PM2 online; $APP_URL/ -> HTTP 200"
 
+# ── 7. Process freshness ─────────────────────────────────────────────────
+# The build (step 2) ALWAYS runs before the PM2 step, so a healthy deploy
+# leaves the running process started AFTER build/ was last written. If build/
+# is newer, the reload silently didn't swap the process and it is serving a
+# stale in-memory bundle whose asset manifest no longer matches disk — every
+# .css/.js 404s and the UI renders unstyled and dead. That is the 2026-09-01
+# outage, which HTTP 200 on / did not catch because / renders without assets.
+echo "==> Verifying the running process is not stale..."
+proc_started_ms="$(pm2 jlist 2>/dev/null \
+  | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const a=JSON.parse(s).find(x=>x.name==='$APP_NAME');process.stdout.write(String(a&&a.pm2_env.pm_uptime?a.pm2_env.pm_uptime:0))}catch{process.stdout.write('0')}})" || echo 0)"
+proc_started_ms="${proc_started_ms:-0}"
+proc_started_s=$(( proc_started_ms / 1000 ))
+# Newest mtime anywhere under build/, epoch seconds.
+build_mtime="$(find build -type f -printf '%T@\n' 2>/dev/null | cut -d. -f1 | sort -n | tail -1)"
+build_mtime="${build_mtime:-0}"
+if [ "$proc_started_ms" = "0" ] || [ "$build_mtime" = "0" ]; then
+  echo "WARNING: could not compare process start ($proc_started_ms ms) to build mtime ($build_mtime s)." >&2
+  echo "         Skipping the staleness check — verify manually." >&2
+elif [ "$build_mtime" -gt "$proc_started_s" ]; then
+  echo "FATAL: build/ was written $(( build_mtime - proc_started_s ))s AFTER the running process started." >&2
+  echo "       The process is serving a stale in-memory bundle against a rewritten build dir." >&2
+  echo "       Fix: pm2 restart $APP_NAME --update-env   (build/ is already current)" >&2
+  echo "       Database backup: $BACKUP_PATH" >&2
+  exit 1
+fi
+echo "    process started $(( proc_started_s - build_mtime ))s after the last build write"
+
+# ── 8. Asset resolution ──────────────────────────────────────────────────
+# Pull the hashed asset URLs the app shell actually references and confirm
+# each one is really served. This is the direct check for the failure above,
+# and also catches a half-written build/ or a bad asset-serving config.
+echo "==> Verifying referenced assets resolve..."
+app_html="$(curl -sS --max-time 25 "$APP_URL/app" || true)"
+assets="$(printf '%s' "$app_html" | grep -oE '/assets/[A-Za-z0-9_.-]+\.(css|js)' | sort -u || true)"
+if [ -z "$assets" ]; then
+  # /app may bounce before rendering; / always renders the same root shell.
+  app_html="$(curl -sS --max-time 25 "$APP_URL/" || true)"
+  assets="$(printf '%s' "$app_html" | grep -oE '/assets/[A-Za-z0-9_.-]+\.(css|js)' | sort -u || true)"
+fi
+if [ -z "$assets" ]; then
+  echo "FATAL: could not extract any /assets/ reference from $APP_URL — the app shell did not render." >&2
+  echo "       pm2 logs $APP_NAME --err --lines 50" >&2
+  echo "       Database backup: $BACKUP_PATH" >&2
+  exit 1
+fi
+asset_fail=0
+asset_count=0
+while IFS= read -r a; do
+  [ -n "$a" ] || continue
+  asset_count=$(( asset_count + 1 ))
+  ac="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 "$APP_URL$a" || echo 000)"
+  if [ "$ac" != "200" ]; then
+    echo "FATAL: asset $a returned HTTP $ac (expected 200)." >&2
+    asset_fail=1
+  fi
+done <<< "$assets"
+if [ "$asset_fail" -ne 0 ]; then
+  echo "       The served HTML references asset files that are not on disk (stale process or bad build)." >&2
+  echo "       Fix: pm2 restart $APP_NAME --update-env, then re-run this script." >&2
+  echo "       Database backup: $BACKUP_PATH" >&2
+  exit 1
+fi
+echo "    $asset_count referenced asset(s) all resolve -> HTTP 200"
+
 prune_backups
 
 echo "==> Done. Live at $APP_URL"

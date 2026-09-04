@@ -82,6 +82,151 @@ describe("shopifyFetch", () => {
     await api.shopifyFetch("https://shop.example/x", { timeoutMs: 5000 });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+
+  it("applies a default AbortController even when the caller passes no timeoutMs at all", async () => {
+    // api came from beforeEach with no timeoutMs override — production default applies.
+    fetchMock.mockImplementationOnce((url, opts) => {
+      expect(opts.signal).toBeInstanceOf(AbortSignal);
+      return Promise.resolve(jsonResponse({ ok: true }));
+    });
+    await api.shopifyFetch("https://shop.example/x");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("opts out of the default timeout when timeoutMs: 0 is passed explicitly", async () => {
+    fetchMock.mockImplementationOnce((url, opts) => {
+      expect(opts.signal).toBeUndefined();
+      return Promise.resolve(jsonResponse({ ok: true }));
+    });
+    await api.shopifyFetch("https://shop.example/x", { timeoutMs: 0 });
+  });
+});
+
+// The 2026-09-01 incident: a transfer request's outbound Shopify call
+// stalled with no response and no thrown error, so the whole HTTP request
+// (and the merchant-facing connection) hung until nginx's own timeout fired
+// a 504 roughly 15 minutes later. `fetchWithRetry` previously let a thrown
+// fetch error (including our own AbortError) escape uncaught, bypassing the
+// retry loop entirely — these tests pin the fix: a hung call aborts at the
+// configured timeout AND is retried with the same backoff a 429 gets.
+describe("shopifyFetch — timeout handling", () => {
+  let sleep;
+
+  beforeEach(() => {
+    sleep = vi.fn().mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  // A fetch mock that never resolves on its own — only settles when its
+  // AbortSignal fires, exactly like a real hung network call under undici.
+  function hangingFetch() {
+    return vi.fn((url, opts) => new Promise((resolve, reject) => {
+      opts.signal.addEventListener("abort", () => {
+        const err = new Error("This operation was aborted");
+        err.name = "AbortError";
+        reject(err);
+      });
+    }));
+  }
+
+  it("aborts a hung request at the configured timeout and retries with 429-style backoff", async () => {
+    const fetchMock = hangingFetch();
+    global.fetch = fetchMock;
+    const api = createShopifyApi({ sleep, maxRetries: 2, timeoutMs: 30 });
+
+    await expect(api.shopifyFetch("https://shop.example/x")).rejects.toThrow(/timed out after 30ms/);
+
+    // 1 initial + 2 retries = 3 attempts, each one aborted at 30ms.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    // Same exponential ladder as 429 handling: 1000ms, 2000ms.
+    expect(sleep.mock.calls.map((c) => c[0])).toEqual([1000, 2000]);
+  });
+
+  it("succeeds once a retry after a timeout gets a real response", async () => {
+    let call = 0;
+    global.fetch = vi.fn((url, opts) => {
+      call += 1;
+      if (call === 1) {
+        return new Promise((resolve, reject) => {
+          opts.signal.addEventListener("abort", () => {
+            const err = new Error("aborted");
+            err.name = "AbortError";
+            reject(err);
+          });
+        });
+      }
+      return Promise.resolve(jsonResponse({ ok: true }));
+    });
+    const api = createShopifyApi({ sleep, maxRetries: 2, timeoutMs: 30 });
+
+    const res = await api.shopifyFetch("https://shop.example/x");
+    expect(res.status).toBe(200);
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledTimes(1);
+    expect(sleep).toHaveBeenCalledWith(1000);
+  });
+
+  it("does not retry-storm: a genuinely dead upstream still gives up after maxRetries with a clear error", async () => {
+    const fetchMock = hangingFetch();
+    global.fetch = fetchMock;
+    const api = createShopifyApi({ sleep, maxRetries: 5, timeoutMs: 30 });
+
+    await expect(api.shopifyFetch("https://shop.example/x")).rejects.toThrow(/gave up after 5 retries/);
+
+    expect(fetchMock).toHaveBeenCalledTimes(6); // 1 initial + 5 retries, not unbounded
+    expect(sleep.mock.calls.map((c) => c[0])).toEqual([1000, 2000, 4000, 8000, 16000]);
+  });
+
+  it("retries a plain network failure (not just our own timeout abort) the same way", async () => {
+    global.fetch = vi.fn()
+      .mockRejectedValueOnce(new Error("ECONNRESET"))
+      .mockResolvedValueOnce(jsonResponse({ ok: true }));
+    const api = createShopifyApi({ sleep, maxRetries: 2, timeoutMs: 30 });
+
+    const res = await api.shopifyFetch("https://shop.example/x");
+    expect(res.status).toBe(200);
+    expect(sleep).toHaveBeenCalledTimes(1);
+  });
+
+  it("propagates a non-timeout error's own message after exhausting retries, rather than a generic one", async () => {
+    global.fetch = vi.fn().mockRejectedValue(new Error("ECONNRESET"));
+    const api = createShopifyApi({ sleep, maxRetries: 1, timeoutMs: 30 });
+
+    await expect(api.shopifyFetch("https://shop.example/x")).rejects.toThrow(/ECONNRESET/);
+  });
+
+  it("retries a hung shopifyGraphql call the same way as a hung REST call", async () => {
+    const fetchMock = hangingFetch();
+    global.fetch = fetchMock;
+    const api = createShopifyApi({ sleep, maxRetries: 1, timeoutMs: 30 });
+
+    await expect(
+      api.shopifyGraphql("shop.myshopify.com", "tok", "{ ok }", {}, "2025-10"),
+    ).rejects.toThrow(/timed out after 30ms/);
+    expect(fetchMock).toHaveBeenCalledTimes(2); // 1 initial + 1 retry
+  });
+
+  it("uses the production default of 30000ms when no override is configured anywhere", async () => {
+    vi.useFakeTimers();
+    // maxRetries: 0 isolates the assertion to the timeout value itself,
+    // independent of the retry ladder covered by the tests above.
+    const api = createShopifyApi({ sleep, maxRetries: 0 });
+    global.fetch = vi.fn((url, opts) => new Promise((resolve, reject) => {
+      opts.signal.addEventListener("abort", () => {
+        const err = new Error("aborted");
+        err.name = "AbortError";
+        reject(err);
+      });
+    }));
+
+    const pending = expect(api.shopifyFetch("https://shop.example/x")).rejects.toThrow(/timed out after 30000ms/);
+    await vi.advanceTimersByTimeAsync(30000);
+    await pending;
+  });
 });
 
 describe("shopifyGraphql", () => {

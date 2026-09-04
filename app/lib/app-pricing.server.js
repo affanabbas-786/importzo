@@ -59,6 +59,36 @@ export function planSelectionUrl({ shop, appHandle = DEFAULT_APP_HANDLE }) {
 }
 
 /**
+ * The `returnUrl` to hand appSubscriptionCreate for an EMBEDDED app.
+ *
+ * This is where Shopify sends the merchant's top-level browser after they
+ * approve (or decline) the charge on Shopify's hosted approval screen. It
+ * MUST be an embedded admin URL — `https://admin.shopify.com/store/<store>/
+ * apps/<client-id><path>` — so the merchant lands back inside the Shopify
+ * admin with the app re-framed and App Bridge able to initialise.
+ *
+ * The bug this fixes: passing the app's own bare origin
+ * (`https://importzo.dazzletech.co/app/billing`) here meant Shopify returned
+ * the merchant to the app OUTSIDE the admin iframe, with no shop/host/
+ * id_token — so `authenticate.admin()` in the /app loader threw a 410 and
+ * the merchant saw a blank page instead of the app. (App Store review
+ * rejection, "blank page after charge approval".)
+ *
+ * `apiKey` is the app's client id (SHOPIFY_API_KEY / shopify.app.toml
+ * client_id) — that is the segment Shopify's admin app router keys on, and
+ * the same value the SDK's own buildEmbeddedAppUrl uses. `path` is the
+ * in-app route to land on, defaulting to the Billing page the merchant
+ * started from.
+ *
+ * Pure and Shopify-client-free so the URL shape stays unit-testable.
+ */
+export function embeddedAppReturnUrl({ shop, apiKey, path = "/app/billing" }) {
+  const store = storeHandleFromShop(shop);
+  const cleanPath = path ? (path.startsWith("/") ? path : `/${path}`) : "";
+  return `https://admin.shopify.com/store/${store}/apps/${apiKey}${cleanPath}`;
+}
+
+/**
  * The app's public handle, in order of preference:
  *   1. SHOPIFY_APP_HANDLE — an explicit override, for when the dashboard
  *      handle and the App Store listing ever diverge.

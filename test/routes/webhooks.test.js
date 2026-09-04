@@ -37,6 +37,20 @@ const { db, webhookMock, shopPlanRows } = vi.hoisted(() => {
       shopPlan: {
         deleteMany: vi.fn(async () => ({ count: 1 })),
         updateMany: vi.fn(async () => ({ count: 1 })),
+        // shop/redact's complimentary-grant check reads this before deciding
+        // whether to hard-delete the row or just strip its PII.
+        findUnique: vi.fn(async ({ where: { shop } }) => shopPlanRows.get(shop) || null),
+        // Phase 12: partner-linking.server.js's cascadeRevokePartnerLinks
+        // looks up every row linked to a payer this way.
+        findMany: vi.fn(async ({ where, select } = {}) => {
+          const rows = [...shopPlanRows.values()].filter(
+            (r) => Object.entries(where || {}).every(([k, v]) => r[k] === v),
+          );
+          if (!select) return rows.map((r) => ({ ...r }));
+          return rows.map((r) => Object.fromEntries(
+            Object.keys(select).filter((k) => select[k]).map((k) => [k, r[k]]),
+          ));
+        }),
         // Phase 7: webhooks.app_subscriptions.update.jsx calls setShopTier
         // (usage.server.js), which goes through upsert-then-update — stateful
         // so the audit's tier-mapping tests can read back what was written.
@@ -239,6 +253,47 @@ describe("GDPR — shop/redact", () => {
     expect(db.transferLogEntry.deleteMany).toHaveBeenCalledWith({ where: { jobId: { in: ["job-1", "job-2"] } } });
   });
 
+  it("retains a complimentary-grant ShopPlan row but erases its PII", async () => {
+    // A complimentary Pro grant (tier=pro, subscriptionStatus=COMPLIMENTARY)
+    // has no Shopify AppSubscription behind it — this row IS the grant.
+    // Hard-deleting it silently revokes a deliberate permanent free grant if
+    // the merchant reinstalls, so shop/redact strips the personal data and
+    // keeps the grant state instead.
+    shopPlanRows.set(SHOP, {
+      id: "plan-1", shop: SHOP, tier: "pro", subscriptionId: null,
+      subscriptionStatus: "COMPLIMENTARY", shopOwnerEmail: "owner@example.com",
+      recordsUsed: 120, aiCallsUsed: 4,
+    });
+
+    const response = await shopRedact({ request: webhookRequest() });
+    expect(response.status).toBe(200);
+
+    // Row NOT hard-deleted...
+    expect(db.shopPlan.deleteMany).not.toHaveBeenCalled();
+    // ...PII erased, grant state untouched.
+    const row = shopPlanRows.get(SHOP);
+    expect(row.shopOwnerEmail).toBeNull();
+    expect(row.recordsUsed).toBe(0);
+    expect(row.aiCallsUsed).toBe(0);
+    expect(row.tier).toBe("pro");
+    expect(row.subscriptionStatus).toBe("COMPLIMENTARY");
+
+    // Every other table is still erased as normal.
+    expect(db.session.deleteMany).toHaveBeenCalledWith({ where: { shop: SHOP } });
+    expect(db.migrationJob.deleteMany).toHaveBeenCalledWith({ where: { shop: SHOP } });
+  });
+
+  it("still hard-deletes a normal (non-complimentary) ShopPlan row", async () => {
+    shopPlanRows.set(SHOP, {
+      id: "plan-1", shop: SHOP, tier: "free", subscriptionId: null,
+      subscriptionStatus: null, shopOwnerEmail: "owner@example.com",
+    });
+
+    await shopRedact({ request: webhookRequest() });
+
+    expect(db.shopPlan.deleteMany).toHaveBeenCalledWith({ where: { shop: SHOP } });
+  });
+
   it("returns 200 even on partial failure, but logs the failure loudly", async () => {
     db.storeBackup.deleteMany.mockRejectedValueOnce(new Error("no such table"));
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -350,6 +405,28 @@ describe("app/uninstalled", () => {
 
   it("survives the shopPlan table being absent on an older deployment", async () => {
     db.shopPlan.updateMany.mockRejectedValueOnce(new Error("no such table"));
+    const response = await appUninstalled({ request: webhookRequest() });
+    expect(response.status).toBe(200);
+  });
+
+  // Phase 12 — Partner/Agency linking. Uninstalling doesn't reliably also
+  // fire app_subscriptions/update, so the cascade has to run from here too.
+  it("reverts every store this shop was funding as a partner payer", async () => {
+    shopPlanRows.set("b1.myshopify.com", { id: "plan-b1", shop: "b1.myshopify.com", tier: "pro", subscriptionStatus: "PARTNER_LINKED", subscriptionId: null, partnerLinkedTo: SHOP });
+    shopPlanRows.set("b2.myshopify.com", { id: "plan-b2", shop: "b2.myshopify.com", tier: "pro", subscriptionStatus: "PARTNER_LINKED", subscriptionId: null, partnerLinkedTo: SHOP });
+    shopPlanRows.set("unrelated.myshopify.com", { id: "plan-u", shop: "unrelated.myshopify.com", partnerLinkedTo: "someone-else.myshopify.com" });
+
+    await appUninstalled({ request: webhookRequest() });
+
+    expect(shopPlanRows.get("b1.myshopify.com")).toMatchObject({ tier: "free", subscriptionStatus: null, partnerLinkedTo: null });
+    expect(shopPlanRows.get("b2.myshopify.com")).toMatchObject({ tier: "free", subscriptionStatus: null, partnerLinkedTo: null });
+    // A different payer's partner is untouched.
+    expect(shopPlanRows.get("unrelated.myshopify.com").partnerLinkedTo).toBe("someone-else.myshopify.com");
+  });
+
+  it("survives the partner-link cascade failing", async () => {
+    shopPlanRows.set("b1.myshopify.com", { id: "plan-b1", shop: "b1.myshopify.com", partnerLinkedTo: SHOP });
+    db.shopPlan.findMany.mockRejectedValueOnce(new Error("db locked"));
     const response = await appUninstalled({ request: webhookRequest() });
     expect(response.status).toBe(200);
   });
@@ -482,5 +559,88 @@ describe("app_subscriptions/update", () => {
     await appSubscriptionsUpdate({ request: webhookRequest() });
 
     expect(shopPlanRows.get(SHOP)).toMatchObject({ tier: "free", subscriptionId: null });
+  });
+
+  // ── Phase 12 — Partner/Agency linking ──────────────────────────────────
+
+  it("cascades: every store this payer was funding reverts when its own subscription lapses", async () => {
+    shopPlanRows.set(SHOP, { id: "plan-1", shop: SHOP, tier: "agency", subscriptionId: "gid://shopify/AppSubscription/agency-1", subscriptionStatus: "ACTIVE" });
+    shopPlanRows.set("b1.myshopify.com", { id: "plan-b1", shop: "b1.myshopify.com", tier: "pro", subscriptionStatus: "PARTNER_LINKED", subscriptionId: null, partnerLinkedTo: SHOP });
+    shopPlanRows.set("b2.myshopify.com", { id: "plan-b2", shop: "b2.myshopify.com", tier: "pro", subscriptionStatus: "PARTNER_LINKED", subscriptionId: null, partnerLinkedTo: SHOP });
+
+    mockWebhook({ admin_graphql_api_id: "gid://shopify/AppSubscription/agency-1", name: "Importzo Agency", status: "CANCELLED" });
+    await appSubscriptionsUpdate({ request: webhookRequest() });
+
+    expect(shopPlanRows.get(SHOP)).toMatchObject({ tier: "free" });
+    expect(shopPlanRows.get("b1.myshopify.com")).toMatchObject({ tier: "free", subscriptionStatus: null, partnerLinkedTo: null });
+    expect(shopPlanRows.get("b2.myshopify.com")).toMatchObject({ tier: "free", subscriptionStatus: null, partnerLinkedTo: null });
+  });
+
+  // Explicit regression pin: a partner that ALSO holds its own independently
+  // active Shopify subscription must keep it — untouched, tier and all —
+  // when the PAYER (not the partner itself) cancels. Only the link pointer
+  // is cleared. See partner-linking.server.js's unlinkPartner: it only
+  // overwrites tier/subscriptionStatus/subscriptionId for a plain
+  // partner-linked row (isPartnerLinked(row.subscriptionStatus)), never for
+  // one carrying its own real subscription.
+  it("leaves an independently-paying partner's OWN tier and subscription completely untouched when the payer cancels", async () => {
+    shopPlanRows.set(SHOP, { id: "plan-1", shop: SHOP, tier: "agency", subscriptionId: "gid://shopify/AppSubscription/agency-1", subscriptionStatus: "ACTIVE" });
+    shopPlanRows.set("independent-b.myshopify.com", {
+      id: "plan-b", shop: "independent-b.myshopify.com", tier: "pro",
+      subscriptionId: "gid://shopify/AppSubscription/own-b-sub", subscriptionStatus: "ACTIVE",
+      partnerLinkedTo: SHOP,
+    });
+
+    mockWebhook({ admin_graphql_api_id: "gid://shopify/AppSubscription/agency-1", name: "Importzo Agency", status: "CANCELLED" });
+    await appSubscriptionsUpdate({ request: webhookRequest() });
+
+    expect(shopPlanRows.get(SHOP)).toMatchObject({ tier: "free" }); // the payer itself does downgrade
+    expect(shopPlanRows.get("independent-b.myshopify.com")).toMatchObject({
+      tier: "pro", // NOT downgraded to any "partner-linked floor" or Free
+      subscriptionId: "gid://shopify/AppSubscription/own-b-sub", // untouched
+      subscriptionStatus: "ACTIVE", // untouched
+      partnerLinkedTo: null, // only the link itself is cleared
+    });
+  });
+
+  // A partner-linked shop also carries subscriptionId: null, the same shape
+  // a complimentary grant has — without the isPartnerLinked skip-guard this
+  // would incorrectly match the `!current.subscriptionId` branch and get
+  // wrongly downgraded by an event that describes a subscription it was
+  // never backed by.
+  it("leaves a partner-linked grant alone when an unrelated subscription goes inactive", async () => {
+    shopPlanRows.set(SHOP, { id: "plan-1", shop: SHOP, tier: "pro", subscriptionId: null, subscriptionStatus: "PARTNER_LINKED", partnerLinkedTo: "payer.myshopify.com" });
+    mockWebhook({ admin_graphql_api_id: "gid://shopify/AppSubscription/stray", name: "Importzo Pro", status: "CANCELLED" });
+    const response = await appSubscriptionsUpdate({ request: webhookRequest() });
+
+    expect(response.status).toBe(200);
+    expect(shopPlanRows.get(SHOP)).toMatchObject({ tier: "pro", subscriptionStatus: "PARTNER_LINKED" });
+  });
+
+  // The already-paid-B case: a partner that ALSO holds its own independent
+  // subscription (linkPartner never overwrites one). When that subscription
+  // itself lapses, this shop's Pro access is still funded by its payer, so
+  // it should fall back to the partner-linked grant, not all the way to
+  // Free.
+  it("falls back to the partner-linked grant, not Free, when an independently-paying partner's OWN subscription lapses", async () => {
+    shopPlanRows.set(SHOP, {
+      id: "plan-1", shop: SHOP, tier: "pro",
+      subscriptionId: "gid://shopify/AppSubscription/own-1", subscriptionStatus: "ACTIVE",
+      partnerLinkedTo: "payer.myshopify.com",
+    });
+    mockWebhook({ admin_graphql_api_id: "gid://shopify/AppSubscription/own-1", name: "Importzo Pro", status: "CANCELLED" });
+    await appSubscriptionsUpdate({ request: webhookRequest() });
+
+    expect(shopPlanRows.get(SHOP)).toMatchObject({ tier: "pro", subscriptionStatus: "PARTNER_LINKED", subscriptionId: null });
+  });
+
+  it("survives the partner-link cascade failing", async () => {
+    shopPlanRows.set(SHOP, { id: "plan-1", shop: SHOP, tier: "pro", subscriptionId: "gid://shopify/AppSubscription/pro-1", subscriptionStatus: "ACTIVE" });
+    db.shopPlan.findMany.mockRejectedValueOnce(new Error("db locked"));
+    mockWebhook({ admin_graphql_api_id: "gid://shopify/AppSubscription/pro-1", name: "Importzo Pro", status: "CANCELLED" });
+    const response = await appSubscriptionsUpdate({ request: webhookRequest() });
+
+    expect(response.status).toBe(200);
+    expect(shopPlanRows.get(SHOP)).toMatchObject({ tier: "free" }); // the payer's own downgrade still happened
   });
 });

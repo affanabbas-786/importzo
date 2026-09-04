@@ -5,7 +5,9 @@ import {
   BillingInterval,
   shopifyApp,
 } from "@shopify/shopify-app-react-router/server";
-import { PLANS, PLAN_IDS, BILLING_PLAN_KEY, BILLING_INTERVAL, TRIAL_DAYS } from "./lib/plans.js";
+import {
+  PLANS, PLAN_IDS, BILLING_PLAN_KEY, BILLING_INTERVAL, TRIAL_DAYS,
+} from "./lib/plans.js";
 import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prisma";
 import prisma from "./db.server";
 import { assertEncryptionConfigured } from "./utils/encryption.server";
@@ -120,7 +122,7 @@ function recurringPlan({ tier, interval }) {
   };
 }
 
-const BILLING_CONFIG = Object.fromEntries(
+const BASE_BILLING_CONFIG = Object.fromEntries(
   [PLAN_IDS.PRO, PLAN_IDS.AGENCY].flatMap((tier) =>
     [BILLING_INTERVAL.MONTHLY, BILLING_INTERVAL.YEARLY].map((interval) => [
       BILLING_PLAN_KEY[tier][interval],
@@ -128,6 +130,12 @@ const BILLING_CONFIG = Object.fromEntries(
     ]),
   ),
 );
+
+// Phase 12 — Partner/Agency linking is flat-priced: Pro ($15) covers the
+// payer + 1 companion, Agency ($35) the payer + 5, and neither price moves
+// with companion count. So there are no per-count plan keys — the four
+// base entries above are the whole billing config.
+const BILLING_CONFIG = BASE_BILLING_CONFIG;
 
 // ═══════════════════════════════════════════════════════════════════
 // API secret rotation — dual webhook verification

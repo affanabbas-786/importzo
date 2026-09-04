@@ -1,14 +1,15 @@
 import { describe, it, expect } from "vitest";
 import {
-  PLAN_IDS, PLANS, PLAN_ORDER, SHOPIFY_PLAN_NAME, AGENCY_MIN_STORES, AI_MONTHLY_CALL_CAP,
+  PLAN_IDS, PLANS, PLAN_ORDER, SHOPIFY_PLAN_NAME, AI_MONTHLY_CALL_CAP,
   isValidPlanId, getPlan, isUnlimited, scheduledSyncAllowed, isBillablePlanId, builtInAiAllowed,
+  maxPartnersFor, isPartnerLinked, PARTNER_LINKED_STATUS,
 } from "./plans.js";
 
 describe("plans.js", () => {
   it("defines exactly the three plans in the product spec, with the specified prices", () => {
     expect(PLANS.free.price).toBe(0);
     expect(PLANS.pro.price).toBe(15);
-    expect(PLANS.agency.price).toBe(10);
+    expect(PLANS.agency.price).toBe(35);
   });
 
   it("defines the specified record limits", () => {
@@ -33,10 +34,12 @@ describe("plans.js", () => {
     for (const n of names) expect(n).toMatch(/^Importzo /);
   });
 
-  it("marks only Agency as requiring eligibility", () => {
-    expect(PLANS.free.requiresEligibility).toBeFalsy();
-    expect(PLANS.pro.requiresEligibility).toBeFalsy();
-    expect(PLANS.agency.requiresEligibility).toBe(true);
+  it("has no store-count eligibility gate on any plan", () => {
+    // Removed: the "Agency unlocks at 3+ stores" model. Any Pro/Agency payer
+    // links companions directly by domain — there is no gate.
+    for (const plan of Object.values(PLANS)) {
+      expect(plan.requiresEligibility).toBeUndefined();
+    }
   });
 
   it("orders plans Free -> Pro -> Agency", () => {
@@ -66,8 +69,9 @@ describe("plans.js", () => {
     expect(isBillablePlanId("bogus")).toBe(false);
   });
 
-  it("AGENCY_MIN_STORES matches the product spec (3+ stores)", () => {
-    expect(AGENCY_MIN_STORES).toBe(3);
+  it("no longer exports a store-count minimum — the 3-store gate is gone", async () => {
+    const mod = await import("./plans.js");
+    expect(mod.AGENCY_MIN_STORES).toBeUndefined();
   });
 
   it("only enables built-in AI on Pro and Agency, same as scheduled sync", () => {
@@ -78,5 +82,33 @@ describe("plans.js", () => {
 
   it("AI_MONTHLY_CALL_CAP matches the product spec (500/month, shared)", () => {
     expect(AI_MONTHLY_CALL_CAP).toBe(500);
+  });
+
+  // Phase 12 — Partner/Agency linking, flat-priced.
+  it("caps companion slots per the product spec: Free 0, Pro 1, Agency 5", () => {
+    expect(maxPartnersFor(PLAN_IDS.FREE)).toBe(0);
+    expect(maxPartnersFor(PLAN_IDS.PRO)).toBe(1);
+    expect(maxPartnersFor(PLAN_IDS.AGENCY)).toBe(5);
+  });
+
+  it("prices Pro and Agency flat — no per-companion add-on helpers exist", async () => {
+    // Flat: $15 covers payer + 1 companion, $35 covers payer + 5.
+    expect(PLANS.pro.price).toBe(15);
+    expect(PLANS.agency.price).toBe(35);
+    const mod = await import("./plans.js");
+    expect(mod.agencyPartnerPrice).toBeUndefined();
+    expect(mod.agencyPartnerBillingPlanKey).toBeUndefined();
+    expect(mod.AGENCY_PARTNER_ADDON).toBeUndefined();
+  });
+
+  it("maxPartnersFor falls back to 0 for an unknown tier rather than throwing", () => {
+    expect(maxPartnersFor("bogus")).toBe(0);
+  });
+
+  it("isPartnerLinked recognises only the exact marker string", () => {
+    expect(isPartnerLinked(PARTNER_LINKED_STATUS)).toBe(true);
+    expect(isPartnerLinked("ACTIVE")).toBe(false);
+    expect(isPartnerLinked("COMPLIMENTARY")).toBe(false);
+    expect(isPartnerLinked(null)).toBe(false);
   });
 });

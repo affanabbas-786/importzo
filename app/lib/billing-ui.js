@@ -14,7 +14,7 @@
 // in service of that gap.
 // ═══════════════════════════════════════════════════════════════════
 
-import { PLAN_IDS, PLANS, PLAN_ORDER, BILLING_INTERVAL, isBillablePlanId } from "./plans.js";
+import { PLAN_IDS, PLANS, PLAN_ORDER, BILLING_INTERVAL, TRIAL_DAYS, isBillablePlanId } from "./plans.js";
 
 /**
  * Copy for the overlay shown while the browser is on its way to Shopify.
@@ -35,67 +35,42 @@ export const REDIRECT_OVERLAY_COPY = Object.freeze({
 });
 
 /**
- * Which plan gets the featured treatment, for THIS shop.
+ * Which plan gets the featured treatment.
  *
- * A function of eligibility rather than a constant, and that is the whole
- * point: this page knows something the public marketing site cannot. The
- * landing page has no idea who is reading it, so it features Pro for
- * everyone. Here we have the shop's real connected-store count, so each
- * merchant can be pointed at the plan that is genuinely best for them.
- *
- *   3+ connected stores  -> Agency. Identical features to Pro at $10/store
- *                           instead of $15, so for this merchant it is
- *                           strictly the better deal and recommending
- *                           anything else would be costing them money.
- *   fewer than that      -> Pro. Agency is not usable by them in practice;
- *                           featuring a card that carries its own "unlocks at
- *                           3+ stores" warning is pointing a merchant at
- *                           something they cannot have.
- *
- * Deliberately NOT a function of the merchant's current tier. The featured
- * card marks the best-fit plan, not the one they are already on — that is what
- * the "Current plan" pill says, and one card can legitimately carry both.
+ * Pro, always. It's the entry paid tier and the right recommendation for the
+ * typical single-store merchant; a multi-store merchant reads the Agency
+ * card's "covers this store plus 5 companion stores" and picks it on its own
+ * merits. This used to be a function of a "3+ connected stores" eligibility
+ * check — that gate never existed in the actual feature (any Pro/Agency
+ * payer links companions directly by domain), so it and all its copy are
+ * gone.
  */
-export function featuredPlanId(eligibility) {
-  return eligibility?.eligible ? PLAN_IDS.AGENCY : PLAN_IDS.PRO;
+export function featuredPlanId() {
+  return PLAN_IDS.PRO;
+}
+
+/** Whether a given card gets the featured chrome — border, lift, badge. */
+export function isFeaturedPlan(planId) {
+  return planId === featuredPlanId();
 }
 
 /**
- * Whether a given card gets the featured chrome — border, lift, badge.
- *
- * Note this changes the CHROME only. The amber "unlocks at 3+ stores" notice
- * inside the Agency card is driven separately, off plan.requiresEligibility,
- * so an ineligible merchant still sees that warning on an unfeatured card.
- */
-export function isFeaturedPlan(planId, eligibility) {
-  return planId === featuredPlanId(eligibility);
-}
-
-/**
- * Left-to-right order the plan cards are RENDERED in, keyed by which plan is
- * currently featured.
+ * Left-to-right order the plan cards are RENDERED in.
  *
  * Deliberately not PLAN_ORDER. That array is the price/rank ladder — Free is
  * below Pro is below Agency — and isUpgradeFrom() reads positions out of it to
  * decide whether a move is an upgrade or a switch. Reordering it to suit the
  * layout would silently relabel "Upgrade to Agency" as "Switch to Agency".
- * They are different orderings of the same three ids and they are kept apart
- * on purpose — note that the Pro-featured row below happens to match
- * PLAN_ORDER today, and is still spelled out rather than aliased to it, so a
- * future change to the ranking cannot quietly reshuffle the layout.
  *
- * The single rule: the featured plan sits in the middle. A highlighted plan at
- * the end of a row reads as an afterthought; in the middle it reads as the
- * recommendation. Free stays leftmost either way so the row still opens at $0.
+ * The single rule: the featured plan (Pro) sits in the middle. A highlighted
+ * plan at the end of a row reads as an afterthought; in the middle it reads
+ * as the recommendation. Free stays leftmost so the row still opens at $0.
  */
-export const PLAN_DISPLAY_ORDER = Object.freeze({
-  [PLAN_IDS.AGENCY]: Object.freeze([PLAN_IDS.FREE, PLAN_IDS.AGENCY, PLAN_IDS.PRO]),
-  [PLAN_IDS.PRO]: Object.freeze([PLAN_IDS.FREE, PLAN_IDS.PRO, PLAN_IDS.AGENCY]),
-});
+export const PLAN_DISPLAY_ORDER = Object.freeze([PLAN_IDS.FREE, PLAN_IDS.PRO, PLAN_IDS.AGENCY]);
 
-/** The render order for this shop, with its featured plan in the middle. */
-export function planDisplayOrder(eligibility) {
-  return PLAN_DISPLAY_ORDER[featuredPlanId(eligibility)];
+/** The render order for the plan grid, with the featured plan in the middle. */
+export function planDisplayOrder() {
+  return PLAN_DISPLAY_ORDER;
 }
 
 /**
@@ -106,7 +81,7 @@ export function planDisplayOrder(eligibility) {
  * explained by the overlay and the section blurb, not crammed into a button.
  *
  * Moving from Agency to Pro is the one direction that is not an upgrade
- * (Agency is the cheaper per-store rate), so it says "Switch to" instead of
+ * (Agency sits above Pro in PLAN_ORDER), so it says "Switch to" instead of
  * telling a merchant they are upgrading to something they are not.
  */
 export function planActionLabel(plan, currentTier) {
@@ -134,10 +109,20 @@ export function isUpgradeFrom(fromId, toId) {
  * to CANCEL a subscription, which is a different action on a different part
  * of Shopify's page. Neither is the paid upgrade flow, so neither gets the
  * paid upgrade button. See freeCardLink for what they get instead.
+ *
+ * BOTH "select" (a genuine tier change) and "switch" (same tier, other
+ * billing period) are real, billable AppSubscription changes that go through
+ * the same approval flow — so both count. The bug this line once had:
+ * checking only for "select" meant a merchant on Pro monthly who toggled to
+ * yearly got an enabled "Switch to yearly" button whose click did nothing,
+ * because beginPlanSelection asked this function first and it said no. (App
+ * Store review rejection, "monthly/yearly toggle unresponsive on an active
+ * subscription".)
  */
 export function offersPlanSelection({ planId, currentTier, interval, currentInterval }) {
   if (planId === PLAN_IDS.FREE) return false;
-  return planCta({ planId, currentTier, interval, currentInterval }).kind === "select";
+  const kind = planCta({ planId, currentTier, interval, currentInterval }).kind;
+  return kind === "select" || kind === "switch";
 }
 
 /**
@@ -161,8 +146,13 @@ export function offersPlanSelection({ planId, currentTier, interval, currentInte
  *   downgrade — the Free card, for a shop on a paid plan.
  *   included  — the Free card, for a shop already on Free. Disabled.
  *   select    — anything else: a genuine upgrade or tier change.
+ *
+ * `trialEligible` only changes the "select" label — from "Upgrade to X" to
+ * "Start free trial" — since that is the one action that actually begins a
+ * trial. A period switch on a plan the merchant already holds is past the
+ * trial, so it keeps "Switch to …".
  */
-export function planCta({ planId, currentTier, interval, currentInterval }) {
+export function planCta({ planId, currentTier, interval, currentInterval, trialEligible = false }) {
   if (planId === PLAN_IDS.FREE) {
     return currentTier === PLAN_IDS.FREE
       ? { kind: "included", label: "Included", disabled: true }
@@ -181,7 +171,11 @@ export function planCta({ planId, currentTier, interval, currentInterval }) {
     };
   }
 
-  return { kind: "select", label: `Upgrade to ${PLANS[planId]?.label || planId}`, disabled: false };
+  return {
+    kind: "select",
+    label: trialEligible ? `Start ${TRIAL_DAYS}-day free trial` : `Upgrade to ${PLANS[planId]?.label || planId}`,
+    disabled: false,
+  };
 }
 
 /**
@@ -197,12 +191,19 @@ export function planFeatures(plan) {
     ? "Unlimited records per month"
     : `${plan.recordLimit.toLocaleString()} records per month`;
 
+  // Companion stores: from plan.maxPartners so the card can never claim a
+  // number plans.js doesn't actually grant. Free (0) gets no line.
+  const companions = plan.maxPartners > 0
+    ? `${plan.maxPartners} companion store${plan.maxPartners === 1 ? "" : "s"} included`
+    : null;
+
   return [
     records,
     plan.scheduledSync ? "Scheduled automatic sync" : "Manual imports",
     plan.builtInAi ? "Built-in AI mapping & enhancement" : "Bring your own AI key",
-    plan.requiresEligibility ? "Priority support for agencies" : plan.price > 0 ? "Priority email support" : "Email support",
-  ];
+    companions,
+    plan.price > 0 ? "Priority email support" : "Email support",
+  ].filter(Boolean);
 }
 
 /** Copy for the billing-period toggle above the cards. */

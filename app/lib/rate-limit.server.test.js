@@ -129,6 +129,14 @@ describe("POLICIES", () => {
     expect(POLICIES.restore.maxConcurrent).toBe(1);
     expect(POLICIES.rollback.maxConcurrent).toBe(1);
   });
+
+  // Phase 12 — Partner/Agency linking. Linking is direct by domain (no
+  // pairing code), so there is no brute-force surface and no bespoke tight
+  // policy — just the general partnerAdmin CRUD cap.
+  it("covers partner linking under the general partnerAdmin CRUD policy only", () => {
+    expect(POLICIES.partnerAdmin).toBeDefined();
+    expect(POLICIES.partnerLinkAttempt).toBeUndefined();
+  });
 });
 
 describe("enforcePolicy", () => {

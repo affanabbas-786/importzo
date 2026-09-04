@@ -43,12 +43,12 @@ function toStatus(row) {
     scheduledSyncAllowed: !!plan.scheduledSync,
     subscriptionId: row.subscriptionId || null,
     subscriptionStatus: row.subscriptionStatus || null,
-    // Phase 8 — on Agency pricing without meeting the 3-store requirement.
-    // Carried on the usage status (rather than recomputed) so Settings and
-    // any other page already loading usage can surface the notice for free;
-    // establishing it needs a Shopify round trip, and only app.billing.jsx
-    // pays that cost. See syncAgencyIneligibilityFlag.
-    agencyIneligibleSince: row.agencyIneligibleSince || null,
+    // Phase 12 — the payer's shop domain, if this shop is a linked companion.
+    // See partner-linking.server.js.
+    partnerLinkedTo: row.partnerLinkedTo || null,
+    // When this companion dismissed the "you were added" dashboard banner
+    // (null while unacknowledged, so the banner still shows).
+    partnerLinkNoticeDismissedAt: row.partnerLinkNoticeDismissedAt || null,
   };
 }
 

@@ -1,5 +1,6 @@
 import { authenticateWebhook } from "../lib/webhook-auth.server";
 import db from "../db.server";
+import { cascadeRevokePartnerLinks } from "../lib/partner-linking.server";
 
 export const action = async ({ request }) => {
   let shop, topic;
@@ -45,17 +46,27 @@ export const action = async ({ request }) => {
       console.warn(`[app/uninstalled] ${shop}: could not disable scheduled syncs:`, err?.message);
     }
 
-    // Phase 5: marks this shop's row as no longer installed so it drops out
-    // of Agency eligibility's "stores with Importzo installed" count for
-    // every other shop sharing its owner email (agency-eligibility.server.js
-    // filters on uninstalledAt: null) — without waiting for shop/redact,
-    // which doesn't hard-delete the row for another 48h. updateMany (not
+    // Phase 5: marks this shop's row as no longer installed (uninstalledAt),
+    // which shop-data.server.js's 48h cleanup and partner-linking's
+    // companion checks both key on — without waiting for shop/redact, which
+    // doesn't hard-delete the row for another 48h. updateMany (not
     // update) so a shop that uninstalls before ever creating a ShopPlan row
     // is a silent no-op rather than a thrown "record not found".
     try {
       await db.shopPlan.updateMany({ where: { shop }, data: { uninstalledAt: new Date() } });
     } catch (err) {
       console.warn(`[app/uninstalled] ${shop}: could not mark shopPlan uninstalled:`, err?.message);
+    }
+
+    // Phase 12 — this shop may be a PAYER funding other stores' Pro access
+    // (see partner-linking.server.js). Uninstalling doesn't reliably also
+    // fire app_subscriptions/update, so this cascade has to run from here
+    // too, not just from that webhook.
+    try {
+      const { total, reverted } = await cascadeRevokePartnerLinks({ prisma: db, payerShop: shop });
+      if (total) console.log(`[app/uninstalled] ${shop}: reverted ${reverted}/${total} linked partner store(s)`);
+    } catch (err) {
+      console.warn(`[app/uninstalled] ${shop}: partner-link cascade failed:`, err?.message);
     }
   }
 

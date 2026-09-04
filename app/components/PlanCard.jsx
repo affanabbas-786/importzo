@@ -1,5 +1,5 @@
 import PropTypes from "prop-types";
-import { PLAN_IDS, AGENCY_MIN_STORES, BILLING_INTERVAL, yearlySavingsPercent } from "../lib/plans.js";
+import { PLAN_IDS, BILLING_INTERVAL, TRIAL_DAYS, yearlySavingsPercent } from "../lib/plans.js";
 import { planCta, planFeatures } from "../lib/billing-ui.js";
 import { BRAND } from "../lib/constants";
 
@@ -20,27 +20,40 @@ const { primary: P, secondary: S, font: F } = BRAND;
  * planCta() in billing-ui.js where it is unit-tested.
  */
 export function PlanCard({
-  plan, currentTier, currentInterval, period, eligibility, onSelect, onCancel, busy, featured = false,
+  plan, currentTier, currentInterval, period, trialEligible = false, onSelect, onCancel, busy, featured = false,
 }) {
   const isCurrent = plan.id === currentTier;
   const isFree = plan.id === PLAN_IDS.FREE;
   const yearly = period === BILLING_INTERVAL.YEARLY;
-  const needsEligibility = plan.requiresEligibility && !eligibility.eligible;
   const savings = yearlySavingsPercent(plan.id);
-  const cta = planCta({ planId: plan.id, currentTier, interval: period, currentInterval });
+  const cta = planCta({ planId: plan.id, currentTier, interval: period, currentInterval, trialEligible });
   // "Most Popular" is for the plan we're recommending — never on the card the
   // merchant is already paying for, where it would be recommending a purchase
   // they have already made.
   const showsPopular = featured && !isCurrent;
 
+  // The trial framing only makes sense on the card whose button actually
+  // STARTS a trial: a paid plan the merchant isn't on yet, and only when this
+  // shop is still trial-eligible. A period switch on the current plan, or a
+  // shop that has spent its trial, sees the plain recurring price.
+  const showsTrialPricing = !isFree && trialEligible && cta.kind === "select";
+
   // Free has no yearly variant, so it reads "Free" in both modes rather than
   // showing $0/yr — a price that is technically true and reads as a mistake.
-  const headlinePrice = isFree ? "Free" : yearly ? `$${plan.priceYearly}` : `$${plan.price}`;
+  const recurringAmount = yearly ? `$${plan.priceYearly}` : `$${plan.price}`;
+  const recurringUnit = yearly ? "/yr" : "/mo";
+  const headlinePrice = isFree
+    ? "Free"
+    : showsTrialPricing
+      ? "$0 today"
+      : recurringAmount;
   const priceCaption = isFree
     ? "Always free"
-    : yearly
-      ? `billed yearly · $${(plan.priceYearly / 12).toFixed(2)}/mo equivalent`
-      : `per month${plan.requiresEligibility ? " per store" : ""}, billed monthly`;
+    : showsTrialPricing
+      ? `then ${recurringAmount}${recurringUnit} after your ${TRIAL_DAYS}-day free trial`
+      : yearly
+        ? `billed yearly · $${(plan.priceYearly / 12).toFixed(2)}/mo equivalent`
+        : "per month, billed monthly";
 
   function handleClick() {
     if (cta.kind === "downgrade") return onCancel?.();
@@ -86,6 +99,17 @@ export function PlanCard({
         {!isFree && yearly && savings > 0 && (
           <p className="mt-0.5 text-xs font-semibold" style={{ color: S }}>You save {savings}%</p>
         )}
+        {/* Trial disclosure — required on the plan page and stated up front,
+            next to the price. When the price itself already reads "$0 today …
+            after your 7-day trial" that says it; this pill is for the cards
+            that don't (a period switch, or a shop past its trial) so the
+            offer is never hidden. */}
+        {!isFree && !showsTrialPricing && (
+          <p className="mt-1.5 inline-flex items-center gap-1 text-xs font-semibold rounded-md px-2 py-0.5"
+            style={{ background: "rgba(46,99,22,0.1)", color: S }}>
+            {TRIAL_DAYS}-day free trial
+          </p>
+        )}
 
         {/* Fixed height so a longer description on one card cannot push its
             CTA out of line with the other two. */}
@@ -106,13 +130,6 @@ export function PlanCard({
           ))}
         </ul>
 
-        {needsEligibility && (
-          <p className="mt-3 text-[11px] text-amber-700 font-medium leading-relaxed">
-            Unlocks at {AGENCY_MIN_STORES}+ stores — this account currently has {eligibility.storeCount}.
-            You can still choose it; we&apos;ll flag the account and may ask you to move to Pro.
-          </p>
-        )}
-
         <button
           type="button"
           disabled={cta.disabled || busy}
@@ -122,6 +139,16 @@ export function PlanCard({
         >
           {busy && !cta.disabled ? "Working…" : cta.label}
         </button>
+
+        {/* Directly answers the App Store review flag (trial terms not
+            surfaced) and cuts purchase hesitation — right under the button
+            the merchant is about to press, only where a trial is actually
+            what that press starts. */}
+        {showsTrialPricing && (
+          <p className="mt-2 text-[11px] text-gray-500 text-center leading-relaxed">
+            No charge for {TRIAL_DAYS} days. Cancel anytime before the trial ends.
+          </p>
+        )}
       </div>
     </div>
   );
@@ -164,9 +191,9 @@ PlanCard.propTypes = {
     recordLimit: PropTypes.number,
     scheduledSync: PropTypes.bool,
     builtInAi: PropTypes.bool,
+    maxPartners: PropTypes.number,
     tagline: PropTypes.string,
     description: PropTypes.string,
-    requiresEligibility: PropTypes.bool,
   }).isRequired,
   currentTier: PropTypes.string.isRequired,
   // What the shop is billed on today. Null when it is on Free, or when
@@ -175,15 +202,14 @@ PlanCard.propTypes = {
   currentInterval: PropTypes.string,
   // Which period the toggle is showing. Decides the price AND the charge.
   period: PropTypes.string.isRequired,
-  eligibility: PropTypes.shape({
-    eligible: PropTypes.bool,
-    storeCount: PropTypes.number,
-  }).isRequired,
+  // Whether this shop's next subscribe still comes with the 7-day trial —
+  // from the billing loader, which computes it from the same inputs the
+  // charge action uses. Drives the "$0 today" price framing and CTA copy.
+  trialEligible: PropTypes.bool,
   onSelect: PropTypes.func.isRequired,
   onCancel: PropTypes.func,
   busy: PropTypes.bool.isRequired,
-  // Purely visual. Decided by isFeaturedPlan(planId, eligibility) in the
-  // route — a function of the plan and the shop's store count, never of the
-  // merchant's current tier. See its doc comment.
+  // Purely visual. Decided by isFeaturedPlan(planId) in the route — Pro,
+  // always.
   featured: PropTypes.bool,
 };
